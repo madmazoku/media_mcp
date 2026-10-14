@@ -13,6 +13,7 @@ import time
 import base64
 import random
 import datetime
+import threading
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
 
@@ -23,6 +24,12 @@ from . import a1111_client
 def log(msg: str):
     sys.stderr.write(f"[image-engine] {msg}\n")
     sys.stderr.flush()
+
+_GLOBAL_PROGRESS_CALLBACK = None
+
+def set_global_progress_callback(cb):
+    global _GLOBAL_PROGRESS_CALLBACK
+    _GLOBAL_PROGRESS_CALLBACK = cb
 
 def snap_to_16(dim: int, default: int = 1024) -> int:
     try:
@@ -183,31 +190,118 @@ def generate_a1111_image(
     steps: int = 30,
     cfg_scale: float = 7.0,
     sampler_name: Optional[str] = None,
-    seed: int = -1
+    seed: int = -1,
+    highres_fix: bool = True
 ) -> Tuple[bool, Optional[str], Optional[str], Dict[str, Any]]:
     """
     Generates an image via Automatic1111 WebUI.
+    Automatically handles high-res generation and Lanczos downscaling for SDXL/Pony models
+    when target resolution is below SDXL optimal dimensions (e.g. 832x480).
     Returns: (success, file_path, base64_data, metadata)
     """
+    current_model = a1111_client.get_current_model() or ""
     if model_name:
-        current_model = a1111_client.get_current_model()
         if current_model and model_name.lower() not in current_model.lower():
             log(f"Switching A1111 model to: {model_name}")
             a1111_client.set_model(model_name)
+            current_model = model_name
+
+    model_lower = (str(model_name or "") + " " + str(current_model)).lower()
+    is_sdxl = any(x in model_lower for x in ["xl", "pony", "illustrious", "animagine"])
+    is_pony = any(x in model_lower for x in ["pony", "score_"]) or "score_" in prompt.lower()
+
+    # Pony character tag sanitization:
+    # In Pony Diffusion / Danbooru, '1girl' strictly means a human female girl.
+    # Combining '1girl' with 'unicorn/pony' produces an uncanny human girl face pasted onto horse legs.
+    is_mlp_pony = any(x in prompt.lower() for x in ["pony", "unicorn", "pegasus", "alicorn", "mare", "stallion", "filly", "colt"])
+    if is_pony and is_mlp_pony:
+        import re
+        prompt = re.sub(r'\b1girl\b,?\s*', '', prompt, flags=re.IGNORECASE).strip()
+        if "quadruped" not in prompt.lower() and "feral" not in prompt.lower():
+            prompt = f"{prompt}, quadruped, feral pony, cute pony muzzle, mlp:fim style"
+        # Enforce anti-human & anti-anthro tags in negative prompt
+        for neg_tag in ["anthro", "human", "1girl", "humanoid face", "human face", "bipedal"]:
+            if neg_tag not in negative_prompt.lower():
+                negative_prompt = f"{negative_prompt}, {neg_tag}"
+        log("Pony character detected: removed '1girl', enforced quadruped & anti-human tags")
+
+    # Pony XL models overbake and produce burnt contrast/halos at CFG >= 7.0.
+    # Optimal CFG for Pony XL is 5.0 - 5.5.
+    if is_pony and abs(cfg_scale - 7.0) < 0.01:
+        cfg_scale = 5.5
+        log(f"Auto-adjusting Pony CFG scale to {cfg_scale} to prevent overbaking")
+
+    # Pony-friendly negative prompt if default generic one is provided
+    if is_pony and negative_prompt == "ugly, deformed, low quality, bad anatomy":
+        negative_prompt = "score_4, score_5, score_6, worst quality, low quality, bad anatomy, bad hands, deformed, extra limbs, bipedal, anthro, human, 1girl, blurry"
+
+    if not sampler_name and is_pony:
+        sampler_name = "Euler a"
+
+    # High-resolution generation for SDXL/Pony:
+    # SDXL models require ~1MP (1280x720, 1024x1024). Generating directly at low resolutions (< 750k pixels)
+    # causes attention starvation, mangled anatomy, and weird limbs.
+    # When low resolution (e.g. 832x480) is requested, we scale up to full HD (1280x720) and KEEP the high-res file!
+    target_w = snap_to_16(width)
+    target_h = snap_to_16(height)
+
+    if highres_fix and is_sdxl and (target_w * target_h < 750_000):
+        # Scale to 1280x720 for 16:9, preserving aspect ratio
+        aspect = target_w / max(1, target_h)
+        if abs(aspect - (16.0 / 9.0)) < 0.15:
+            gen_w, gen_h = 1280, 720
+        else:
+            scale = max(1.5, 1024.0 / max(target_w, target_h))
+            gen_w = snap_to_16(int(target_w * scale))
+            gen_h = snap_to_16(int(target_h * scale))
+        log(f"SDXL low resolution detected ({target_w}x{target_h}). Generating at full high-res {gen_w}x{gen_h}.")
+    else:
+        gen_w = target_w
+        gen_h = target_h
 
     payload = {
         "prompt": prompt,
         "negative_prompt": negative_prompt,
         "steps": steps,
         "cfg_scale": cfg_scale,
-        "width": width,
-        "height": height,
+        "width": gen_w,
+        "height": gen_h,
         "seed": seed
     }
     if sampler_name:
         payload["sampler_name"] = sampler_name
 
-    log(f"Generating A1111 image: '{prompt[:60]}...' ({width}x{height})")
+    cb = globals().get("_GLOBAL_PROGRESS_CALLBACK", None)
+
+    stop_event = threading.Event()
+    def poll_heartbeat():
+        start_t = time.time()
+        while not stop_event.wait(3.0):
+            try:
+                p_data = a1111_client.get_progress()
+                prog = float(p_data.get("progress", 0.0))
+                eta = float(p_data.get("eta_relative", 0.0))
+                state = p_data.get("state", {})
+                step = state.get("sampling_step", 0)
+                total_steps = state.get("sampling_steps", 0)
+                elapsed = int(time.time() - start_t)
+
+                if total_steps > 0:
+                    msg = f"A1111 rendering: step {step}/{total_steps} ({int(prog * 100)}%, ETA: {eta:.1f}s, elapsed: {elapsed}s)"
+                else:
+                    msg = f"A1111 rendering in progress (elapsed: {elapsed}s)..."
+
+                if cb:
+                    try:
+                        cb(msg, prog, 1.0)
+                    except Exception:
+                        pass
+                log(msg)
+            except Exception:
+                pass
+
+    t = threading.Thread(target=poll_heartbeat, daemon=True)
+    t.start()
     try:
         res = a1111_client.txt2img(payload)
         images = res.get("images", [])
@@ -225,9 +319,19 @@ def generate_a1111_image(
         with open(final_path, "wb") as f:
             f.write(raw_bytes)
 
-        return True, final_path, raw_b64, {"width": width, "height": height, "steps": steps}
+        return True, final_path, raw_b64, {
+            "width": gen_w,
+            "height": gen_h,
+            "target_width": target_w,
+            "target_height": target_h,
+            "steps": steps,
+            "cfg_scale": cfg_scale
+        }
     except Exception as ex:
         return False, None, None, {"error": str(ex)}
+    finally:
+        stop_event.set()
+        t.join(timeout=1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -271,12 +375,23 @@ def generate_anchor_frame(anchor_meta: Dict[str, Any], width: int = 832, height:
     use_a1111 = (backend == "a1111") or (backend == "auto" and any(x in str(model).lower() for x in ["pony", "sdxl", "illustrious", "animagine"]))
 
     if use_a1111:
+        cfg = float(anchor_meta.get("cfg_scale", anchor_meta.get("cfg", 5.5 if "pony" in str(model).lower() else 7.0)))
+        sampler = anchor_meta.get("sampler_name", anchor_meta.get("sampler", "Euler a" if "pony" in str(model).lower() else None))
+        steps = int(anchor_meta.get("steps", 30))
+        seed = int(anchor_meta.get("seed", -1))
+        neg = anchor_meta.get("negative_prompt", "ugly, deformed, low quality, bad anatomy")
+
         ok, path, b64, err = generate_a1111_image(
             prompt=prompt,
-            negative_prompt=anchor_meta.get("negative_prompt", "ugly, deformed, bad anatomy"),
+            negative_prompt=neg,
             model_name=model,
             width=width,
-            height=height
+            height=height,
+            steps=steps,
+            cfg_scale=cfg,
+            sampler_name=sampler,
+            seed=seed,
+            highres_fix=bool(anchor_meta.get("highres_fix", True))
         )
         if not ok:
             return False, f"A1111 anchor generation failed: {err.get('error')}", None

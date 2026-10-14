@@ -1,0 +1,15 @@
+{
+  "comfy_url": "http://127.0.0.1:8188",
+  "sd_webui_url": "http://127.0.0.1:7860",
+  "ffmpeg_bin": "ffmpeg",
+  "ffprobe_bin": "ffprobe",
+  "output_dir": "./output",
+  "output_img_dir": "./output/images",
+  "output_vid_dir": "./output/videos",
+  "temp_dir": "./output/temp",
+  "workflows_dir": "./workflows",
+  "comfy_input_dir": "",
+  "comfy_output_dir": "",
+  "image_mcp_port": 7865,
+  "video_mcp_port": 7866
+}

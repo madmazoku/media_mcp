@@ -62,3 +62,9 @@ def interrupt() -> bool:
         return True
     except Exception:
         return False
+
+def get_progress() -> Dict[str, Any]:
+    try:
+        return make_request("/sdapi/v1/progress?skip_current_image=true", timeout=5)
+    except Exception:
+        return {}

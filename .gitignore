@@ -37,6 +37,8 @@ temp/
 !assets/*
 
 # Environment & IDE
+config.json
+*.local.json
 .env
 .env.local
 .vscode/

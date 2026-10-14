@@ -39,13 +39,24 @@ def get_queue() -> Dict[str, Any]:
 def get_prompt_status() -> Dict[str, Any]:
     return make_request("/prompt")
 
+_INTERRUPT_FLAG = False
+
 def interrupt() -> bool:
+    global _INTERRUPT_FLAG
+    _INTERRUPT_FLAG = True
     try:
         make_request("/interrupt", data={}, method="POST")
         return True
     except Exception as ex:
         log(f"Interrupt error: {ex}")
         return False
+
+def reset_interrupt():
+    global _INTERRUPT_FLAG
+    _INTERRUPT_FLAG = False
+
+def is_interrupted() -> bool:
+    return _INTERRUPT_FLAG
 
 def get_object_info() -> Dict[str, Any]:
     return make_request("/object_info")
@@ -69,9 +80,38 @@ def queue_prompt(workflow: Dict[str, Any]) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Failed to queue prompt: {e}"
 
-def wait_for_prompt(prompt_id: str, timeout: int = 600, poll_interval: float = 1.0) -> Tuple[bool, Dict[str, Any]]:
+_GLOBAL_PROGRESS_CALLBACK = None
+
+def set_global_progress_callback(cb):
+    global _GLOBAL_PROGRESS_CALLBACK
+    _GLOBAL_PROGRESS_CALLBACK = cb
+
+def wait_for_prompt(
+    prompt_id: str,
+    timeout: int = 600,
+    poll_interval: float = 1.0,
+    progress_callback: Optional[Any] = None
+) -> Tuple[bool, Dict[str, Any]]:
     start_time = time.time()
+    last_notify = 0.0
+    cb = progress_callback or _GLOBAL_PROGRESS_CALLBACK
+
     while time.time() - start_time < timeout:
+        if _INTERRUPT_FLAG:
+            log(f"Aborting wait_for_prompt for {prompt_id} due to interrupt.")
+            return False, {"error": "Execution interrupted by user request"}
+
+        elapsed = time.time() - start_time
+        if elapsed - last_notify >= 5.0:
+            last_notify = elapsed
+            msg = f"ComfyUI prompt {prompt_id[:8]} executing (elapsed: {int(elapsed)}s)"
+            if cb:
+                try:
+                    cb(msg, None, None)
+                except Exception:
+                    pass
+            log(msg)
+
         try:
             history = make_request(f"/history/{prompt_id}")
             if prompt_id in history:

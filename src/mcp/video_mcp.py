@@ -23,7 +23,15 @@ SRC_DIR = Path(__file__).resolve().parent.parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from core import config, comfy_client, ffmpeg_engine, video_pipeline
+import importlib
+from core import config, a1111_client, comfy_client, ffmpeg_engine, image_engine, video_pipeline
+
+def reload_core_modules():
+    for m in (config, a1111_client, comfy_client, ffmpeg_engine, image_engine, video_pipeline):
+        try:
+            importlib.reload(m)
+        except Exception:
+            pass
 
 if hasattr(sys.stdin, "reconfigure"):
     try:
@@ -34,10 +42,78 @@ if hasattr(sys.stdin, "reconfigure"):
         pass
 
 _REAL_STDOUT = sys.stdout
+_SSE_CLIENTS = {}
+_CURRENT_PROGRESS_TOKEN = None
 
 def log(msg: str):
     sys.stderr.write(f"[video-mcp] {msg}\n")
     sys.stderr.flush()
+
+def send_response(resp: dict):
+    line = json.dumps(resp, ensure_ascii=False)
+    _REAL_STDOUT.write(line + "\n")
+    _REAL_STDOUT.flush()
+
+def broadcast_mcp_progress(message: str, progress: Optional[float] = None, total: Optional[float] = None):
+    # 1. Standard MCP notification (notifications/message)
+    log_notif = {
+        "jsonrpc": "2.0",
+        "method": "notifications/message",
+        "params": {
+            "level": "info",
+            "logger": "media-mcp-video",
+            "data": message
+        }
+    }
+    send_response(log_notif)
+
+    # 2. Standard MCP progress notification (notifications/progress)
+    if _CURRENT_PROGRESS_TOKEN is not None:
+        p_params: Dict[str, Any] = {
+            "progressToken": _CURRENT_PROGRESS_TOKEN,
+            "progress": float(progress) if progress is not None else 0.0,
+            "message": message
+        }
+        if total is not None:
+            p_params["total"] = float(total)
+        send_response({
+            "jsonrpc": "2.0",
+            "method": "notifications/progress",
+            "params": p_params
+        })
+
+    # 3. Broadcast to any connected SSE clients
+    if _SSE_CLIENTS:
+        for q in list(_SSE_CLIENTS.values()):
+            try:
+                q.put(log_notif)
+            except Exception:
+                pass
+
+video_pipeline.set_global_progress_callback(broadcast_mcp_progress)
+
+def resolve_scenario_path(scenario_path: str) -> Optional[Path]:
+    p = Path(scenario_path)
+    if p.is_absolute() and p.exists():
+        return p
+
+    candidates = [
+        Path.cwd() / scenario_path,
+        Path(config.TEMP_DIR) / scenario_path,
+        Path(config.WORKFLOWS_DIR) / scenario_path
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+
+    # If without extension, check with .json appended
+    if not scenario_path.endswith(".json"):
+        for base in [Path.cwd(), Path(config.TEMP_DIR), Path(config.WORKFLOWS_DIR)]:
+            c = base / f"{scenario_path}.json"
+            if c.exists():
+                return c
+
+    return None
 
 @contextlib.contextmanager
 def redirect_stdout_to_stderr():
@@ -53,8 +129,9 @@ def redirect_stdout_to_stderr():
 # ---------------------------------------------------------------------------
 
 def tool_video_run_scenario(args: dict) -> dict:
+    reload_core_modules()
+    scenario_data = args.get("scenario_data") or args.get("scenes") or args.get("blocks")
     scenario_path = args.get("scenario_path")
-    scenario_data = args.get("scenario_data")
     start_image = args.get("start_image")
     output_name = args.get("output_name")
     width = int(args.get("width", 832))
@@ -62,25 +139,33 @@ def tool_video_run_scenario(args: dict) -> dict:
     fps = int(args.get("fps", 16))
     enable_hud = bool(args.get("enable_hud", False))
 
-    if scenario_path:
-        p = Path(scenario_path)
-        if not p.is_absolute():
-            candidate = Path(config.WORKFLOWS_DIR) / scenario_path
-            if not candidate.exists():
-                candidate_gemini = Path(r"G:\Git\Gemini\workflows") / scenario_path
-                p = candidate_gemini if candidate_gemini.exists() else candidate
-            else:
-                p = candidate
-        if not p.exists():
-            return {"error": f"Scenario file not found: {p}"}
+    if not scenario_data and scenario_path:
+        p = resolve_scenario_path(scenario_path)
+        if not p:
+            return {"error": f"Scenario file not found: '{scenario_path}'. Checked cwd, temp/ ({config.TEMP_DIR}), and workflows/ ({config.WORKFLOWS_DIR})."}
         try:
             with open(p, "r", encoding="utf-8") as f:
                 scenario_data = json.load(f)
         except Exception as e:
-            return {"error": f"Failed to parse scenario file: {e}"}
+            return {"error": f"Failed to parse scenario file '{p}': {e}"}
 
     if not scenario_data:
-        return {"error": "Either 'scenario_path' or 'scenario_data' is required."}
+        # Check for simple direct prompt invocation without workflow files
+        prompt = args.get("prompt")
+        motion_prompt = args.get("motion_prompt")
+        if prompt or motion_prompt:
+            scenario_data = [{
+                "scene_name": "Scene 1",
+                "anchor_image": {"prompt": prompt} if prompt else {},
+                "blocks": [{
+                    "name": "Block 1",
+                    "duration": float(args.get("duration", 5.0)),
+                    "motion_prompt": motion_prompt or prompt or ""
+                }]
+            }]
+
+    if not scenario_data:
+        return {"error": "Scenario data is required (pass 'scenes', 'scenario_data', 'blocks', or 'scenario_path')."}
 
     if isinstance(scenario_data, str):
         try:
@@ -152,28 +237,37 @@ def tool_video_run_scenario(args: dict) -> dict:
     }
 
 def tool_video_validate_scenario(args: dict) -> dict:
+    reload_core_modules()
+    scenario_data = args.get("scenario_data") or args.get("scenes") or args.get("blocks")
     scenario_path = args.get("scenario_path")
-    scenario_data = args.get("scenario_data")
 
-    if scenario_path:
-        p = Path(scenario_path)
-        if not p.is_absolute():
-            candidate = Path(config.WORKFLOWS_DIR) / scenario_path
-            if not candidate.exists():
-                candidate_gemini = Path(r"G:\Git\Gemini\workflows") / scenario_path
-                p = candidate_gemini if candidate_gemini.exists() else candidate
-            else:
-                p = candidate
-        if not p.exists():
-            return {"error": f"Scenario file not found: {p}"}
+    if not scenario_data and scenario_path:
+        p = resolve_scenario_path(scenario_path)
+        if not p:
+            return {"error": f"Scenario file not found: '{scenario_path}'. Checked cwd, temp/ ({config.TEMP_DIR}), and workflows/ ({config.WORKFLOWS_DIR})."}
         try:
             with open(p, "r", encoding="utf-8") as f:
                 scenario_data = json.load(f)
         except Exception as e:
-            return {"error": f"Failed to parse scenario JSON: {e}"}
+            return {"error": f"Failed to parse scenario file '{p}': {e}"}
 
     if not scenario_data:
-        return {"error": "Either 'scenario_path' or 'scenario_data' is required."}
+        # Check for simple direct prompt invocation
+        prompt = args.get("prompt")
+        motion_prompt = args.get("motion_prompt")
+        if prompt or motion_prompt:
+            scenario_data = [{
+                "scene_name": "Scene 1",
+                "anchor_image": {"prompt": prompt} if prompt else {},
+                "blocks": [{
+                    "name": "Block 1",
+                    "duration": float(args.get("duration", 5.0)),
+                    "motion_prompt": motion_prompt or prompt or ""
+                }]
+            }]
+
+    if not scenario_data:
+        return {"error": "Scenario data is required (pass 'scenes', 'scenario_data', 'blocks', or 'scenario_path')."}
 
     if isinstance(scenario_data, str):
         try:
@@ -309,84 +403,70 @@ def tool_video_generate_block(args: dict) -> dict:
 
     return {"content": content, "video_path": final_path, "duration": actual_dur}
 
-def tool_video_create_scenario(args: dict) -> dict:
-    name = args.get("name", "").strip()
-    if not name:
-        return {"error": "Scenario name is required."}
-    if not name.endswith(".json"):
-        name = f"{name}.json"
 
-    data = args.get("scenario") or args.get("scenes") or args.get("blocks")
-    if not data:
-        return {"error": "Scenario content ('scenes' or 'blocks') is required."}
 
-    fp = os.path.join(config.WORKFLOWS_DIR, name)
-    try:
-        with open(fp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        return {"error": f"Failed to save scenario: {e}"}
+def tool_media_get_status(args: dict) -> dict:
+    reload_core_modules()
+    status_lines = []
 
-    return {
-        "content": [{
-            "type": "text",
-            "text": f"Scenario saved successfully to `{fp}`.\nLink: [Open Scenario](file:///{fp.replace(os.sep, '/')})"
-        }],
-        "path": fp
-    }
+    # 1. Pipeline status
+    pipe_st = video_pipeline.get_pipeline_status()
+    if pipe_st.get("is_running"):
+        status_lines.append(
+            f"🎬 Video Pipeline: RUNNING\n"
+            f"  - Target: {pipe_st.get('scenario_name')}\n"
+            f"  - Scene: {pipe_st.get('scene_index')}/{pipe_st.get('total_scenes')} ({pipe_st.get('scene_name')})\n"
+            f"  - Block: {pipe_st.get('block_name', 'N/A')}\n"
+            f"  - Phase: {pipe_st.get('phase')}\n"
+            f"  - Elapsed: {pipe_st.get('elapsed_seconds')}s"
+        )
+    else:
+        status_lines.append("🎬 Video Pipeline: IDLE")
 
-def tool_video_list_scenarios(args: dict) -> dict:
-    folder = args.get("directory") or config.WORKFLOWS_DIR
-    if not os.path.isabs(folder):
-        folder = os.path.join(config.OUTPUT_DIR, folder)
-
-    if not os.path.exists(folder):
-        return {"error": f"Directory not found: {folder}"}
-
-    scenarios = []
-    for fn in sorted(os.listdir(folder)):
-        if fn.endswith(".json") and not any(fn.startswith(x) for x in ["comfy_", "video_wan2_2", "Wan2.2", "Vantage-"]):
-            fp = os.path.join(folder, fn)
-            try:
-                with open(fp, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                scenes = video_pipeline.normalize_scenario_structure(data)
-                total_dur = sum(
-                    sum(max(0.5, b.get("duration", 5.0) - b.get("overlap", 1.5)) for b in sc.get("blocks", []))
-                    for sc in scenes
-                )
-                scenarios.append({
-                    "filename": fn,
-                    "path": fp,
-                    "scenes_count": len(scenes),
-                    "estimated_duration_sec": round(total_dur, 2)
-                })
-            except Exception:
-                continue
-
-    text = f"Found {len(scenarios)} video scenarios in '{folder}':\n\n"
-    for sc in scenarios:
-        text += f"- **{sc['filename']}** ({sc['scenes_count']} scenes, ~{sc['estimated_duration_sec']}s)\n  Path: `{sc['path']}`\n\n"
-
-    return {"content": [{"type": "text", "text": text}], "scenarios": scenarios}
-
-def tool_video_get_status(args: dict) -> dict:
+    # 2. ComfyUI status
     try:
         q = comfy_client.get_queue()
         running = q.get("queue_running", [])
         pending = q.get("queue_pending", [])
-        text = f"ComfyUI Video Generator Status:\n- Running: {len(running)}\n- Pending: {len(pending)}\n"
+        status_lines.append(f"\n⚡ ComfyUI (Wan 2.2 / FLUX):\n  - Running tasks: {len(running)}\n  - Pending in queue: {len(pending)}")
         if running:
-            text += f"- Active Prompt: {running[0][1]}\n"
-        else:
-            text += "- Status: Idle (Ready for generation)\n"
-        return {"content": [{"type": "text", "text": text}], "running_count": len(running), "pending_count": len(pending)}
+            status_lines.append(f"  - Active prompt ID: {running[0][1]}")
     except Exception as ex:
-        return {"content": [{"type": "text", "text": f"Error querying ComfyUI: {ex}"}], "isError": True}
+        status_lines.append(f"\n⚡ ComfyUI: Connection error ({ex})")
 
-def tool_video_interrupt(args: dict) -> dict:
+    # 3. Automatic1111 status
+    try:
+        a_prog = a1111_client.get_progress()
+        prog = a_prog.get("progress", 0.0)
+        job = a_prog.get("state", {}).get("job", "")
+        job_count = a_prog.get("state", {}).get("job_count", 0)
+        step = a_prog.get("state", {}).get("sampling_step", 0)
+        total_steps = a_prog.get("state", {}).get("sampling_steps", 0)
+
+        if job_count > 0 or prog > 0.0 or step > 0:
+            status_lines.append(
+                f"\n🎨 Automatic1111 (SD / Pony / Anchor Frames):\n"
+                f"  - Status: ACTIVE ({round(prog * 100, 1)}%)\n"
+                f"  - Step: {step}/{total_steps}\n"
+                f"  - Job: {job or 'Processing'}"
+            )
+        else:
+            status_lines.append(f"\n🎨 Automatic1111: IDLE")
+    except Exception as ex:
+        status_lines.append(f"\n🎨 Automatic1111: Connection error ({ex})")
+
+    full_text = "\n".join(status_lines)
+    return {
+        "content": [{"type": "text", "text": full_text}],
+        "pipeline": pipe_st
+    }
+
+def tool_media_interrupt(args: dict) -> dict:
+    reload_core_modules()
+    video_pipeline.request_interrupt()
     comfy_client.interrupt()
-    return {"content": [{"type": "text", "text": "Successfully sent interrupt signal to ComfyUI."}]}
+    a1111_client.interrupt()
+    return {"content": [{"type": "text", "text": "Successfully sent interrupt signal to Video Pipeline, ComfyUI, and Automatic1111."}]}
 
 
 TOOLS_SPEC = [
@@ -438,30 +518,13 @@ TOOLS_SPEC = [
         }
     },
     {
-        "name": "video_create_scenario",
-        "description": "Create and save a new scenario JSON file in workflows/ directory.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Scenario filename (e.g. 'my_scene.json')"},
-                "scenario": {"description": "Hierarchical scenario structure or array of scenes/blocks"}
-            },
-            "required": ["name", "scenario"]
-        }
-    },
-    {
-        "name": "video_list_scenarios",
-        "description": "List all scenario files in workflows/ directory with duration estimates.",
+        "name": "media_get_status",
+        "description": "Query real-time generation and queue status across Video Pipeline, ComfyUI (Wan/FLUX), and Automatic1111 (SD/Pony).",
         "inputSchema": {"type": "object", "properties": {}}
     },
     {
-        "name": "video_get_status",
-        "description": "Query ComfyUI video generator queue status and active tasks.",
-        "inputSchema": {"type": "object", "properties": {}}
-    },
-    {
-        "name": "video_interrupt",
-        "description": "Interrupt currently active video generation in ComfyUI.",
+        "name": "media_interrupt",
+        "description": "Interrupt any active generation across Video Pipeline, ComfyUI (Wan/FLUX), and Automatic1111 (SD/Pony).",
         "inputSchema": {"type": "object", "properties": {}}
     }
 ]
@@ -470,18 +533,12 @@ TOOL_HANDLERS = {
     "video_run_scenario": tool_video_run_scenario,
     "video_validate_scenario": tool_video_validate_scenario,
     "video_generate_block": tool_video_generate_block,
-    "video_create_scenario": tool_video_create_scenario,
-    "video_list_scenarios": tool_video_list_scenarios,
-    "video_get_status": tool_video_get_status,
-    "video_interrupt": tool_video_interrupt
+    "media_get_status": tool_media_get_status,
+    "media_interrupt": tool_media_interrupt
 }
 
-def send_response(resp: dict):
-    line = json.dumps(resp, ensure_ascii=False)
-    _REAL_STDOUT.write(line + "\n")
-    _REAL_STDOUT.flush()
-
 def handle_jsonrpc(req: dict) -> Optional[dict]:
+    global _CURRENT_PROGRESS_TOKEN
     msg_id = req.get("id")
     method = req.get("method")
     params = req.get("params", {})
@@ -505,6 +562,7 @@ def handle_jsonrpc(req: dict) -> Optional[dict]:
     elif method == "tools/call":
         tool_name = params.get("name")
         tool_args = params.get("arguments", {})
+        _CURRENT_PROGRESS_TOKEN = params.get("_meta", {}).get("progressToken")
         handler = TOOL_HANDLERS.get(tool_name)
         if not handler:
             return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": f"Unknown tool: '{tool_name}'"}}
@@ -524,6 +582,8 @@ def handle_jsonrpc(req: dict) -> Optional[dict]:
                 "jsonrpc": "2.0", "id": msg_id,
                 "result": {"content": [{"type": "text", "text": f"Execution error: {str(ex)}"}], "isError": True}
             }
+        finally:
+            _CURRENT_PROGRESS_TOKEN = None
     else:
         if msg_id is not None:
             return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": f"Method '{method}' not implemented"}}

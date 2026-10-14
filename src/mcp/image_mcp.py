@@ -33,10 +33,56 @@ if hasattr(sys.stdin, "reconfigure"):
         pass
 
 _REAL_STDOUT = sys.stdout
+_SSE_CLIENTS = {}
+_CURRENT_PROGRESS_TOKEN = None
 
 def log(msg: str):
     sys.stderr.write(f"[image-mcp] {msg}\n")
     sys.stderr.flush()
+
+def send_response(resp: dict):
+    line = json.dumps(resp, ensure_ascii=False)
+    _REAL_STDOUT.write(line + "\n")
+    _REAL_STDOUT.flush()
+
+def broadcast_mcp_progress(message: str, progress: Optional[float] = None, total: Optional[float] = None):
+    # 1. MCP standard logging notification
+    log_notif = {
+        "jsonrpc": "2.0",
+        "method": "notifications/message",
+        "params": {
+            "level": "info",
+            "logger": "media-mcp-image",
+            "data": message
+        }
+    }
+    send_response(log_notif)
+
+    # 2. MCP progress notification if token is set
+    if _CURRENT_PROGRESS_TOKEN is not None:
+        p_params = {
+            "progressToken": _CURRENT_PROGRESS_TOKEN,
+            "progress": float(progress) if progress is not None else 0.0,
+            "message": message
+        }
+        if total is not None:
+            p_params["total"] = float(total)
+        send_response({
+            "jsonrpc": "2.0",
+            "method": "notifications/progress",
+            "params": p_params
+        })
+
+    # 3. Broadcast to SSE clients
+    if _SSE_CLIENTS:
+        for q in list(_SSE_CLIENTS.values()):
+            try:
+                q.put(log_notif)
+            except Exception:
+                pass
+
+comfy_client.set_global_progress_callback(broadcast_mcp_progress)
+image_engine.set_global_progress_callback(broadcast_mcp_progress)
 
 @contextlib.contextmanager
 def redirect_stdout_to_stderr():
@@ -101,28 +147,35 @@ def tool_sd_txt2img(args: dict) -> dict:
     negative_prompt = args.get("negative_prompt", "ugly, deformed, low quality, bad anatomy")
     steps = int(args.get("steps", 30))
     cfg_scale = float(args.get("cfg_scale", 7.0))
-    width = int(args.get("width", 832))
-    height = int(args.get("height", 480))
+    width = int(args.get("width", 1280))
+    height = int(args.get("height", 720))
     seed = int(args.get("seed", -1))
     sampler_name = args.get("sampler_name")
+    model_name = args.get("model_name")
+    highres_fix = bool(args.get("highres_fix", True))
 
     ok, path, b64, meta = image_engine.generate_a1111_image(
         prompt=prompt,
         negative_prompt=negative_prompt,
+        model_name=model_name,
         steps=steps,
         cfg_scale=cfg_scale,
         width=width,
         height=height,
         seed=seed,
-        sampler_name=sampler_name
+        sampler_name=sampler_name,
+        highres_fix=highres_fix
     )
     if not ok:
         return {"error": meta.get("error", "A1111 generation failed")}
 
+    actual_w = meta.get("width", width)
+    actual_h = meta.get("height", height)
+
     result_text = (
         f"Image generated successfully via Automatic1111:\n"
         f"- Output: `{path}`\n"
-        f"- Dimensions: {width}x{height} | Steps: {steps}\n\n"
+        f"- Dimensions: {actual_w}x{actual_h} | Steps: {steps}\n\n"
         f"File link: [Open Image](file:///{path.replace(os.sep, '/')})\n"
     )
 
@@ -158,19 +211,6 @@ def tool_sd_get_loras(args: dict) -> dict:
         return {"content": [{"type": "text", "text": f"Available LoRAs ({len(names)}):\n" + "\n".join(f"- {n}" for n in names)}], "loras": names}
     except Exception as ex:
         return {"error": f"Failed to get LoRAs: {ex}"}
-
-def tool_comfy_get_models(args: dict) -> dict:
-    try:
-        q = comfy_client.get_queue()
-        return {"content": [{"type": "text", "text": f"ComfyUI Status: Running: {len(q.get('queue_running', []))}, Pending: {len(q.get('queue_pending', []))}"}]}
-    except Exception as ex:
-        return {"error": f"Failed to query ComfyUI: {ex}"}
-
-def tool_sd_interrupt(args: dict) -> dict:
-    a1111_client.interrupt()
-    comfy_client.interrupt()
-    return {"content": [{"type": "text", "text": "Interrupt signal sent to both A1111 and ComfyUI"}]}
-
 
 TOOLS_SPEC = [
     {
@@ -230,16 +270,6 @@ TOOLS_SPEC = [
         "name": "sd_get_loras",
         "description": "List registered LoRAs in Automatic1111.",
         "inputSchema": {"type": "object", "properties": {}}
-    },
-    {
-        "name": "comfy_get_models",
-        "description": "Query ComfyUI generation queue status.",
-        "inputSchema": {"type": "object", "properties": {}}
-    },
-    {
-        "name": "sd_interrupt",
-        "description": "Interrupt any active image generation in A1111 or ComfyUI.",
-        "inputSchema": {"type": "object", "properties": {}}
     }
 ]
 
@@ -248,17 +278,11 @@ TOOL_HANDLERS = {
     "sd_txt2img": tool_sd_txt2img,
     "sd_get_models": tool_sd_get_models,
     "sd_set_model": tool_sd_set_model,
-    "sd_get_loras": tool_sd_get_loras,
-    "comfy_get_models": tool_comfy_get_models,
-    "sd_interrupt": tool_sd_interrupt
+    "sd_get_loras": tool_sd_get_loras
 }
 
-def send_response(resp: dict):
-    line = json.dumps(resp, ensure_ascii=False)
-    _REAL_STDOUT.write(line + "\n")
-    _REAL_STDOUT.flush()
-
 def handle_jsonrpc(req: dict) -> Optional[dict]:
+    global _CURRENT_PROGRESS_TOKEN
     msg_id = req.get("id")
     method = req.get("method")
     params = req.get("params", {})
@@ -282,6 +306,7 @@ def handle_jsonrpc(req: dict) -> Optional[dict]:
     elif method == "tools/call":
         tool_name = params.get("name")
         tool_args = params.get("arguments", {})
+        _CURRENT_PROGRESS_TOKEN = params.get("_meta", {}).get("progressToken")
         handler = TOOL_HANDLERS.get(tool_name)
         if not handler:
             return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": f"Unknown tool: '{tool_name}'"}}
@@ -301,6 +326,8 @@ def handle_jsonrpc(req: dict) -> Optional[dict]:
                 "jsonrpc": "2.0", "id": msg_id,
                 "result": {"content": [{"type": "text", "text": f"Execution error: {str(ex)}"}], "isError": True}
             }
+        finally:
+            _CURRENT_PROGRESS_TOKEN = None
     else:
         if msg_id is not None:
             return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": f"Method '{method}' not implemented"}}

@@ -31,7 +31,7 @@ description: >-
 1. **Режим готового файла (Human-in-the-loop / Арт-директор):**
    ```json
    "anchor_image": {
-     "image_path": "G:/Git/Gemini/output/images/character_frame.png"
+     "image_path": "G:/Git/Gemini/media_mcp/images/character_frame.png"
    }
    ```
    Если вы или пользователь уже сгенерировали идеальную картинку через `image_mcp` (или загрузили файл), пайплайн сразу берёт её за основу без лишних генераций.
@@ -39,12 +39,15 @@ description: >-
 2. **Режим автоматической генерации (Autonomous):**
    ```json
    "anchor_image": {
-     "prompt": "Cinematic visual novel CG, Hermione Granger as a cute unicorn mare, amber eyes, bushy mane, Gryffindor scarf, inside wooden train compartment, warm afternoon sunlight, Makoto Shinkai style",
-     "model": "flux1_dev",
-     "lora": null
+     "prompt": "Cinematic visual novel CG, 1girl, cute unicorn mare Hermione Granger, amber eyes, bushy brown mane, Gryffindor scarf, inside wooden train compartment, warm afternoon sunlight, Makoto Shinkai style",
+     "model": "pony",
+     "cfg_scale": 5.5,
+     "sampler_name": "Euler a"
    }
    ```
    Пайплайн сам сгенерирует опорный кадр через общее ядро `image_engine`.
+   - **SDXL / Pony High-Res Fix:** Если опорный кадр генерируется для Wan 2.2 в разрешении 832x480, движок автоматически генерирует его в 1.5x разрешении (1248x720) и делает качественный даунскейл Lanczos, устраняя искажения анатомии, лишние конечности и артефакты.
+   - **Pony CFG Scale:** Для моделей Pony автоматически применяется оптимальный CFG 5.0–5.5 (вместо 7.0+), предотвращая пережарку (deep-fried overbaking) и сохраняя чистые аниме/мульт-цвета.
 
 ---
 
@@ -61,26 +64,29 @@ description: >-
 
 ## 4. Пример структуры сценария
 
+Сценарии передаются напрямую в аргумент `scenes` / `scenario_data` инструмента `video_run_scenario`:
+
 ```json
 [
   {
     "scene_name": "Сцена 1: Купе поезда",
     "anchor_image": {
-      "prompt": "Cinematic visual novel CG, first-person POV shot inside cozy vintage train compartment. Hermione Granger unicorn mare standing in open doorway, foreground shows pony hooves holding glowing ancient spellbook. Makoto Shinkai lighting, detailed",
-      "model": "flux1_dev"
+      "prompt": "Cinematic visual novel CG, first-person POV shot inside cozy vintage train compartment. Cute unicorn pony Hermione Granger standing in open doorway, Makoto Shinkai lighting, detailed, score_9, score_8_up",
+      "model": "pony",
+      "cfg_scale": 5.5
     },
     "blocks": [
       {
-        "name": "Блок 1: Поиск жабы",
+        "name": "Блок 1: Открытие двери",
         "duration": 5.0,
         "overlap": 1.5,
-        "motion_prompt": "Her horn sparkles with magic telekinesis aura, sliding the compartment door open, stepping forward into the compartment and looking around the floor searching for a toad, cute expressive face animation"
+        "motion_prompt": "Her horn sparkles with magic telekinesis aura, sliding the compartment door open, stepping forward into the compartment on all four hooves and looking around searching, cute expressive face animation"
       },
       {
-        "name": "Блок 2: Реакция на книгу",
+        "name": "Блок 2: Осмотр купе",
         "duration": 5.0,
         "overlap": 0.0,
-        "motion_prompt": "Her eyes suddenly spot the glowing spellbook, widening in fascinated academic surprise, taking an excited step closer, tilting her head with a joyful smile to examine the runes"
+        "motion_prompt": "Looking curiously at the passenger, tilting her head with an inquisitive polite expression, soft ear twitch"
       }
     ]
   }
@@ -92,15 +98,16 @@ description: >-
 ## 5. Вывод результатов в чат (Постер + Ссылка)
 
 При вызове `video_run_scenario`:
-1. Сервер автоматически извлекает первый кадр ролика и возвращает его в формате MCP `{"type": "image", "data": "..."}`.
-2. Antigravity автоматически кэширует его в локальный offload (`media_0.png`).
-3. **Всегда оформлять результат в чате как кликабельный постер:**
+1. Сервер стримит heartbeat-уведомления каждые 5 секунд (`notifications/message` и `notifications/progress`), предотвращая таймаут клиента.
+2. По завершении возвращает постер первого кадра в формате MCP `{"type": "image", "data": "..."}`.
+3. Antigravity автоматически кэширует его в локальный offload (`media_0.png`).
+4. **Всегда оформлять результат в чате как кликабельный постер:**
    ```markdown
-   [![Нажмите для просмотра](file:///C:/Users/.../media_0.png)](file:///G:/Git/Gemini/output/video/filename.mp4)
+   [![Нажмите для просмотра](file:///C:/Users/.../media_0.png)](file:///G:/Git/Gemini/media_mcp/videos/filename.mp4)
 
-   🎬 **[Смотреть видеоролик (8.5 сек)](file:///G:/Git/Gemini/output/video/filename.mp4)**
+   🎬 **[Смотреть видеоролик](file:///G:/Git/Gemini/media_mcp/videos/filename.mp4)**
    ```
-4. Если создавалась HUD-версия с таймерами (`enable_hud: true`), также указать ссылку на `_hud.mp4`.
+5. Если создавалась HUD-версия с таймерами (`enable_hud: true`), также указать ссылку на `_hud.mp4`.
 
 ## Запрет на самопроверку
-- **Категорически запрещено** вызывать `view_file` или анализировать сгенерированные видео-файлы для самопроверки без явного запроса пользователя.
+- **Категорически запрещено** вызывать `view_file` или анализировать сгенерированные видео-файлы для самопроверки без явного запроса пользователя. Сразу отдавать результат генерации в ответ.
