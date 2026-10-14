@@ -28,6 +28,52 @@ def log(msg: str):
     sys.stderr.write(f"[video-pipeline] {msg}\n")
     sys.stderr.flush()
 
+_GLOBAL_PROGRESS_CALLBACK = None
+
+_PIPELINE_STATUS = {
+    "is_running": False,
+    "scenario_name": None,
+    "scene_index": 0,
+    "scene_name": None,
+    "total_scenes": 0,
+    "block_index": 0,
+    "block_name": None,
+    "total_blocks": 0,
+    "phase": "idle",
+    "elapsed_seconds": 0.0,
+    "started_at": 0.0
+}
+
+def get_pipeline_status() -> Dict[str, Any]:
+    st = dict(_PIPELINE_STATUS)
+    if st["is_running"] and st["started_at"] > 0:
+        st["elapsed_seconds"] = round(time.time() - st["started_at"], 1)
+    return st
+
+_INTERRUPT_REQUESTED = False
+
+def request_interrupt():
+    global _INTERRUPT_REQUESTED
+    _INTERRUPT_REQUESTED = True
+    comfy_client.interrupt()
+
+def is_interrupted() -> bool:
+    return _INTERRUPT_REQUESTED or comfy_client.is_interrupted()
+
+def set_global_progress_callback(cb):
+    global _GLOBAL_PROGRESS_CALLBACK
+    _GLOBAL_PROGRESS_CALLBACK = cb
+    comfy_client.set_global_progress_callback(cb)
+
+def notify_progress(msg: str, progress: Optional[float] = None, total: Optional[float] = None, cb: Optional[Any] = None):
+    callback = cb or _GLOBAL_PROGRESS_CALLBACK
+    if callback:
+        try:
+            callback(msg, progress, total)
+        except Exception:
+            pass
+    log(msg)
+
 # ---------------------------------------------------------------------------
 # Wan 2.2 ComfyUI Graph Builder
 # ---------------------------------------------------------------------------
@@ -43,7 +89,8 @@ def generate_wan_segment(
     num_frames: int = 81,
     fps: int = 16,
     seed: Optional[int] = None,
-    out_video_name: Optional[str] = None
+    out_video_name: Optional[str] = None,
+    progress_callback: Optional[Any] = None
 ) -> Tuple[bool, str]:
     """
     Submits a Wan 2.2 Video segment to ComfyUI matching the working implementation in video_extender.py.
@@ -284,7 +331,7 @@ def generate_wan_segment(
     if not ok:
         return False, prompt_id
 
-    ok, history = comfy_client.wait_for_prompt(prompt_id, timeout=900)
+    ok, history = comfy_client.wait_for_prompt(prompt_id, timeout=900, progress_callback=progress_callback)
     if not ok:
         return False, str(history)
 
@@ -393,7 +440,8 @@ def execute_scenario_pipeline(
     width: int = 832,
     height: int = 480,
     fps: int = 16,
-    enable_hud: bool = False
+    enable_hud: bool = False,
+    progress_callback: Optional[Any] = None
 ) -> Dict[str, Any]:
     """
     Executes a multi-scene video scenario.
@@ -407,134 +455,195 @@ def execute_scenario_pipeline(
     first_poster_b64 = None
     first_poster_path = None
 
-    for s_idx, sc in enumerate(scenes):
-        scene_name = sc.get("scene_name", f"Scene #{s_idx + 1}")
-        anchor_meta = sc.get("anchor_image", {})
-        blocks = sc.get("blocks", [])
+    total_scenes = len(scenes)
+    total_blocks = sum(len(sc.get("blocks", [])) for sc in scenes)
+    processed_blocks = 0
 
-        if s_idx == 0 and global_start_image:
-            anchor_meta["image_path"] = global_start_image
+    global _INTERRUPT_REQUESTED
+    _INTERRUPT_REQUESTED = False
+    comfy_client.reset_interrupt()
 
-        log(f"\n==========================================")
-        log(f"[{scene_name}] Preparing Scene Anchor Frame...")
-        log(f"==========================================")
+    _PIPELINE_STATUS["is_running"] = True
+    _PIPELINE_STATUS["scenario_name"] = output_name or "video_scenario"
+    _PIPELINE_STATUS["total_scenes"] = total_scenes
+    _PIPELINE_STATUS["total_blocks"] = total_blocks
+    _PIPELINE_STATUS["processed_blocks"] = 0
+    _PIPELINE_STATUS["started_at"] = time.time()
+    _PIPELINE_STATUS["phase"] = "starting"
 
-        ok, anchor_img_path, anchor_b64 = image_engine.generate_anchor_frame(
-            anchor_meta=anchor_meta,
-            width=width,
-            height=height
-        )
-        if not ok:
-            raise RuntimeError(f"Failed to obtain anchor keyframe for {scene_name}: {anchor_img_path}")
+    try:
+        for s_idx, sc in enumerate(scenes):
+            if is_interrupted():
+                raise RuntimeError("Scenario execution was interrupted by user request.")
 
-        if s_idx == 0 and anchor_b64:
-            first_poster_b64 = anchor_b64
-            first_poster_path = anchor_img_path
+            scene_name = sc.get("scene_name", f"Scene #{s_idx + 1}")
+            anchor_meta = sc.get("anchor_image", {})
+            blocks = sc.get("blocks", [])
 
-        prefix_video = None
-        scene_block_pieces = []
+            if s_idx == 0 and global_start_image:
+                anchor_meta["image_path"] = global_start_image
 
-        for b_idx, blk in enumerate(blocks):
-            b_name = blk.get("name", f"Block {b_idx + 1}")
-            dur = float(blk.get("duration", 5.0))
-            overlap = float(blk.get("overlap", 1.5 if b_idx < len(blocks) - 1 else 0.0))
-            motion_prompt = blk.get("motion_prompt") or blk.get("prompt", "")
+            log(f"\n==========================================")
+            log(f"[{scene_name}] Preparing Scene Anchor Frame...")
+            log(f"==========================================")
 
-            # Calculate Wan frame count: (num_frames - 1) must be divisible by 4
-            raw_frames = int(round(dur * fps))
-            k = max(4, round((raw_frames - 1) / 4))
-            num_frames = 4 * k + 1
+            _PIPELINE_STATUS["scene_index"] = s_idx + 1
+            _PIPELINE_STATUS["scene_name"] = scene_name
+            _PIPELINE_STATUS["phase"] = f"anchor_generation (Scene {s_idx + 1}/{total_scenes})"
 
-            log(f"\n[{scene_name} : {b_name}] Duration: {dur}s, Overlap: {overlap}s, Frames: {num_frames}")
-            log(f"Motion prompt: '{motion_prompt[:60]}...'")
+            notify_progress(
+                f"Scene {s_idx + 1}/{total_scenes} [{scene_name}]: Preparing anchor keyframe...",
+                progress=processed_blocks,
+                total=total_blocks,
+                cb=progress_callback
+            )
 
-            raw_segment_name = f"seg_{s_idx}_{b_idx}_{int(time.time())}.mp4"
-            if prefix_video and os.path.exists(prefix_video):
-                # CASE A: Conditioned on previous block's tail
-                ok, seg_raw_path = generate_wan_segment(
-                    image_path=None,
-                    prefix_video_path=prefix_video,
-                    prompt=motion_prompt,
-                    width=width,
-                    height=height,
-                    num_frames=num_frames,
-                    fps=fps,
-                    out_video_name=raw_segment_name
-                )
-            else:
-                # CASE B: First block of scene conditioned on anchor image
-                ok, seg_raw_path = generate_wan_segment(
-                    image_path=anchor_img_path,
-                    prefix_video_path=None,
-                    prompt=motion_prompt,
-                    width=width,
-                    height=height,
-                    num_frames=num_frames,
-                    fps=fps,
-                    out_video_name=raw_segment_name
-                )
-
+            ok, anchor_img_path, anchor_b64 = image_engine.generate_anchor_frame(
+                anchor_meta=anchor_meta,
+                width=width,
+                height=height
+            )
             if not ok:
-                raise RuntimeError(f"Block generation failed [{scene_name} : {b_name}]: {seg_raw_path}")
+                raise RuntimeError(f"Failed to obtain anchor keyframe for {scene_name}: {anchor_img_path}")
 
-            block_trimmed = os.path.join(TEMP_DIR, f"trimmed_{s_idx}_{b_idx}.mp4")
-            if b_idx < len(blocks) - 1 and overlap > 0:
-                # Keep only [0 .. dur - overlap]
-                keep_dur = max(0.5, dur - overlap)
-                ffmpeg_engine.cut_duration(seg_raw_path, duration=keep_dur, out_path=block_trimmed)
-                
-                # Extract the tail overlap clip for next block's prefix
-                tail_clip = os.path.join(TEMP_DIR, f"tail_{s_idx}_{b_idx}_{overlap}s.mp4")
-                ffmpeg_engine.extract_tail_clip(seg_raw_path, tail_duration=overlap, out_clip_path=tail_clip)
-                prefix_video = tail_clip
-            else:
-                # Last block in scene: keep full duration
-                ffmpeg_engine.cut_duration(seg_raw_path, duration=dur, out_path=block_trimmed)
-                prefix_video = None
+            if s_idx == 0 and anchor_b64:
+                first_poster_b64 = anchor_b64
+                first_poster_path = anchor_img_path
 
-            scene_block_pieces.append(block_trimmed)
-            generated_block_metadata.append((seg_raw_path, dur, overlap))
+            prefix_video = None
+            scene_block_pieces = []
 
-        # Join blocks within the scene
-        scene_final = os.path.join(TEMP_DIR, f"scene_{s_idx}_final.mp4")
-        ffmpeg_engine.concat_videos(scene_block_pieces, scene_final)
-        all_scene_videos.append(scene_final)
+            for b_idx, blk in enumerate(blocks):
+                if is_interrupted():
+                    raise RuntimeError("Scenario execution was interrupted by user request.")
 
-    # Final movie assembly across all scenes
-    final_name = output_name or f"movie_{int(time.time())}.mp4"
-    if not final_name.endswith(".mp4"):
-        final_name = f"{final_name}.mp4"
+                b_name = blk.get("name", f"Block {b_idx + 1}")
+                dur = float(blk.get("duration", 5.0))
+                overlap = float(blk.get("overlap", 1.5 if b_idx < len(blocks) - 1 else 0.0))
+                motion_prompt = blk.get("motion_prompt") or blk.get("prompt", "")
 
-    final_path = os.path.join(OUTPUT_VID_DIR, final_name)
-    ffmpeg_engine.concat_videos(all_scene_videos, final_path)
-    total_duration = ffmpeg_engine.get_duration(final_path)
+                # Calculate Wan frame count: (num_frames - 1) must be divisible by 4
+                raw_frames = int(round(dur * fps))
+                k = max(4, round((raw_frames - 1) / 4))
+                num_frames = 4 * k + 1
 
-    # Poster extraction from final video
-    poster_filename = f"{os.path.splitext(final_name)[0]}_poster.png"
-    poster_path = os.path.join(OUTPUT_IMG_DIR, poster_filename)
-    poster_path, poster_b64 = ffmpeg_engine.extract_poster(final_path, poster_path)
-    if not poster_b64 and first_poster_b64:
-        poster_b64 = first_poster_b64
+                _PIPELINE_STATUS["block_index"] = b_idx + 1
+                _PIPELINE_STATUS["block_name"] = b_name
+                _PIPELINE_STATUS["phase"] = f"wan_diffusion ({scene_name} - {b_name})"
 
-    # Optional HUD generation
-    hud_path = None
-    if enable_hud and generated_block_metadata:
-        hud_name = final_name.replace(".mp4", "_hud.mp4")
-        hud_final = os.path.join(OUTPUT_VID_DIR, hud_name)
-        try:
-            ffmpeg_engine.generate_hud_overlay(final_path, generated_block_metadata, hud_final)
-            hud_path = hud_final
-        except Exception as ex:
-            log(f"Warning: HUD generation failed: {ex}")
+                notify_progress(
+                    f"Scene {s_idx + 1}/{total_scenes} [{scene_name}] - {b_name} ({dur}s): Diffusing Wan 2.2...",
+                    progress=processed_blocks,
+                    total=total_blocks,
+                    cb=progress_callback
+                )
 
-    return {
-        "video_path": final_path,
-        "hud_video_path": hud_path,
-        "poster_path": poster_path,
-        "poster_base64": poster_b64,
-        "duration": total_duration,
-        "width": width,
-        "height": height,
-        "fps": fps,
-        "scenes_count": len(scenes)
-    }
+                log(f"\n[{scene_name} : {b_name}] Duration: {dur}s, Overlap: {overlap}s, Frames: {num_frames}")
+                log(f"Motion prompt: '{motion_prompt[:60]}...'")
+
+                raw_segment_name = f"seg_{s_idx}_{b_idx}_{int(time.time())}.mp4"
+                if prefix_video and os.path.exists(prefix_video):
+                    # CASE A: Conditioned on previous block's tail
+                    ok, seg_raw_path = generate_wan_segment(
+                        image_path=None,
+                        prefix_video_path=prefix_video,
+                        prompt=motion_prompt,
+                        width=width,
+                        height=height,
+                        num_frames=num_frames,
+                        fps=fps,
+                        out_video_name=raw_segment_name,
+                        progress_callback=progress_callback
+                    )
+                else:
+                    # CASE B: First block of scene conditioned on anchor image
+                    ok, seg_raw_path = generate_wan_segment(
+                        image_path=anchor_img_path,
+                        prefix_video_path=None,
+                        prompt=motion_prompt,
+                        width=width,
+                        height=height,
+                        num_frames=num_frames,
+                        fps=fps,
+                        out_video_name=raw_segment_name,
+                        progress_callback=progress_callback
+                    )
+
+                if not ok:
+                    raise RuntimeError(f"Block generation failed [{scene_name} : {b_name}]: {seg_raw_path}")
+
+                processed_blocks += 1
+                _PIPELINE_STATUS["processed_blocks"] = processed_blocks
+
+                block_trimmed = os.path.join(TEMP_DIR, f"trimmed_{s_idx}_{b_idx}.mp4")
+                if b_idx < len(blocks) - 1 and overlap > 0:
+                    # Keep only [0 .. dur - overlap]
+                    keep_dur = max(0.5, dur - overlap)
+                    ffmpeg_engine.cut_duration(seg_raw_path, duration=keep_dur, out_path=block_trimmed)
+
+                    # Extract the tail overlap clip for next block's prefix
+                    tail_clip = os.path.join(TEMP_DIR, f"tail_{s_idx}_{b_idx}_{overlap}s.mp4")
+                    ffmpeg_engine.extract_tail_clip(seg_raw_path, tail_duration=overlap, out_clip_path=tail_clip)
+                    prefix_video = tail_clip
+                else:
+                    # Last block in scene: keep full duration
+                    ffmpeg_engine.cut_duration(seg_raw_path, duration=dur, out_path=block_trimmed)
+                    prefix_video = None
+
+                scene_block_pieces.append(block_trimmed)
+                generated_block_metadata.append((seg_raw_path, dur, overlap))
+
+            # Join blocks within the scene with deflickering & temporal color stabilization
+            scene_final = os.path.join(TEMP_DIR, f"scene_{s_idx}_final.mp4")
+            ffmpeg_engine.concat_videos(scene_block_pieces, scene_final, smooth_transitions=True)
+            all_scene_videos.append(scene_final)
+
+        _PIPELINE_STATUS["phase"] = "ffmpeg_final_assembly"
+        notify_progress(
+            f"All {total_scenes} scenes completed ({total_blocks} blocks). Assembling final cut with FFmpeg...",
+            progress=total_blocks,
+            total=total_blocks,
+            cb=progress_callback
+        )
+
+        # Final movie assembly across all scenes
+        final_name = output_name or f"movie_{int(time.time())}.mp4"
+        if not final_name.endswith(".mp4"):
+            final_name = f"{final_name}.mp4"
+
+        final_path = os.path.join(OUTPUT_VID_DIR, final_name)
+        ffmpeg_engine.concat_videos(all_scene_videos, final_path)
+        total_duration = ffmpeg_engine.get_duration(final_path)
+
+        # Poster extraction from final video
+        poster_filename = f"{os.path.splitext(final_name)[0]}_poster.png"
+        poster_path = os.path.join(OUTPUT_IMG_DIR, poster_filename)
+        poster_path, poster_b64 = ffmpeg_engine.extract_poster(final_path, poster_path)
+        if not poster_b64 and first_poster_b64:
+            poster_b64 = first_poster_b64
+
+        # Optional HUD generation
+        hud_path = None
+        if enable_hud and generated_block_metadata:
+            hud_name = final_name.replace(".mp4", "_hud.mp4")
+            hud_final = os.path.join(OUTPUT_VID_DIR, hud_name)
+            try:
+                ffmpeg_engine.generate_hud_overlay(final_path, generated_block_metadata, hud_final)
+                hud_path = hud_final
+            except Exception as ex:
+                log(f"Warning: HUD generation failed: {ex}")
+
+        return {
+            "video_path": final_path,
+            "hud_video_path": hud_path,
+            "poster_path": poster_path,
+            "poster_base64": poster_b64,
+            "duration": total_duration,
+            "width": width,
+            "height": height,
+            "fps": fps,
+            "scenes_count": len(scenes)
+        }
+    finally:
+        _PIPELINE_STATUS["is_running"] = False
+        _PIPELINE_STATUS["phase"] = "idle"

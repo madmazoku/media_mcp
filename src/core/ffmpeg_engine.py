@@ -41,9 +41,13 @@ def extract_tail_clip(video_path: str, tail_duration: float, out_clip_path: str)
         "-i", video_path,
         "-t", str(tail_duration),
         "-c:v", "h264_nvenc",
-        "-preset", "p6",
-        "-cq", "18",
+        "-preset", "p7",
+        "-cq", "12",
         "-pix_fmt", "yuv420p",
+        "-color_range", "tv",
+        "-colorspace", "bt709",
+        "-color_primaries", "bt709",
+        "-color_trc", "bt709",
         out_clip_path
     ]
     subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
@@ -56,32 +60,47 @@ def cut_duration(video_path: str, duration: float, out_path: str) -> str:
         "-t", str(duration),
         "-i", video_path,
         "-c:v", "h264_nvenc",
-        "-preset", "p6",
-        "-cq", "18",
+        "-preset", "p7",
+        "-cq", "12",
         "-pix_fmt", "yuv420p",
+        "-color_range", "tv",
+        "-colorspace", "bt709",
+        "-color_primaries", "bt709",
+        "-color_trc", "bt709",
         out_path
     ]
     subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
     return out_path
 
-def concat_videos(video_list: List[str], out_path: str) -> str:
+def concat_videos(video_list: List[str], out_path: str, smooth_transitions: bool = False) -> str:
     concat_txt = os.path.join(TEMP_DIR, f"concat_{int(time.time()*1000)}.txt")
     with open(concat_txt, "w", encoding="utf-8") as f:
         for v in video_list:
             f.write(f"file '{v.replace(os.sep, '/')}'\n")
+
+    vf_filters = []
+    if smooth_transitions and len(video_list) > 1:
+        # Stabilize luminance (Y) and temporal chroma (U/V) across prefix stitch points
+        vf_filters.append("deflicker=mode=pm:size=7")
+        vf_filters.append("tmidequalizer=radius=5:sigma=0.3")
 
     cmd = [
         FFMPEG_BIN,
         "-y",
         "-f", "concat",
         "-safe", "0",
-        "-i", concat_txt,
+        "-i", concat_txt
+    ]
+    if vf_filters:
+        cmd.extend(["-vf", ",".join(vf_filters)])
+
+    cmd.extend([
         "-c:v", "h264_nvenc",
         "-preset", "p6",
         "-cq", "18",
         "-pix_fmt", "yuv420p",
         out_path
-    ]
+    ])
     subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
     try:
         os.remove(concat_txt)
