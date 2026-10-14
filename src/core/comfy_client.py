@@ -8,11 +8,13 @@ Zero external dependencies (urllib).
 import sys
 import json
 import time
+import os
+import shutil
 import urllib.request
 import urllib.parse
 import urllib.error
 from typing import Dict, Any, Optional, Tuple, List
-from .config import COMFY_URL
+from .config import COMFY_URL, COMFY_INPUT_DIR, COMFY_OUTPUT_DIR
 
 def log(msg: str):
     sys.stderr.write(f"[comfy-client] {msg}\n")
@@ -87,3 +89,27 @@ def wait_for_prompt(prompt_id: str, timeout: int = 600, poll_interval: float = 1
 def download_output_file(filename: str, subfolder: str = "", file_type: str = "output") -> bytes:
     query = urllib.parse.urlencode({"filename": filename, "subfolder": subfolder, "type": file_type})
     return make_request(f"/view?{query}", raw=True)
+
+def upload_file_to_comfy(src_path: str, custom_filename: Optional[str] = None) -> str:
+    """
+    Copies a local file into ComfyUI's input directory so nodes like LoadImage
+    or VHS_LoadVideoPath can reliably access it.
+    Returns the filename.
+    """
+    if not os.path.exists(src_path):
+        raise FileNotFoundError(f"Source file not found: {src_path}")
+    os.makedirs(COMFY_INPUT_DIR, exist_ok=True)
+    filename = custom_filename or os.path.basename(src_path)
+    dest_path = os.path.join(COMFY_INPUT_DIR, filename)
+    shutil.copy2(src_path, dest_path)
+    return filename
+
+def find_comfy_output_file(filename: str, subfolder: str = "") -> Optional[str]:
+    """
+    Directly checks COMFY_OUTPUT_DIR for an output file to avoid network transfer.
+    """
+    p = os.path.join(COMFY_OUTPUT_DIR, subfolder, filename) if subfolder else os.path.join(COMFY_OUTPUT_DIR, filename)
+    if os.path.exists(p):
+        return p
+    return None
+
