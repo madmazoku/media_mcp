@@ -21,6 +21,7 @@ Publish only the explicitly reviewed task changes. Preserve unrelated working-tr
    - PR title: `AI-<n>: <concise change summary>` as a short, readable title, usually the same as or close to the commit subject;
    - PR body: the expanded description, including the motivation, material changes, verification performed, and relevant caveats.
 8. Do not force the branch slug to repeat the full commit or PR title. Keep it substantially shorter.
+9. **Documentation Integrity (Mandatory)**: Always verify that `README.md` is updated to reflect any changes to tools, options, parameters, architecture, or workflows introduced by the task before committing. The README must remain complete and fully self-contained for any new agent opening the repository.
 
 Example:
 
