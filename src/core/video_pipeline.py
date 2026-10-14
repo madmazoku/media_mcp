@@ -37,84 +37,249 @@ def generate_wan_segment(
     prefix_video_path: Optional[str] = None,
     end_image_path: Optional[str] = None,
     prompt: str = "",
-    negative_prompt: str = "ugly, blurry, static, jitter, deformed, low quality, bad anatomy",
+    negative_prompt: str = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，畸形，blurry, jitter, static, low quality, deformed, extra limbs, bad anatomy, text, watermark",
     width: int = 832,
     height: int = 480,
     num_frames: int = 81,
     fps: int = 16,
-    steps: int = 20,
-    cfg: float = 6.0,
+    seed: Optional[int] = None,
     out_video_name: Optional[str] = None
 ) -> Tuple[bool, str]:
     """
-    Submits a Wan 2.2 Video segment to ComfyUI.
+    Submits a Wan 2.2 Video segment to ComfyUI matching the working implementation in video_extender.py.
     Supports single image seed, end image keyframe, or full prefix video conditioning.
     """
     width = (width // 16) * 16
     height = (height // 16) * 16
     out_video_name = out_video_name or f"wan_{int(time.time()*1000)}.mp4"
-    seed = random.randint(1, 10**14)
+    if seed is None or seed < 0:
+        seed = random.randint(1, 1_000_000_000)
+
+    prefix_str = f"wan22_{int(time.time())}"
 
     wf: Dict[str, Any] = {
-        "1": {"class_type": "VAELoader", "inputs": {"vae_name": "wan2.2_vae.safetensors"}},
-        "2": {"class_type": "WanVideoTextEncode", "inputs": {"positive": prompt, "negative": negative_prompt, "t5": ["3", 0]}},
-        "3": {"class_type": "LoadWanVideoT5", "inputs": {"model_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors"}},
-        "4": {"class_type": "WanVideoModelLoader", "inputs": {"model_name": "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"}},
-        "5": {"class_type": "WanVideoLoraSelect", "inputs": {"lora_name": "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors", "strength": 1.0}},
-        "6": {"class_type": "WanVideoLoraSelect", "inputs": {"lora_name": "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors", "strength": 1.0}},
-        "7": {"class_type": "WanVideoModelLoader", "inputs": {"model_name": "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"}},
-        "11": {
-            "class_type": "WanVideoSampler",
+        # 1. CLIP / Text Encoder
+        "clip_loader": {
             "inputs": {
-                "base_model": ["4", 0], "high_noise_model": ["4", 0], "low_noise_model": ["7", 0],
-                "high_noise_lora": ["5", 0], "low_noise_lora": ["6", 0],
-                "cfg": cfg, "steps": steps, "seed": seed, "shift": 5.0,
-                "text_embeds": ["2", 0], "image_embeds": ["9", 0]
-            }
+                "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+                "type": "wan",
+                "device": "default"
+            },
+            "class_type": "CLIPLoader"
         },
-        "12": {"class_type": "WanVideoDecode", "inputs": {"samples": ["11", 0], "vae": ["1", 0]}},
-        "13": {
-            "class_type": "VHS_VideoCombine",
+        # 2. VAE
+        "vae_loader": {
             "inputs": {
-                "images": ["12", 0], "frame_rate": fps, "format": "video/h264-mp4",
-                "filename_prefix": "media_mcp_wan", "save_output": True
-            }
+                "vae_name": "wan_2.1_vae.safetensors"
+            },
+            "class_type": "VAELoader"
+        },
+        # 3. High Noise Diffusion Model
+        "unet_high": {
+            "inputs": {
+                "unet_name": "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+                "weight_dtype": "default"
+            },
+            "class_type": "UNETLoader"
+        },
+        # 4. Low Noise Diffusion Model
+        "unet_low": {
+            "inputs": {
+                "unet_name": "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+                "weight_dtype": "default"
+            },
+            "class_type": "UNETLoader"
+        },
+        # 5. LoRA for High Noise (4-steps distillation)
+        "lora_high": {
+            "inputs": {
+                "model": ["unet_high", 0],
+                "lora_name": "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors",
+                "strength_model": 1.0
+            },
+            "class_type": "LoraLoaderModelOnly"
+        },
+        # 6. LoRA for Low Noise (4-steps distillation)
+        "lora_low": {
+            "inputs": {
+                "model": ["unet_low", 0],
+                "lora_name": "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors",
+                "strength_model": 1.0
+            },
+            "class_type": "LoraLoaderModelOnly"
+        },
+        # 7. ModelSamplingSD3 (shift = 5.0)
+        "sampling_high": {
+            "inputs": {
+                "model": ["lora_high", 0],
+                "shift": 5.0
+            },
+            "class_type": "ModelSamplingSD3"
+        },
+        "sampling_low": {
+            "inputs": {
+                "model": ["lora_low", 0],
+                "shift": 5.0
+            },
+            "class_type": "ModelSamplingSD3"
+        },
+        # 8. Text Encoders
+        "positive_cond": {
+            "inputs": {
+                "clip": ["clip_loader", 0],
+                "text": prompt
+            },
+            "class_type": "CLIPTextEncode"
+        },
+        "negative_cond": {
+            "inputs": {
+                "clip": ["clip_loader", 0],
+                "text": negative_prompt
+            },
+            "class_type": "CLIPTextEncode"
         }
     }
 
-    # Case A: Forced Prefix Video Conditioning
+    # 9. Conditioning start image or full video prefix
     if prefix_video_path and os.path.exists(prefix_video_path):
-        abs_prefix = os.path.abspath(prefix_video_path)
-        log(f"Configuring TRUE FORCED PREFIX from video: {abs_prefix}")
-        wf["8"] = {
-            "class_type": "VHS_LoadVideoPath",
-            "inputs": {"video": abs_prefix, "force_rate": fps, "custom_width": width, "custom_height": height}
+        prefix_fn = comfy_client.upload_file_to_comfy(
+            prefix_video_path,
+            custom_filename=f"wan_prefix_{int(time.time()*1000)}.mp4"
+        )
+        abs_prefix_in_comfy = os.path.join(comfy_client.COMFY_INPUT_DIR, prefix_fn)
+        log(f"Configuring TRUE FORCED PREFIX from video: {abs_prefix_in_comfy}")
+        wf["prefix_video_loader"] = {
+            "inputs": {
+                "video": os.path.abspath(abs_prefix_in_comfy),
+                "force_rate": float(fps),
+                "custom_width": width,
+                "custom_height": height,
+                "frame_load_cap": 0,
+                "skip_first_frames": 0,
+                "select_every_nth": 1,
+                "format": "Wan"
+            },
+            "class_type": "VHS_LoadVideoPath"
         }
-        start_image_node = ["8", 0]
+        start_image_node = ["prefix_video_loader", 0]
     elif image_path and os.path.exists(image_path):
-        wf["8"] = {"class_type": "LoadImage", "inputs": {"image": os.path.abspath(image_path)}}
-        start_image_node = ["8", 0]
+        img_fn = comfy_client.upload_file_to_comfy(image_path)
+        log(f"Configuring start image: {img_fn}")
+        wf["start_image"] = {
+            "inputs": {
+                "image": img_fn,
+                "upload": "image"
+            },
+            "class_type": "LoadImage"
+        }
+        start_image_node = ["start_image", 0]
     else:
         return False, f"Neither valid start_image nor prefix_video provided: img={image_path}, vid={prefix_video_path}"
 
+    # 10. Wan I2V conditioning: FirstLastFrame or Start-only
     if end_image_path and os.path.exists(end_image_path):
-        log(f"Configuring END-KEYFRAME boundary lock: {end_image_path}")
-        wf["10"] = {"class_type": "LoadImage", "inputs": {"image": os.path.abspath(end_image_path)}}
-        wf["9"] = {
-            "class_type": "WanFirstLastFrameToVideo",
+        end_fn = comfy_client.upload_file_to_comfy(end_image_path)
+        log(f"Configuring END-KEYFRAME boundary lock: {end_fn}")
+        wf["end_image"] = {
             "inputs": {
+                "image": end_fn,
+                "upload": "image"
+            },
+            "class_type": "LoadImage"
+        }
+        wf["wan_i2v"] = {
+            "inputs": {
+                "positive": ["positive_cond", 0],
+                "negative": ["negative_cond", 0],
+                "vae": ["vae_loader", 0],
                 "start_image": start_image_node,
-                "end_image": ["10", 0],
-                "width": width, "height": height, "num_frames": num_frames
-            }
+                "end_image": ["end_image", 0],
+                "width": width,
+                "height": height,
+                "length": num_frames,
+                "batch_size": 1
+            },
+            "class_type": "WanFirstLastFrameToVideo"
         }
     else:
-        wf["9"] = {
-            "class_type": "WanImageToVideo",
-            "inputs": {"image": start_image_node, "width": width, "height": height, "num_frames": num_frames}
+        wf["wan_i2v"] = {
+            "inputs": {
+                "positive": ["positive_cond", 0],
+                "negative": ["negative_cond", 0],
+                "vae": ["vae_loader", 0],
+                "start_image": start_image_node,
+                "width": width,
+                "height": height,
+                "length": num_frames,
+                "batch_size": 1
+            },
+            "class_type": "WanImageToVideo"
         }
 
-    log(f"Submitting Wan 2.2 segment prompt ({num_frames} frames @ {fps}fps)...")
+    # 11. 2-Stage Distilled KSamplers (High Noise 0..2, Low Noise 2..4)
+    wf.update({
+        "sampler_stage1": {
+            "inputs": {
+                "model": ["sampling_high", 0],
+                "positive": ["wan_i2v", 0],
+                "negative": ["wan_i2v", 1],
+                "latent_image": ["wan_i2v", 2],
+                "add_noise": "enable",
+                "noise_seed": seed,
+                "steps": 4,
+                "cfg": 1.0,
+                "sampler_name": "euler",
+                "scheduler": "simple",
+                "start_at_step": 0,
+                "end_at_step": 2,
+                "return_with_leftover_noise": "enable"
+            },
+            "class_type": "KSamplerAdvanced"
+        },
+        "sampler_stage2": {
+            "inputs": {
+                "model": ["sampling_low", 0],
+                "positive": ["wan_i2v", 0],
+                "negative": ["wan_i2v", 1],
+                "latent_image": ["sampler_stage1", 0],
+                "add_noise": "disable",
+                "noise_seed": seed,
+                "steps": 4,
+                "cfg": 1.0,
+                "sampler_name": "euler",
+                "scheduler": "simple",
+                "start_at_step": 2,
+                "end_at_step": 4,
+                "return_with_leftover_noise": "disable"
+            },
+            "class_type": "KSamplerAdvanced"
+        },
+        "vae_decode": {
+            "inputs": {
+                "samples": ["sampler_stage2", 0],
+                "vae": ["vae_loader", 0]
+            },
+            "class_type": "VAEDecode"
+        },
+        "create_video": {
+            "inputs": {
+                "images": ["vae_decode", 0],
+                "fps": fps
+            },
+            "class_type": "CreateVideo"
+        },
+        "save_video": {
+            "inputs": {
+                "video": ["create_video", 0],
+                "filename_prefix": prefix_str,
+                "format": "mp4",
+                "codec": "h264"
+            },
+            "class_type": "SaveVideo"
+        }
+    })
+
+    log(f"Submitting Wan 2.2 segment prompt ({num_frames} frames @ {fps}fps, seed={seed})...")
     ok, prompt_id = comfy_client.queue_prompt(wf)
     if not ok:
         return False, prompt_id
@@ -124,26 +289,38 @@ def generate_wan_segment(
         return False, str(history)
 
     outputs = history.get("outputs", {})
-    vid_meta = None
-    for n_out in outputs.values():
-        if "gifs" in n_out:
-            vid_meta = n_out["gifs"][0]
-            break
+    save_video_out = outputs.get("save_video", {})
+    videos = save_video_out.get("videos", []) or save_video_out.get("gifs", []) or save_video_out.get("images", [])
 
-    if not vid_meta:
-        return False, "ComfyUI completed without output video"
+    found_local_file = None
+    if videos:
+        fn = videos[0]["filename"]
+        sub = videos[0].get("subfolder", "")
+        found_local_file = comfy_client.find_comfy_output_file(fn, sub)
 
-    raw_bytes = comfy_client.download_output_file(
-        filename=vid_meta.get("filename"),
-        subfolder=vid_meta.get("subfolder", ""),
-        file_type=vid_meta.get("type", "output")
-    )
+    if not found_local_file:
+        for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
+            for f in files:
+                if f.startswith(prefix_str) and f.endswith(".mp4"):
+                    found_local_file = os.path.join(root, f)
+                    break
+            if found_local_file:
+                break
 
     out_file = os.path.join(TEMP_DIR, out_video_name)
-    with open(out_file, "wb") as f:
-        f.write(raw_bytes)
+    if found_local_file and os.path.exists(found_local_file):
+        shutil.copy2(found_local_file, out_file)
+        return True, out_file
 
-    return True, out_file
+    if videos:
+        fn = videos[0]["filename"]
+        sub = videos[0].get("subfolder", "")
+        raw_bytes = comfy_client.download_output_file(filename=fn, subfolder=sub)
+        with open(out_file, "wb") as f:
+            f.write(raw_bytes)
+        return True, out_file
+
+    return False, "Wan 2.2 execution completed but output mp4 file could not be located"
 
 
 # ---------------------------------------------------------------------------

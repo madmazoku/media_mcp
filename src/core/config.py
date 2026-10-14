@@ -24,6 +24,9 @@ OUTPUT_VID_DIR = os.path.join(OUTPUT_DIR, "video")
 TEMP_DIR = os.environ.get("MEDIA_TEMP_DIR", str(REPO_DIR / "temp"))
 WORKFLOWS_DIR = os.environ.get("WORKFLOWS_DIR", str(REPO_DIR / "workflows"))
 
+COMFY_INPUT_DIR = os.environ.get("COMFY_INPUT_DIR", r"G:\Git\ComfyUI\input")
+COMFY_OUTPUT_DIR = os.environ.get("COMFY_OUTPUT_DIR", r"G:\Git\ComfyUI\output")
+
 IMAGE_MCP_PORT = int(os.environ.get("IMAGE_MCP_PORT", "7865"))
 VIDEO_MCP_PORT = int(os.environ.get("VIDEO_MCP_PORT", "7866"))
 

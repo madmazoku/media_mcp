@@ -65,7 +65,12 @@ def tool_video_run_scenario(args: dict) -> dict:
     if scenario_path:
         p = Path(scenario_path)
         if not p.is_absolute():
-            p = Path(config.WORKFLOWS_DIR) / scenario_path
+            candidate = Path(config.WORKFLOWS_DIR) / scenario_path
+            if not candidate.exists():
+                candidate_gemini = Path(r"G:\Git\Gemini\workflows") / scenario_path
+                p = candidate_gemini if candidate_gemini.exists() else candidate
+            else:
+                p = candidate
         if not p.exists():
             return {"error": f"Scenario file not found: {p}"}
         try:
@@ -153,7 +158,12 @@ def tool_video_validate_scenario(args: dict) -> dict:
     if scenario_path:
         p = Path(scenario_path)
         if not p.is_absolute():
-            p = Path(config.WORKFLOWS_DIR) / scenario_path
+            candidate = Path(config.WORKFLOWS_DIR) / scenario_path
+            if not candidate.exists():
+                candidate_gemini = Path(r"G:\Git\Gemini\workflows") / scenario_path
+                p = candidate_gemini if candidate_gemini.exists() else candidate
+            else:
+                p = candidate
         if not p.exists():
             return {"error": f"Scenario file not found: {p}"}
         try:

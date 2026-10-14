@@ -65,51 +65,56 @@ def generate_flux_image(
 
     if is_flux2:
         unet_name = "aishaNSFWFlux2Klein_betaV88.safetensors"
-        clip_name1 = "mistral_3_small_flux2_bf16.safetensors"
-        clip_name2 = "qwen_3_8b_fp8mixed.safetensors"
+        clip_name = "qwen_3_8b_fp8mixed.safetensors"
         vae_name = "flux2-vae.safetensors"
         prompt_prefix = "flux2, uncensored, "
+        full_prompt = f"{prompt_prefix}{prompt}".strip()
+
+        wf: Dict[str, Any] = {
+            "1001": {"class_type": "UNETLoader", "inputs": {"unet_name": unet_name, "weight_dtype": "default"}},
+            "1002": {"class_type": "CLIPLoader", "inputs": {"clip_name": clip_name, "type": "flux2"}},
+            "1004": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["1002", 0], "text": full_prompt}},
+            "1025": {"class_type": "FluxGuidance", "inputs": {"conditioning": ["1004", 0], "guidance": guidance}},
+            "1006": {"class_type": "BasicGuider", "inputs": {"model": ["1001", 0], "conditioning": ["1025", 0]}},
+            "1007": {"class_type": "EmptySD3LatentImage", "inputs": {"batch_size": 1, "height": height, "width": width}},
+            "1022": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
+            "1023": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+            "1024": {"class_type": "Flux2Scheduler", "inputs": {"steps": steps, "width": width, "height": height}},
+            "1021": {"class_type": "SamplerCustomAdvanced", "inputs": {
+                "noise": ["1022", 0], "guider": ["1006", 0], "sampler": ["1023", 0],
+                "sigmas": ["1024", 0], "latent_image": ["1007", 0]
+            }},
+            "1010": {"class_type": "VAELoader", "inputs": {"vae_name": vae_name}},
+            "1009": {"class_type": "VAEDecode", "inputs": {"samples": ["1021", 0], "vae": ["1010", 0]}},
+            "1011": {"class_type": "SaveImage", "inputs": {"filename_prefix": f"media_mcp_flux_{model_type}", "images": ["1009", 0]}}
+        }
     else:
         unet_name = "persephoneFluxNSFWSFW_20FP16.safetensors"
         clip_name1 = "t5xxl_fp16.safetensors"
         clip_name2 = "clip_l.safetensors"
         vae_name = "ae.safetensors"
-        prompt_prefix = ""
+        full_prompt = prompt.strip()
 
-    full_prompt = f"{prompt_prefix}{prompt}".strip()
-
-    # Build ComfyUI workflow graph
-    wf: Dict[str, Any] = {
-        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": unet_name, "weight_dtype": "default"}},
-        "2": {"class_type": "DualCLIPLoader", "inputs": {"clip_name1": clip_name1, "clip_name2": clip_name2, "type": "flux2" if is_flux2 else "flux"}},
-        "3": {"class_type": "VAELoader", "inputs": {"vae_name": vae_name}},
-        "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": full_prompt}},
-        "6": {"class_type": "EmptySD3LatentImage", "inputs": {"batch_size": 1, "height": height, "width": width}},
-        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
-        "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": f"media_mcp_flux_{model_type}", "images": ["8", 0]}}
-    }
-
-    sampler_model = ["1", 0]
-    if lora_name and str(lora_name).lower() not in ("none", "disabled", "false", ""):
-        lora_fn = lora_name if lora_name.endswith(".safetensors") else f"{lora_name}.safetensors"
-        wf["10"] = {
-            "class_type": "LoraLoaderModelOnly",
-            "inputs": {"lora_name": lora_fn, "model": ["1", 0], "strength_model": float(lora_strength)}
+        wf: Dict[str, Any] = {
+            "1": {"class_type": "UNETLoader", "inputs": {"unet_name": unet_name, "weight_dtype": "default"}},
+            "2": {"class_type": "DualCLIPLoader", "inputs": {"clip_name1": clip_name1, "clip_name2": clip_name2, "type": "flux"}},
+            "3": {"class_type": "VAELoader", "inputs": {"vae_name": vae_name}},
+            "4": {"class_type": "FluxGuidance", "inputs": {"conditioning": ["5", 0], "guidance": guidance}},
+            "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": full_prompt}},
+            "6": {"class_type": "EmptySD3LatentImage", "inputs": {"batch_size": 1, "height": height, "width": width}},
+            "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
+            "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": f"media_mcp_flux_{model_type}", "images": ["8", 0]}}
         }
-        sampler_model = ["10", 0]
 
-    if is_flux2:
-        wf["4"] = {"class_type": "FluxGuidance", "inputs": {"conditioning": ["5", 0], "guidance": guidance}}
-        wf["7"] = {
-            "class_type": "KSamplerSelect",
-            "inputs": {
-                "cfg": 1.0, "denoise": 1.0, "latent_image": ["6", 0],
-                "model": sampler_model, "negative": ["5", 0], "positive": ["4", 0],
-                "sampler_name": "euler", "scheduler": "simple", "seed": seed, "steps": steps
+        sampler_model = ["1", 0]
+        if lora_name and str(lora_name).lower() not in ("none", "disabled", "false", ""):
+            lora_fn = lora_name if lora_name.endswith(".safetensors") else f"{lora_name}.safetensors"
+            wf["10"] = {
+                "class_type": "LoraLoaderModelOnly",
+                "inputs": {"lora_name": lora_fn, "model": ["1", 0], "strength_model": float(lora_strength)}
             }
-        }
-    else:
-        wf["4"] = {"class_type": "FluxGuidance", "inputs": {"conditioning": ["5", 0], "guidance": guidance}}
+            sampler_model = ["10", 0]
+
         wf["7"] = {
             "class_type": "KSampler",
             "inputs": {
