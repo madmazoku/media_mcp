@@ -155,8 +155,8 @@ class SdxlImageGenerator(BaseImageGenerator):
                 save_filename = request.custom_filename if request.custom_filename.endswith(".png") else f"{request.custom_filename}.png"
             else:
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                req_uuid = uuid.uuid4().hex[:8]
-                save_filename = f"a1111_{timestamp}_{req_uuid}.png"
+                req_hash = uuid.uuid4().hex[:6]
+                save_filename = f"{timestamp}-{req_hash}-sdxl.png"
             final_path = os.path.join(OUTPUT_IMG_DIR, save_filename)
 
             with open(final_path, "wb") as f:
@@ -264,8 +264,8 @@ class Flux1ImageGenerator(BaseImageGenerator):
             save_filename = request.custom_filename if request.custom_filename.endswith(".png") else f"{request.custom_filename}.png"
         else:
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            req_uuid = uuid.uuid4().hex[:8]
-            save_filename = f"flux1_{timestamp}_{req_uuid}.png"
+            req_hash = uuid.uuid4().hex[:6]
+            save_filename = f"{timestamp}-{req_hash}-flux1.png"
         final_path = os.path.join(OUTPUT_IMG_DIR, save_filename)
 
         with open(final_path, "wb") as f:
@@ -354,8 +354,8 @@ class Flux2ImageGenerator(BaseImageGenerator):
             save_filename = request.custom_filename if request.custom_filename.endswith(".png") else f"{request.custom_filename}.png"
         else:
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            req_uuid = uuid.uuid4().hex[:8]
-            save_filename = f"flux2_{timestamp}_{req_uuid}.png"
+            req_hash = uuid.uuid4().hex[:6]
+            save_filename = f"{timestamp}-{req_hash}-flux2.png"
         final_path = os.path.join(OUTPUT_IMG_DIR, save_filename)
 
         with open(final_path, "wb") as f:

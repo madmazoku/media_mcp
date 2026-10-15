@@ -67,11 +67,14 @@ class VideoRequest(GenerationRequest):
     core_frames: Optional[int] = None
     tail_frames: int = 0
     save_tail: bool = True
+    save_tail_image: bool = False
     fps: int = 16
     steps: Optional[int] = None
     cfg: Optional[float] = None
     sampler_name: Optional[str] = None
     scheduler: Optional[str] = None
+    ramp_latents: int = 3
+    min_cfg: float = 1.0
     out_video_name: Optional[str] = None
     progress_callback: Optional[Any] = None
 
@@ -84,7 +87,10 @@ class GenerationResult:
     metadata: Dict[str, Any] = field(default_factory=dict)
     tail_latent_path: Optional[str] = None
     tail_video_path: Optional[str] = None
+    tail_image_path: Optional[str] = None
+    prefix_video_path: Optional[str] = None
     error: Optional[str] = None
+
 
 
 class BaseGenerator(ABC):

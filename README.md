@@ -107,11 +107,16 @@ media_mcp/
 * **Text Encoder (CLIP):** `umt5_xxl_fp8_e4m3fn_scaled.safetensors` $\rightarrow$ `ComfyUI/models/text_encoders/` (или `clip/`)
 * **VAE:** `wan_2.1_vae.safetensors` $\rightarrow$ `ComfyUI/models/vae/`
 
-#### Б. Видеодвижок LTX-2.3 (22B — Дистиллированный CFG 3.0)
-* **UNET:** `ltx-2.3-22b-dev-fp8.safetensors` $\rightarrow$ `ComfyUI/models/diffusion_models/` (или `unet/`)
+#### Б. Видеодвижок LTX-2.3 (22B — Базовый и Файн-тюны)
+* **UNET (Базовый дефолт):** `ltx-2.3-22b-dev-fp8.safetensors` $\rightarrow$ `ComfyUI/models/diffusion_models/` (или `unet/`)
+* **UNET (Файн-тюны / NSFW):** `sulphur_dev_bf16_model.safetensors` $\rightarrow$ `ComfyUI/models/diffusion_models/`
+  *(Примечание: для Sulphur используйте чистый BF16 вариант; версия fp8mixed с `comfy_quant` метаданными не поддерживается стандартным UNETLoader).*
 * **LoRA (Distilled 1.1):** `ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors` $\rightarrow$ `ComfyUI/models/loras/`
-* **Text Encoder (DualCLIP):** `ltx-2-3-22b-text_encoder.safetensors` $\rightarrow$ `ComfyUI/models/text_encoders/` (или `clip/`)
+  *(Поддерживается регулировка `lora_strength: 0.0` для полного отключения на кастомных файн-тюнах).*
+* **Text Encoder (DualCLIP):** `gemma_3_12B_it.safetensors` + `ltx-2-3-22b-text_encoder.safetensors` $\rightarrow$ `ComfyUI/models/text_encoders/` (или `clip/`)
 * **VAE:** `ltx-2-3-22b-VAE.safetensors` $\rightarrow$ `ComfyUI/models/vae/`
+* **Настройки:** `checkpoint`, `weight_dtype` (`default`, `fp8_e4m3fn`), `lora_strength`, `cfg`, `steps` на уровне сценария и блоков.
+* **Именование файлов:** строгий стандарт `{timestamp}-{random}-s{%03d}-b{%03d}-{type}.{ext}` (`-core.mp4`, `-tail.png`, `-tail.latent`, `-anchor.png`, `-final.mp4`).
 
 #### В. Генерация опорных кадров через FLUX.1 Dev
 * **UNET:** `persephoneFluxNSFWSFW_20FP16.safetensors` $\rightarrow$ `ComfyUI/models/unet/`
@@ -180,13 +185,14 @@ VIDEO_MCP_PORT=7866
 - **`video_run_scenario`**: Запуск выполнения сценария видео.
   - `scenario_path` *(string)*: Имя файла в папке `workflows/` или абсолютный путь.
   - `scenario_data` *(array/object)*: Иерархическая структура сценария (альтернатива файлу, для генерации «на лету»).
+  - `video` *(object)*: Глобальная конфигурация (`engine`: `"wan-fast"` по умолчанию, `"wan"`, `"ltx"`).
   - `start_image` *(string)*: Опциональный путь к стартовому изображению для Сцены 1.
   - `output_name` *(string)*: Имя итогового MP4-файла в `output/video/`.
   - `width`, `height` *(int)*: Разрешение (по умолчанию `832x480`).
-  - `fps` *(int)*: Частота кадров (по умолчанию `16`).
+  - `fps` *(int)*: Частота кадров (по умолчанию `16` для Wan, `24` для LTX).
   - `enable_hud` *(boolean)*: Если `true`, дополнительно создает отладочную версию видео `_hud.mp4` с динамическими таймерами обратного отсчета для каждого блока и нахлёста префикса.
-- **`video_validate_scenario`**: Предварительная валидация таймингов, перекрытий (`overlap < duration`) и путей к опорным кадрам перед запуском.
-- **`video_generate_block`**: Одиночная генерация блока в Wan 2.2 с поддержкой опорного кадра (`start_image`), граничного кадра (`end_image`) или префикса движения (`prefix_video`).
+- **`video_validate_scenario`**: Предварительная валидация таймингов, перекрытий (`prefix_length + tail_length < duration`, по умолчанию `overlap: 0.0`) и путей к опорным кадрам перед запуском.
+- **`video_generate_block`**: Одиночная генерация блока (`engine`: `"wan-fast"` по умолчанию, `"wan"`, `"ltx"`) с поддержкой опорного кадра (`start_image`), граничного кадра (`end_image`) или префикса движения (`prefix_latent`).
 - **`media_get_status`**: Сквозной мониторинг статуса выполнения (активный сценарий/блок, очередь ComfyUI Wan/FLUX, прогресс сэмплера Automatic1111).
 - **`media_interrupt`**: Экстренная остановка активной генерации во всех компонентах (прерывает сценарий, ComfyUI Wan/FLUX и Automatic1111).
 
@@ -194,12 +200,13 @@ VIDEO_MCP_PORT=7866
 
 ## 🎬 Кинематографический формат сценария (`workflows/*.json`)
 
-Сценарий строится по иерархическому принципу:
+Сценарий строится по иерархическому принципу (`engine: "wan-fast"`, `overlap: 0.0` по умолчанию):
 
 ```json
 [
   {
     "scene_name": "Сцена 1: Купе поезда",
+    "engine": "wan-fast",
     "anchor_image": {
       "prompt": "Cinematic visual novel CG, first-person POV shot from inside cozy vintage train compartment, golden afternoon sunlight. Hermione Granger unicorn mare standing in open doorway, looking inside inquisitively, foreground shows pony hooves holding glowing ancient spellbook. Makoto Shinkai lighting, clean detailed line art",
       "model": "flux1_dev",
@@ -209,7 +216,7 @@ VIDEO_MCP_PORT=7866
       {
         "name": "Блок 1: Поиск жабы",
         "duration": 5.0,
-        "overlap": 1.5,
+        "overlap": 0.0,
         "motion_prompt": "Her horn sparkles with magic telekinesis aura, sliding the compartment door open smoothly, trotting forward slightly, looking around the floor and under seats searching for Neville's lost pet toad, cute expressive animated equine expressions"
       },
       {

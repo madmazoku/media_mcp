@@ -67,12 +67,12 @@ def create_image_generator(engine_or_name: str = "sdxl", settings: Optional[Dict
     return cls(name=engine_or_name, settings=settings)
 
 
-def create_video_generator(engine_or_name: str = "wan", settings: Optional[Dict[str, Any]] = None) -> BaseVideoGenerator:
+def create_video_generator(engine_or_name: str = "wan-fast", settings: Optional[Dict[str, Any]] = None) -> BaseVideoGenerator:
     """
     Factory method to create a video generator matching engine_or_name.
-    Defaults to WanFullVideoGenerator if engine is 'wan', or WanFastVideoGenerator if 'wan-fast'.
+    Defaults to WanFastVideoGenerator if engine is 'wan-fast' or default, or WanFullVideoGenerator if 'wan'.
     """
-    key = str(engine_or_name or "wan").strip().lower()
+    key = str(engine_or_name or "wan-fast").strip().lower()
     cls = VIDEO_GENERATOR_REGISTRY.get(key)
     if cls is None:
         if any(x in key for x in ["ltx", "22b"]):

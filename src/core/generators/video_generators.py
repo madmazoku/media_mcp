@@ -44,6 +44,7 @@ class BaseVideoGenerator(BaseGenerator):
         out_video_name: str,
         save_tail_latent: bool = False,
         save_tail_video: bool = False,
+        save_tail_image: bool = False,
         progress_callback: Optional[Any] = None
     ) -> GenerationResult:
         """
@@ -74,7 +75,7 @@ class BaseVideoGenerator(BaseGenerator):
         if not found_local_file:
             for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
                 for f in files:
-                    if f.startswith(prefix_str) and not f.startswith(f"{prefix_str}_tail") and f.endswith(".mp4"):
+                    if f.startswith(prefix_str) and not f.startswith(f"{prefix_str}_tail") and not f.startswith(f"{prefix_str}-tail") and f.endswith(".mp4"):
                         found_local_file = os.path.join(root, f)
                         break
                 if found_local_file:
@@ -102,14 +103,14 @@ class BaseVideoGenerator(BaseGenerator):
                 sub = saved_latents[0].get("subfolder", "")
                 found = comfy_client.find_comfy_output_file(fn, sub)
                 if found and os.path.exists(found):
-                    out_tail_latent_path = os.path.join(TEMP_DIR, f"{prefix_str}_tail.latent")
+                    out_tail_latent_path = os.path.join(TEMP_DIR, f"{prefix_str}-tail.latent")
                     shutil.copy2(found, out_tail_latent_path)
             if not out_tail_latent_path:
                 for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
                     for f in files:
-                        if f.startswith(f"{prefix_str}_tail") and f.endswith(".latent"):
+                        if (f.startswith(f"{prefix_str}-tail") or f.startswith(f"{prefix_str}_tail")) and f.endswith(".latent"):
                             cand = os.path.join(root, f)
-                            out_tail_latent_path = os.path.join(TEMP_DIR, f"{prefix_str}_tail.latent")
+                            out_tail_latent_path = os.path.join(TEMP_DIR, f"{prefix_str}-tail.latent")
                             shutil.copy2(cand, out_tail_latent_path)
                             break
                     if out_tail_latent_path:
@@ -133,24 +134,78 @@ class BaseVideoGenerator(BaseGenerator):
             if not found_tail_file:
                 for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
                     for f in files:
-                        if f.startswith(f"{prefix_str}_tail") and f.endswith(".mp4"):
+                        if (f.startswith(f"{prefix_str}-tail") or f.startswith(f"{prefix_str}_tail")) and f.endswith(".mp4"):
                             found_tail_file = os.path.join(root, f)
                             break
                     if found_tail_file:
                         break
 
             if found_tail_file and os.path.exists(found_tail_file):
-                out_tail_video_path = os.path.join(TEMP_DIR, f"{prefix_str}_tail.mp4")
+                out_tail_video_path = os.path.join(TEMP_DIR, f"{prefix_str}-tail.mp4")
                 shutil.copy2(found_tail_file, out_tail_video_path)
                 log(f"Successfully captured tail video: {os.path.basename(out_tail_video_path)}")
+
+        # 3b. Locate tail image (if requested)
+        out_tail_image_path: Optional[str] = None
+        if save_tail_image:
+            save_tail_img_out = outputs.get("save_tail_image", {})
+            saved_images = save_tail_img_out.get("images", [])
+            found_tail_img = None
+            if saved_images:
+                fn = saved_images[0].get("filename")
+                sub = saved_images[0].get("subfolder", "")
+                found_tail_img = comfy_client.find_comfy_output_file(fn, sub)
+
+            if not found_tail_img:
+                for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
+                    for f in files:
+                        if (f.startswith(f"{prefix_str}-tail") or f.startswith(f"{prefix_str}_tail")) and f.endswith(".png"):
+                            found_tail_img = os.path.join(root, f)
+                            break
+                    if found_tail_img:
+                        break
+
+            if found_tail_img and os.path.exists(found_tail_img):
+                out_tail_image_path = os.path.join(TEMP_DIR, f"{prefix_str}-tail.png")
+                shutil.copy2(found_tail_img, out_tail_image_path)
+                log(f"Successfully captured pristine tail image from workflow: {os.path.basename(out_tail_image_path)}")
+            else:
+                log(f"Warning: Tail image output file not found for {prefix_str}")
+
+        # 4. Locate prefix video (if requested / generated)
+        out_prefix_video_path: Optional[str] = None
+        save_prefix_out = outputs.get("save_prefix_video", {})
+        prefix_videos = save_prefix_out.get("videos", []) or save_prefix_out.get("gifs", []) or save_prefix_out.get("images", [])
+        found_prefix_file = None
+        if prefix_videos:
+            fn = prefix_videos[0]["filename"]
+            sub = prefix_videos[0].get("subfolder", "")
+            found_prefix_file = comfy_client.find_comfy_output_file(fn, sub)
+
+        if not found_prefix_file:
+            for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
+                for f in files:
+                    if (f.startswith(f"{prefix_str}-prefix") or f.startswith(f"{prefix_str}_prefix")) and f.endswith(".mp4"):
+                        found_prefix_file = os.path.join(root, f)
+                        break
+                if found_prefix_file:
+                    break
+
+        if found_prefix_file and os.path.exists(found_prefix_file):
+            out_prefix_video_path = os.path.join(TEMP_DIR, f"{prefix_str}-prefix.mp4")
+            shutil.copy2(found_prefix_file, out_prefix_video_path)
+            log(f"Successfully captured prefix video: {os.path.basename(out_prefix_video_path)}")
 
         return GenerationResult(
             success=True,
             file_path=out_file,
             tail_latent_path=out_tail_latent_path,
             tail_video_path=out_tail_video_path,
+            tail_image_path=out_tail_image_path,
+            prefix_video_path=out_prefix_video_path,
             metadata={"name": self.name, "prefix": prefix_str}
         )
+
 
 
 class BaseWanVideoGenerator(BaseVideoGenerator):
@@ -193,14 +248,14 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
             },
             "unet_high": {
                 "inputs": {
-                    "unet_name": self.settings.get("checkpoint", "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"),
+                    "unet_name": self.settings.get("checkpoint") or self.settings.get("model") or "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
                     "weight_dtype": "default"
                 },
                 "class_type": "UNETLoader"
             },
             "unet_low": {
                 "inputs": {
-                    "unet_name": self.settings.get("checkpoint_low", "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"),
+                    "unet_name": self.settings.get("checkpoint_low") or self.settings.get("model_low") or "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
                     "weight_dtype": "default"
                 },
                 "class_type": "UNETLoader"
@@ -237,9 +292,10 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
 
         # Conditioning Setup
         if request.prefix_latent_path and os.path.exists(request.prefix_latent_path):
+            pref_filename = os.path.basename(request.prefix_latent_path)
             prefix_fn = comfy_client.upload_file_to_comfy(
                 request.prefix_latent_path,
-                custom_filename=f"wan_pref_{int(time.time()*1000)}.latent"
+                custom_filename=pref_filename
             )
             log(f"Configuring DIRECT LATENT PREFIX via WanLatentPrefixToVideo: {prefix_fn}")
             wf["load_prefix_latent"] = {
@@ -318,10 +374,51 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
         cond_negative = ["wan_conditioning", 1]
         latent_input = ["wan_conditioning", 2]
 
+        model_high = ["sampling_high", 0]
+        model_low = ["sampling_low", 0]
+        latent_for_decode = ["sampler_stage2", 0]
+
+        if request.prefix_latent_path and os.path.exists(request.prefix_latent_path):
+            ramp_l = getattr(request, "ramp_latents", 3)
+            ramp_l = 3 if ramp_l is None else int(ramp_l)
+            min_c = getattr(request, "min_cfg", 1.0)
+            min_c = 1.0 if min_c is None else float(min_c)
+
+            log(f"Enabling WanLatentPrefixLock (Option B): ramp_latents={ramp_l}, min_cfg={min_c} + WanLatentPrefixRestore")
+            wf["prefix_lock_stage1"] = {
+                "inputs": {
+                    "model": model_high,
+                    "prefix_latent": ["load_prefix_latent", 0],
+                    "ramp_latents": ramp_l,
+                    "min_cfg": min_c,
+                },
+                "class_type": "WanLatentPrefixLock"
+            }
+            wf["prefix_lock_stage2"] = {
+                "inputs": {
+                    "model": model_low,
+                    "prefix_latent": ["load_prefix_latent", 0],
+                    "ramp_latents": ramp_l,
+                    "min_cfg": min_c,
+                },
+                "class_type": "WanLatentPrefixLock"
+            }
+            model_high = ["prefix_lock_stage1", 0]
+            model_low = ["prefix_lock_stage2", 0]
+
+            wf["prefix_latent_restore"] = {
+                "inputs": {
+                    "samples": ["sampler_stage2", 0],
+                    "prefix_latent": ["load_prefix_latent", 0],
+                },
+                "class_type": "WanLatentPrefixRestore"
+            }
+            latent_for_decode = ["prefix_latent_restore", 0]
+
         wf.update({
             "sampler_stage1": {
                 "inputs": {
-                    "model": ["sampling_high", 0],
+                    "model": model_high,
                     "positive": cond_positive,
                     "negative": cond_negative,
                     "latent_image": latent_input,
@@ -339,7 +436,7 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
             },
             "sampler_stage2": {
                 "inputs": {
-                    "model": ["sampling_low", 0],
+                    "model": model_low,
                     "positive": cond_positive,
                     "negative": cond_negative,
                     "latent_image": ["sampler_stage1", 0],
@@ -357,7 +454,7 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
             },
             "vae_decode": {
                 "inputs": {
-                    "samples": ["sampler_stage2", 0],
+                    "samples": latent_for_decode,
                     "vae": ["vae_loader", 0]
                 },
                 "class_type": "VAEDecode"
@@ -376,8 +473,36 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
             }
             video_images_input = ["slice_core", 0]
             log(f"Configured ComfyUI ImageFromBatch core: start={slice_batch_idx}, length={request.core_frames}")
+
+            if slice_batch_idx > 1:
+                wf["slice_prefix"] = {
+                    "inputs": {
+                        "image": ["vae_decode", 0],
+                        "batch_index": 0,
+                        "length": int(slice_batch_idx)
+                    },
+                    "class_type": "ImageFromBatch"
+                }
+                wf["create_prefix_video"] = {
+                    "inputs": {
+                        "images": ["slice_prefix", 0],
+                        "fps": fps
+                    },
+                    "class_type": "CreateVideo"
+                }
+                wf["save_prefix_video"] = {
+                    "inputs": {
+                        "video": ["create_prefix_video", 0],
+                        "filename_prefix": f"{prefix_str}-prefix",
+                        "format": "mp4",
+                        "codec": "h264"
+                    },
+                    "class_type": "SaveVideo"
+                }
+                log(f"Configured ComfyUI ImageFromBatch prefix debug video: length={slice_batch_idx}, prefix={prefix_str}-prefix")
         else:
             video_images_input = ["vae_decode", 0]
+
 
         wf.update({
             "create_video": {
@@ -398,7 +523,45 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
             }
         })
 
+        if request.save_tail and request.tail_frames > 0:
+            wf["cut_tail_latent"] = {
+                "inputs": {
+                    "samples": ["sampler_stage2", 0],
+                    "dim": "t",
+                    "index": -int(request.tail_frames),
+                    "amount": int(request.tail_frames)
+                },
+                "class_type": "LatentCut"
+            }
+            wf["save_tail_latent"] = {
+                "inputs": {
+                    "samples": ["cut_tail_latent", 0],
+                    "filename_prefix": f"{prefix_str}-tail"
+                },
+                "class_type": "SaveLatent"
+            }
+            log(f"Configured native LatentCut (dim=t, amount={request.tail_frames}) + SaveLatent: prefix={prefix_str}-tail")
+
+        if request.save_tail_image:
+            wf["slice_tail_image"] = {
+                "inputs": {
+                    "image": ["vae_decode", 0],
+                    "batch_index": int(num_frames - 1),
+                    "length": 1
+                },
+                "class_type": "ImageFromBatch"
+            }
+            wf["save_tail_image"] = {
+                "inputs": {
+                    "images": ["slice_tail_image", 0],
+                    "filename_prefix": f"{prefix_str}-tail"
+                },
+                "class_type": "SaveImage"
+            }
+            log(f"Configured ComfyUI ImageFromBatch (last frame {num_frames - 1}) + SaveImage: prefix={prefix_str}-tail")
+
         return wf
+
 
 
 class WanFastVideoGenerator(BaseWanVideoGenerator):
@@ -416,6 +579,8 @@ class WanFastVideoGenerator(BaseWanVideoGenerator):
         out_video_name = request.out_video_name or f"wan_fast_{int(time.time()*1000)}.mp4"
         clean_base = os.path.splitext(os.path.basename(out_video_name))[0]
         if clean_base.endswith("_core"):
+            clean_base = clean_base[:-5]
+        elif clean_base.endswith("-core"):
             clean_base = clean_base[:-5]
         prefix_str = clean_base
 
@@ -456,6 +621,7 @@ class WanFastVideoGenerator(BaseWanVideoGenerator):
             prefix_str=prefix_str,
             out_video_name=out_video_name,
             save_tail_latent=request.save_tail,
+            save_tail_image=request.save_tail_image,
             progress_callback=request.progress_callback
         )
 
@@ -477,6 +643,8 @@ class WanFullVideoGenerator(BaseWanVideoGenerator):
         clean_base = os.path.splitext(os.path.basename(out_video_name))[0]
         if clean_base.endswith("_core"):
             clean_base = clean_base[:-5]
+        elif clean_base.endswith("-core"):
+            clean_base = clean_base[:-5]
         prefix_str = clean_base
 
         log(f"Configuring Wan 2.2 FULL SAMPLING MODE: Direct High/Low Noise UNets, CFG {actual_cfg}, {actual_steps} steps (split @ {split_step})")
@@ -497,6 +665,7 @@ class WanFullVideoGenerator(BaseWanVideoGenerator):
             prefix_str=prefix_str,
             out_video_name=out_video_name,
             save_tail_latent=request.save_tail,
+            save_tail_image=request.save_tail_image,
             progress_callback=request.progress_callback
         )
 
@@ -521,28 +690,45 @@ class LtxVideoGenerator(BaseVideoGenerator):
         clean_base = os.path.splitext(os.path.basename(out_video_name))[0]
         if clean_base.endswith("_core"):
             clean_base = clean_base[:-5]
-        prefix_str = f"ltx23_{int(time.time()*1000)}"
+        elif clean_base.endswith("-core"):
+            clean_base = clean_base[:-5]
+        prefix_str = clean_base
+
+        model_setting = str(self.settings.get("model") or self.settings.get("checkpoint") or "ltx-2.3-22b-dev-fp8.safetensors").strip()
+        m_lower = model_setting.lower()
+        if "sulphur" in m_lower or "sulfur" in m_lower:
+            if "bf16" in m_lower:
+                unet_name = "sulphur_dev_bf16_model.safetensors"
+            else:
+                unet_name = "sulphur_dev_model_fp8mixed.safetensors"
+        elif "dev" in m_lower or "ltx" in m_lower or "base" in m_lower:
+            if "bf16" in m_lower:
+                unet_name = "ltx-2.3-22b-dev.safetensors"
+            else:
+                unet_name = "ltx-2.3-22b-dev-fp8.safetensors"
+        else:
+            unet_name = model_setting if model_setting.endswith(".safetensors") else f"{model_setting}.safetensors"
+
+        log(f"Configuring LTX generator: UNet={unet_name}, CFG={cfg}, steps={steps}")
+
+        weight_dtype = str(self.settings.get("weight_dtype") or "default").strip()
+        lora_setting = self.settings.get("lora_strength")
+        if lora_setting is None:
+            lora_setting = self.settings.get("strength_model")
+        lora_strength = float(lora_setting) if lora_setting is not None else 1.0
 
         wf: Dict[str, Any] = {
             "unet_loader": {
                 "inputs": {
-                    "unet_name": self.settings.get("checkpoint", "ltx-2.3-22b-dev-fp8.safetensors"),
-                    "weight_dtype": "default"
+                    "unet_name": unet_name,
+                    "weight_dtype": weight_dtype
                 },
                 "class_type": "UNETLoader"
             },
-            "lora_loader": {
-                "inputs": {
-                    "model": ["unet_loader", 0],
-                    "lora_name": "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors",
-                    "strength_model": 1.0
-                },
-                "class_type": "LoraLoaderModelOnly"
-            },
             "clip_loader": {
                 "inputs": {
-                    "clip_name1": "ltx-2-3-22b-text_encoder.safetensors",
-                    "clip_name2": "ltx-2-3-22b-text_encoder.safetensors",
+                    "clip_name1": self.settings.get("text_encoder", "gemma_3_12B_it.safetensors"),
+                    "clip_name2": self.settings.get("text_encoder_proj", "ltx-2-3-22b-text_encoder.safetensors"),
                     "type": "ltxv"
                 },
                 "class_type": "DualCLIPLoader"
@@ -586,8 +772,28 @@ class LtxVideoGenerator(BaseVideoGenerator):
             }
         }
 
-        # Start conditioning (Prefix video or start image)
-        if request.prefix_video_path and os.path.exists(request.prefix_video_path):
+        # Start conditioning (Prefix latent, prefix video, or start image)
+        start_image_node = None
+        if request.prefix_latent_path and os.path.exists(request.prefix_latent_path):
+            pref_filename = os.path.basename(request.prefix_latent_path)
+            prefix_fn = comfy_client.upload_file_to_comfy(
+                request.prefix_latent_path,
+                custom_filename=pref_filename
+            )
+            log(f"Configuring TRUE TAIL LATENT PREFIX for LTX: {prefix_fn}")
+            wf["load_prefix_latent"] = {
+                "inputs": {"latent": prefix_fn},
+                "class_type": "LoadLatent"
+            }
+            wf["prefix_latent_decode"] = {
+                "inputs": {
+                    "samples": ["load_prefix_latent", 0],
+                    "vae": ["vae_loader", 0]
+                },
+                "class_type": "VAEDecode"
+            }
+            start_image_node = ["prefix_latent_decode", 0]
+        elif request.prefix_video_path and os.path.exists(request.prefix_video_path):
             prefix_fn = comfy_client.upload_file_to_comfy(
                 request.prefix_video_path,
                 custom_filename=f"ltx_prefix_{int(time.time()*1000)}.mp4"
@@ -607,30 +813,48 @@ class LtxVideoGenerator(BaseVideoGenerator):
                 },
                 "class_type": "VHS_LoadVideoPath"
             }
-            wf["ltxv_img_to_video"] = {
-                "inputs": {
-                    "image": ["prefix_video_loader", 0],
-                    "vae": ["vae_loader", 0]
-                },
-                "class_type": "LTXVImageToVideo"
-            }
+            start_image_node = ["prefix_video_loader", 0]
         elif request.image_path and os.path.exists(str(request.image_path)):
             img_fn = comfy_client.upload_file_to_comfy(str(request.image_path))
             wf["start_image"] = {"inputs": {"image": img_fn, "upload": "image"}, "class_type": "LoadImage"}
-            wf["ltxv_img_to_video"] = {
-                "inputs": {
-                    "image": ["start_image", 0],
-                    "vae": ["vae_loader", 0]
-                },
-                "class_type": "LTXVImageToVideo"
-            }
+            start_image_node = ["start_image", 0]
         else:
             raise ValueError(f"No valid start input provided for LTX video generator: {request.image_path}")
+
+        if start_image_node:
+            wf["inplace_cond"] = {
+                "inputs": {
+                    "image": start_image_node,
+                    "vae": ["vae_loader", 0],
+                    "latent": ["empty_latent", 0],
+                    "strength": 1.0,
+                    "bypass": False
+                },
+                "class_type": "LTXVImgToVideoInplace"
+            }
+            active_latent_node = ["inplace_cond", 0]
+        else:
+            active_latent_node = ["empty_latent", 0]
+
+        if lora_strength > 0:
+            wf["lora_loader"] = {
+                "inputs": {
+                    "model": ["unet_loader", 0],
+                    "lora_name": str(self.settings.get("lora_name") or "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors"),
+                    "strength_model": lora_strength
+                },
+                "class_type": "LoraLoaderModelOnly"
+            }
+            guider_model = ["lora_loader", 0]
+            log(f"LTX LoRA enabled: strength={lora_strength}")
+        else:
+            guider_model = ["unet_loader", 0]
+            log("LTX LoRA disabled (strength=0)")
 
         wf.update({
             "guider": {
                 "inputs": {
-                    "model": ["lora_loader", 0],
+                    "model": guider_model,
                     "positive": ["ltxv_cond", 0],
                     "negative": ["ltxv_cond", 1],
                     "cfg": cfg
@@ -656,7 +880,7 @@ class LtxVideoGenerator(BaseVideoGenerator):
                     "base_shift": 0.95,
                     "stretch": True,
                     "terminal": 0.1,
-                    "latent": ["empty_latent", 0]
+                    "latent": active_latent_node
                 },
                 "class_type": "LTXVScheduler"
             },
@@ -666,7 +890,7 @@ class LtxVideoGenerator(BaseVideoGenerator):
                     "guider": ["guider", 0],
                     "sampler": ["sampler_select", 0],
                     "sigmas": ["scheduler", 0],
-                    "latent_image": ["ltxv_img_to_video", 0]
+                    "latent_image": active_latent_node
                 },
                 "class_type": "SamplerCustomAdvanced"
             },
@@ -679,11 +903,12 @@ class LtxVideoGenerator(BaseVideoGenerator):
             }
         })
 
+        slice_batch_idx = int(request.prefix_frames) if request.prefix_frames > 0 else 0
         if request.core_frames is not None and request.core_frames < num_frames:
             wf["slice_core"] = {
                 "inputs": {
                     "image": ["vae_decode", 0],
-                    "batch_index": 0,
+                    "batch_index": int(slice_batch_idx),
                     "length": int(request.core_frames)
                 },
                 "class_type": "ImageFromBatch"
@@ -712,38 +937,48 @@ class LtxVideoGenerator(BaseVideoGenerator):
             }
         })
 
-        if request.save_tail and request.core_frames is not None and request.core_frames < num_frames:
-            tail_len = int(num_frames - request.core_frames)
-            wf["slice_tail"] = {
+        if request.save_tail and request.tail_frames > 0:
+            wf["cut_tail_latent"] = {
+                "inputs": {
+                    "samples": ["sampler", 0],
+                    "dim": "t",
+                    "index": -int(request.tail_frames),
+                    "amount": int(request.tail_frames)
+                },
+                "class_type": "LatentCut"
+            }
+            wf["save_tail_latent"] = {
+                "inputs": {
+                    "samples": ["cut_tail_latent", 0],
+                    "filename_prefix": f"{prefix_str}-tail"
+                },
+                "class_type": "SaveLatent"
+            }
+            log(f"Configured native LatentCut (dim=t, amount={request.tail_frames}) + SaveLatent for LTX: prefix={prefix_str}-tail")
+
+        if request.save_tail_image:
+            wf["slice_tail_image"] = {
                 "inputs": {
                     "image": ["vae_decode", 0],
-                    "batch_index": int(request.core_frames),
-                    "length": tail_len
+                    "batch_index": int(num_frames - 1),
+                    "length": 1
                 },
                 "class_type": "ImageFromBatch"
             }
-            wf["create_tail_video"] = {
+            wf["save_tail_image"] = {
                 "inputs": {
-                    "images": ["slice_tail", 0],
-                    "fps": fps
+                    "images": ["slice_tail_image", 0],
+                    "filename_prefix": f"{prefix_str}-tail"
                 },
-                "class_type": "CreateVideo"
+                "class_type": "SaveImage"
             }
-            wf["save_tail_video"] = {
-                "inputs": {
-                    "video": ["create_tail_video", 0],
-                    "filename_prefix": f"{prefix_str}_tail",
-                    "format": "mp4",
-                    "codec": "h264"
-                },
-                "class_type": "SaveVideo"
-            }
-            log(f"Configured ComfyUI to export tail video ({tail_len} frames, start={request.core_frames}) directly for forced prefix chaining (LTX)")
+            log(f"Configured ComfyUI ImageFromBatch (last frame {num_frames - 1}) + SaveImage for LTX: prefix={prefix_str}-tail")
 
         return self._execute_comfy_workflow(
             wf=wf,
             prefix_str=prefix_str,
             out_video_name=out_video_name,
-            save_tail_video=(request.save_tail and request.core_frames is not None and request.core_frames < num_frames),
+            save_tail_latent=(request.save_tail and request.tail_frames > 0),
+            save_tail_image=request.save_tail_image,
             progress_callback=request.progress_callback
         )

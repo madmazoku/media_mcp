@@ -11,6 +11,7 @@ import os
 import sys
 import json
 import time
+import math
 import shutil
 import base64
 import random
@@ -272,12 +273,12 @@ def deep_merge(base: Any, overlay: Any) -> Any:
 
 
 def combine_prompts(base: Optional[str], local: Optional[str]) -> str:
-    """Combines base prompt with local prompt using newline formatting."""
+    """Combines local prompt with base prompt (local first, base last, separated by newline)."""
     b = str(base).strip() if base else ""
     l = str(local).strip() if local else ""
     if b and l:
-        return f"{b}\n {l}"
-    return b or l
+        return f"{l}\n{b}"
+    return l or b
 
 
 def combine_negative_prompts(base: Optional[str], local: Optional[str]) -> str:
@@ -295,7 +296,7 @@ def combine_negative_prompts(base: Optional[str], local: Optional[str]) -> str:
                     seen.add(tl)
                     deduped.append(t)
             return ", ".join(deduped)
-        return f"{b}\n {l}"
+        return f"{l}\n{b}"
     return b or l
 
 
@@ -330,7 +331,7 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
     image_cfg = scenario_dict.get("image", {})
     video_cfg = scenario_dict.get("video", {})
 
-    root_video_engine = video_cfg.get("engine", "wan")
+    root_video_engine = video_cfg.get("engine", "wan-fast")
     root_video_model = video_cfg.get("model")
     root_video_negative = video_cfg.get("negative_prompt", "")
     root_video_prompt = video_cfg.get("prompt", "")
@@ -372,7 +373,7 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
             norm_blocks.append({
                 "name": blk.get("name", f"Block #{b_idx + 1}"),
                 "duration": float(blk.get("duration", 5.0)),
-                "overlap": float(blk.get("overlap", 1.5 if b_idx < len(raw_blocks) - 1 else 0.0)),
+                "overlap": float(blk.get("overlap") or 0.0) if b_idx < len(raw_blocks) - 1 else 0.0,
                 "motion_prompt": b_prompt,
                 "negative_prompt": b_neg,
                 "engine": b_engine,
@@ -419,7 +420,8 @@ def execute_scenario_pipeline(
 
     scenes = normalize_scenario_structure(scenario_input, request_overrides=req_ov)
 
-    effective_vid = req_ov.get("video", {})
+    scenario_dict = scenario_input if isinstance(scenario_input, dict) else {}
+    effective_vid = deep_merge(scenario_dict.get("video", {}), req_ov.get("video", {}))
     v_engine = effective_vid.get("engine", "wan").lower()
     width = int(effective_vid.get("width", 832))
     height = int(effective_vid.get("height", 480))
@@ -427,7 +429,7 @@ def execute_scenario_pipeline(
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_hash = uuid.uuid4().hex[:6]
-    run_prefix = f"{timestamp}_{run_hash}"
+    run_prefix = f"{timestamp}-{run_hash}"
     log(f"Executing scenario pipeline with {len(scenes)} scenes (run_id={run_prefix}, video_engine={v_engine}, {width}x{height} @ {fps}fps)...")
 
     all_block_cores = []
@@ -444,7 +446,7 @@ def execute_scenario_pipeline(
     comfy_client.reset_interrupt()
 
     _PIPELINE_STATUS["is_running"] = True
-    _PIPELINE_STATUS["scenario_name"] = output_name or f"{run_prefix}_final"
+    _PIPELINE_STATUS["scenario_name"] = output_name or f"{run_prefix}-final"
     _PIPELINE_STATUS["total_scenes"] = total_scenes
     _PIPELINE_STATUS["total_blocks"] = total_blocks
     _PIPELINE_STATUS["processed_blocks"] = 0
@@ -480,7 +482,7 @@ def execute_scenario_pipeline(
                 cb=progress_callback
             )
 
-            anchor_filename = f"{run_prefix}_s{scene_idx:03d}_anchor.png"
+            anchor_filename = f"{run_prefix}-s{scene_idx:03d}-anchor.png"
             ok, anchor_img_path, anchor_b64 = img_engine_mod.generate_anchor_frame(
                 anchor_meta=anchor_meta,
                 width=width,
@@ -494,9 +496,9 @@ def execute_scenario_pipeline(
                 first_poster_b64 = anchor_b64
                 first_poster_path = anchor_img_path
 
-            prefix_latent_path = None
             prefix_video_path = None
             next_tail_latent = None
+            next_tail_latent_count = 0
             next_tail_image = None
 
             for b_idx, blk in enumerate(blocks):
@@ -506,11 +508,12 @@ def execute_scenario_pipeline(
                 block_idx = b_idx + 1
                 b_name = blk.get("name", f"Block {block_idx}")
                 dur = float(blk.get("duration", 5.0))
-                overlap = float(blk.get("overlap", 1.5 if b_idx < len(blocks) - 1 else 0.0))
+                # Default overlap: 0.0 (1-frame I2V chaining) unless explicitly set > 0.0
+                overlap = float(blk.get("overlap") or 0.0) if b_idx < len(blocks) - 1 else 0.0
 
                 # Enforce non-colliding overlap constraint:
                 # prefix_length + tail_length < clip_duration
-                prefix_length = float(blocks[b_idx - 1].get("overlap", 1.5)) if b_idx > 0 else 0.0
+                prefix_length = float(blocks[b_idx - 1].get("overlap") or 0.0) if b_idx > 0 else 0.0
                 tail_length = overlap if b_idx < len(blocks) - 1 else 0.0
                 if prefix_length + tail_length >= dur:
                     raise ValueError(
@@ -522,16 +525,22 @@ def execute_scenario_pipeline(
                 b_neg = blk.get("negative_prompt") or ""
                 b_engine_raw = (blk.get("engine") or v_engine).lower()
 
-                # Instantiate the generator strategy
-                generator = create_video_generator(b_engine_raw, settings=effective_vid)
+                # Instantiate the generator strategy with scenario and block overrides
+                b_settings = dict(effective_vid)
+                if blk.get("checkpoint"):
+                    b_settings["checkpoint"] = blk["checkpoint"]
+                if blk.get("model"):
+                    b_settings["model"] = blk["model"]
+
+                generator = create_video_generator(b_engine_raw, settings=b_settings)
                 is_ltx = isinstance(generator, LtxVideoGenerator) or any(x in b_engine_raw for x in ["ltx", "22b"])
 
                 is_last = (b_idx == len(blocks) - 1)
                 stride = 8 if is_ltx else 4
 
                 # Dynamic time quantization matching model VAE stride:
-                block_prefix = f"{run_prefix}_s{scene_idx:03d}_b{block_idx:03d}"
-                out_core_name = f"{block_prefix}_core.mp4"
+                block_prefix = f"{run_prefix}-s{scene_idx:03d}-b{block_idx:03d}"
+                out_core_name = f"{block_prefix}-core.mp4"
 
                 _PIPELINE_STATUS["block_index"] = block_idx
                 _PIPELINE_STATUS["block_name"] = b_name
@@ -545,78 +554,192 @@ def execute_scenario_pipeline(
                 )
 
                 if is_ltx:
-                    raw_frames = int(round(dur * fps))
-                    k_total = max(1, round((raw_frames - 1) / stride))
-                    num_frames = stride * k_total + 1
-
                     if not is_last and overlap > 0:
-                        k_overlap = max(1, round(round(overlap * fps) / stride))
-                        overlap_frames = k_overlap * stride
-                        core_frames = max(stride, (num_frames - 1) - overlap_frames)
-                        tail_frames = num_frames - core_frames
+                        overlap_pixels = max(1, int(round(overlap * fps)))
+                        # LTX temporal stride: 1 latent past first = 8 pixel frames
+                        k_tail_lat = max(2, math.ceil((overlap_pixels - 1) / stride) + 1)
                         save_tail = True
+                        tail_frames = k_tail_lat
                     else:
-                        core_frames = num_frames
-                        tail_frames = 0
+                        k_tail_lat = 0
                         save_tail = False
+                        tail_frames = 0
 
-                    if prefix_video_path and os.path.exists(prefix_video_path):
-                        start_img = None
-                        pref_vid = prefix_video_path
+                    if b_idx == 0:
+                        ltx_start_img = anchor_img_path
+                        ltx_pref_latent = None
+                        ltx_pref_pixel_frames = 0
+                        k_core = max(1, round(dur * fps / stride))
+                        ltx_core_frames = stride * k_core + 1
+                        ltx_num_frames = ltx_core_frames
+                    elif next_tail_latent and os.path.exists(next_tail_latent):
+                        # Mode A: Latent prefix (previous block had overlap > 0)
+                        ltx_start_img = None
+                        ltx_pref_latent = next_tail_latent
+                        try:
+                            import safetensors.torch
+                            _t_dict = safetensors.torch.load_file(ltx_pref_latent, device="cpu")
+                            _t_val = _t_dict.get("latent_tensor", _t_dict.get("samples"))
+                            k_pref_lat = int(_t_val.shape[2])
+                            log(f"Verified LTX prefix latent shape from safetensors: {_t_val.shape} (latents={k_pref_lat})")
+                        except Exception as e:
+                            k_pref_lat = next_tail_latent_count
+                            log(f"Using tracked LTX prefix latents={k_pref_lat} (safetensors read note: {e})")
+
+                        ltx_pref_pixel_frames = (k_pref_lat - 1) * stride + 1
+                        k_core = max(1, round(dur * fps / stride))
+                        ltx_core_frames = stride * k_core
+                        ltx_num_frames = ltx_pref_pixel_frames + ltx_core_frames
+                    elif next_tail_image and os.path.exists(next_tail_image):
+                        # Mode B: 1-frame Image Chaining (previous block had overlap == 0)
+                        ltx_start_img = next_tail_image
+                        ltx_pref_latent = None
+                        k_core = max(1, round(dur * fps / stride))
+                        ltx_pref_pixel_frames = 1
+                        ltx_core_frames = stride * k_core
+                        ltx_num_frames = stride * k_core + 1
+                        log(f"Configuring LTX 1-frame I2V chaining: {os.path.basename(next_tail_image)} (core={ltx_core_frames})")
                     else:
-                        start_img = anchor_img_path
-                        pref_vid = None
+                        ltx_start_img = anchor_img_path
+                        ltx_pref_latent = None
+                        ltx_pref_pixel_frames = 0
+                        k_core = max(1, round(dur * fps / stride))
+                        ltx_core_frames = stride * k_core + 1
+                        ltx_num_frames = ltx_core_frames
 
                     log(f"\n[{scene_name} : {b_name}] Engine: {generator.name.upper()}, Duration: {dur}s, Overlap: {overlap}s")
-                    log(f"LTX quantized frames: total={num_frames}, core={core_frames}, tail_frames={tail_frames}")
+                    log(f"LTX quantized frames: total={ltx_num_frames}, core={ltx_core_frames}, prefix_pixel={ltx_pref_pixel_frames}, tail_latents={tail_frames}")
                     log(f"Motion prompt: '{motion_prompt[:60]}...'")
 
+                    save_tail_image = (not is_last and overlap == 0)
+                    blk_steps = blk.get("steps") or effective_vid.get("steps")
+                    blk_cfg = blk.get("cfg") or blk.get("cfg_scale") or effective_vid.get("cfg")
+
                     req = VideoRequest(
-                        image_path=start_img,
-                        prefix_video_path=pref_vid,
+                        image_path=ltx_start_img,
+                        prefix_latent_path=ltx_pref_latent,
+                        prefix_frames=ltx_pref_pixel_frames,
                         prompt=motion_prompt,
                         negative_prompt=b_neg,
                         width=width,
                         height=height,
-                        num_frames=num_frames,
-                        core_frames=core_frames,
+                        num_frames=ltx_num_frames,
+                        core_frames=ltx_core_frames,
+                        tail_frames=tail_frames,
                         save_tail=save_tail,
+                        save_tail_image=save_tail_image,
                         fps=fps,
+                        steps=blk_steps,
+                        cfg=blk_cfg,
                         out_video_name=out_core_name,
                         progress_callback=progress_callback
                     )
                     res = generator.generate(req)
-                    if save_tail and res.tail_video_path and os.path.exists(res.tail_video_path):
-                        prefix_video_path = res.tail_video_path
+                    if not res.success or not res.file_path:
+                        raise RuntimeError(f"Block generation failed [{scene_name} : {b_name}]: {res.error}")
+
+                    if not is_last:
+                        if overlap > 0 and save_tail and res.tail_latent_path and os.path.exists(res.tail_latent_path):
+                            next_tail_latent = res.tail_latent_path
+                            next_tail_latent_count = tail_frames
+                            next_tail_image = None
+                            log(f"Received pristine workflow tail latent for next block (LTX): {os.path.basename(next_tail_latent)} ({tail_frames} latents)")
+                        elif res.tail_image_path and os.path.exists(res.tail_image_path):
+                            next_tail_latent = None
+                            next_tail_latent_count = 0
+                            next_tail_image = res.tail_image_path
+                            log(f"Received pristine workflow tail image for next block: {os.path.basename(next_tail_image)}")
+                        else:
+                            tail_img_path = os.path.join(TEMP_DIR, f"{block_prefix}-tail.png")
+                            ffmpeg_engine.extract_last_frame(res.file_path, tail_img_path)
+                            next_tail_latent = None
+                            next_tail_latent_count = 0
+                            next_tail_image = tail_img_path
+                            log(f"Extracted tail image frame via FFmpeg fallback: {os.path.basename(next_tail_image)}")
                     else:
-                        prefix_video_path = None
-                    block_core_frames = core_frames
+                        next_tail_latent = None
+                        next_tail_latent_count = 0
+                        next_tail_image = None
+                    block_core_frames = ltx_core_frames
                 else:
-                    k_dur = max(1, round(dur * fps / 4))
-                    base_frames = 4 * k_dur + 1
+                    # Calculate tail latents needed for the NEXT block from overlap duration
+                    if not is_last and overlap > 0:
+                        overlap_pixels = max(1, int(round(overlap * fps)))
+                        # Wan 2.2 temporal stride: 1 latent past first = 4 pixel frames
+                        k_tail_lat = max(2, math.ceil((overlap_pixels - 1) / 4) + 1)
+                        save_tail = True
+                        tail_frames = k_tail_lat
+                    else:
+                        k_tail_lat = 0
+                        save_tail = False
+                        tail_frames = 0
 
                     if b_idx == 0:
                         wan_start_img = anchor_img_path
-                        wan_pref_frames = 0
-                        wan_num_frames = base_frames
-                        wan_core_frames = base_frames
-                    else:
+                        wan_pref_latent = None
+                        wan_pref_pixel_frames = 0
+                        k_core = max(1, round(dur * fps / 4))
+                        wan_core_frames = 4 * k_core + 1
+                        wan_num_frames = wan_core_frames
+                    elif next_tail_latent and os.path.exists(next_tail_latent):
+                        # Mode A: Latent prefix (previous block had overlap > 0)
+                        wan_start_img = None
+                        wan_pref_latent = next_tail_latent
+                        try:
+                            import safetensors.torch
+                            _t_dict = safetensors.torch.load_file(wan_pref_latent, device="cpu")
+                            _t_val = _t_dict.get("latent_tensor", _t_dict.get("samples"))
+                            k_pref_lat = int(_t_val.shape[2])
+                            log(f"Verified prefix latent shape from safetensors: {_t_val.shape} (latents={k_pref_lat})")
+                        except Exception as e:
+                            k_pref_lat = next_tail_latent_count
+                            log(f"Using tracked prefix latents={k_pref_lat} (safetensors read note: {e})")
+
+                        wan_pref_pixel_frames = (k_pref_lat - 1) * 4 + 1
+                        k_core = max(1, round(dur * fps / 4))
+                        wan_core_frames = 4 * k_core
+                        wan_num_frames = wan_pref_pixel_frames + wan_core_frames
+                    elif next_tail_image and os.path.exists(next_tail_image):
+                        # Mode B: 1-frame Image Chaining (previous block had overlap == 0)
                         wan_start_img = next_tail_image
-                        wan_pref_frames = 1
-                        wan_num_frames = base_frames
-                        wan_core_frames = base_frames - 1
+                        wan_pref_latent = None
+                        k_core = max(1, round(dur * fps / 4))
+                        wan_pref_pixel_frames = 1
+                        wan_core_frames = 4 * k_core
+                        wan_num_frames = 4 * k_core + 1
+                        log(f"Configuring 1-frame I2V chaining from previous block: {os.path.basename(next_tail_image)} (diffusing {wan_num_frames} frames, slicing core 1..{wan_core_frames})")
+                    else:
+                        wan_start_img = anchor_img_path
+                        wan_pref_latent = None
+                        wan_pref_pixel_frames = 0
+                        k_core = max(1, round(dur * fps / 4))
+                        wan_core_frames = 4 * k_core + 1
+                        wan_num_frames = wan_core_frames
 
                     blk_steps = blk.get("steps") or effective_vid.get("steps")
                     blk_cfg = blk.get("cfg") or blk.get("cfg_scale") or effective_vid.get("cfg")
+                    blk_ramp = blk.get("ramp_latents") if blk.get("ramp_latents") is not None else effective_vid.get("ramp_latents", 3)
+                    blk_min_cfg = blk.get("min_cfg") if blk.get("min_cfg") is not None else effective_vid.get("min_cfg", 1.0)
 
-                    log(f"\n[{scene_name} : {b_name}] Engine: {generator.name.upper()}, Duration: {dur}s, Frames: {wan_num_frames} (core={wan_core_frames})")
-                    log(f"Start anchor image: {os.path.basename(wan_start_img) if wan_start_img else 'None'}")
+                    log(f"\n[{scene_name} : {b_name}] Engine: {generator.name.upper()}, Duration: {dur}s, Overlap: {overlap}s")
+                    log(f"Wan frames: total={wan_num_frames}, prefix={wan_pref_pixel_frames} ({k_pref_lat if (b_idx > 0 and wan_pref_latent) else 0} latents), core={wan_core_frames}, next_tail={tail_frames} latents")
+                    log(f"Ramp latents: {blk_ramp}, min_cfg: {blk_min_cfg}")
+                    if wan_pref_latent:
+                        log(f"Input prefix latent: {os.path.basename(wan_pref_latent)}")
+                    else:
+                        log(f"Start anchor image: {os.path.basename(wan_start_img) if wan_start_img else 'None'}")
                     log(f"Motion prompt: '{motion_prompt[:60]}...'")
+
+                    wan_save_tail_image = (not is_last and overlap == 0)
 
                     req = VideoRequest(
                         image_path=wan_start_img,
-                        prefix_frames=wan_pref_frames,
+                        prefix_latent_path=wan_pref_latent,
+                        prefix_frames=wan_pref_pixel_frames,
                         core_frames=wan_core_frames,
+                        tail_frames=tail_frames,
+                        save_tail=save_tail,
+                        save_tail_image=wan_save_tail_image,
                         prompt=motion_prompt,
                         negative_prompt=b_neg,
                         width=width,
@@ -625,16 +748,41 @@ def execute_scenario_pipeline(
                         fps=fps,
                         steps=blk_steps,
                         cfg=blk_cfg,
+                        ramp_latents=int(blk_ramp),
+                        min_cfg=float(blk_min_cfg),
                         out_video_name=out_core_name,
                         progress_callback=progress_callback
                     )
                     res = generator.generate(req)
-                    if not is_last and res.success and res.file_path:
-                        tail_img_name = f"{block_prefix}_last.png"
-                        tail_img_path = os.path.join(TEMP_DIR, tail_img_name)
-                        ffmpeg_engine.extract_last_frame(res.file_path, tail_img_path)
-                        next_tail_image = tail_img_path
-                        log(f"Extracted pristine tail frame for next block anchor: {os.path.basename(next_tail_image)}")
+                    if not res.success or not res.file_path:
+                        raise RuntimeError(f"Block generation failed [{scene_name} : {b_name}]: {res.error}")
+
+                    if not is_last:
+                        if overlap > 0:
+                            if res.tail_latent_path and os.path.exists(res.tail_latent_path):
+                                next_tail_latent = res.tail_latent_path
+                                next_tail_latent_count = k_tail_lat
+                                next_tail_image = None
+                                log(f"Captured tail latent for next block (overlap={overlap}s): {os.path.basename(next_tail_latent)} ({k_tail_lat} latents)")
+                            else:
+                                next_tail_latent = None
+                                next_tail_latent_count = 0
+                                next_tail_image = None
+                        else:
+                            if res.tail_image_path and os.path.exists(res.tail_image_path):
+                                next_tail_image = res.tail_image_path
+                                log(f"Received pristine workflow tail image for next block: {os.path.basename(next_tail_image)}")
+                            else:
+                                tail_img_path = os.path.join(TEMP_DIR, f"{block_prefix}-tail.png")
+                                ffmpeg_engine.extract_last_frame(res.file_path, tail_img_path)
+                                next_tail_image = tail_img_path
+                                log(f"Extracted tail image frame via FFmpeg fallback: {os.path.basename(next_tail_image)}")
+                            next_tail_latent = None
+                            next_tail_latent_count = 0
+                    else:
+                        next_tail_latent = None
+                        next_tail_latent_count = 0
+                        next_tail_image = None
                     block_core_frames = wan_core_frames
 
                 if not res.success or not res.file_path:
@@ -663,18 +811,14 @@ def execute_scenario_pipeline(
         )
 
         # Final movie assembly across all blocks in a single lossless Stream Copy (-c copy) pass
-        if output_name:
-            clean_out = os.path.splitext(os.path.basename(output_name))[0]
-            final_name = f"{run_prefix}_{clean_out}.mp4"
-        else:
-            final_name = f"{run_prefix}_final.mp4"
+        final_name = f"{run_prefix}-final.mp4"
 
         final_path = os.path.join(OUTPUT_VID_DIR, final_name)
         ffmpeg_engine.concat_videos(all_block_cores, final_path, smooth_transitions=False)
         total_duration = ffmpeg_engine.get_duration(final_path)
 
         # Poster handling: prioritize pristine anchor keyframe from Scene 1
-        poster_filename = f"{os.path.splitext(final_name)[0]}_poster.png"
+        poster_filename = f"{run_prefix}-final.png"
         poster_path = os.path.join(OUTPUT_IMG_DIR, poster_filename)
         if first_poster_path and os.path.exists(first_poster_path):
             try:
@@ -694,7 +838,7 @@ def execute_scenario_pipeline(
         # Optional HUD generation
         hud_path = None
         if enable_hud and generated_block_metadata:
-            hud_name = f"{os.path.splitext(final_name)[0]}_hud.mp4"
+            hud_name = f"{run_prefix}-hud.mp4"
             hud_final = os.path.join(OUTPUT_VID_DIR, hud_name)
             try:
                 ffmpeg_engine.generate_hud_overlay(final_path, generated_block_metadata, hud_final)

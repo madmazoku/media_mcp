@@ -46,10 +46,10 @@ class WanLatentPrefixToVideo:
         if prefix_latent is not None and "samples" in prefix_latent:
             # Mode A: Direct Latent Prefix (True Zero-Loss Conditioning)
             src_samples = prefix_latent["samples"].to(device=device)
-            # KSampler outputs normalized diffusion latents.
-            # Convert to raw VAE space so DiT's self.process_latent_in() reconstructs it with machine precision:
-            latent_format = comfy.latent_formats.Wan21()
-            prefix_vae = latent_format.process_out(src_samples)
+            # In ComfyUI (samplers.py:1238), KSampler already calls process_latent_out() before returning samples.
+            # Therefore, src_samples from SaveLatent is ALREADY in native raw VAE space.
+            # Do NOT call process_out() here, as doing so doubles the variance and blows out colors/contrast.
+            prefix_vae = src_samples
             k_lat = min(prefix_vae.shape[2], t_latents)
 
             # Ensure spatial dimensions match
@@ -65,12 +65,9 @@ class WanLatentPrefixToVideo:
             mask = torch.ones((batch_size, 1, t_latents, h_lat, w_lat), device=device, dtype=torch.float32)
             mask[:, :, :k_lat] = 0.0
 
-            # KSampler initialization: lock prefix frames and guide diffusion via noise_mask
-            latent_samples = torch.zeros([batch_size, 16, t_latents, h_lat, w_lat], device=device, dtype=torch.float32)
-            latent_samples[:, :, :k_lat] = src_samples[:batch_size, :, :k_lat].to(dtype=latent_samples.dtype)
+            # Clean unmasked diffusion latents matching native Wan I2V conditioning:
             out_latent = {
-                "samples": latent_samples,
-                "noise_mask": mask
+                "samples": torch.zeros([batch_size, 16, t_latents, h_lat, w_lat], device=device, dtype=torch.float32)
             }
         elif start_image is not None:
             # Mode B: Image Input (for Block 1 initial anchor frame)
@@ -98,3 +95,117 @@ class WanLatentPrefixToVideo:
             neg_out = node_helpers.conditioning_set_values(neg_out, {"clip_vision_output": clip_vision_output})
 
         return (pos_out, neg_out, out_latent)
+
+
+class WanLatentPrefixLock:
+    """
+    Native Diffusion Forcing & Boundary Motion Smoothing for Wan 2.2 (Option B).
+    1. Temporal CFG Ramp-Up (sampler_cfg_function):
+       Eliminates "prompt shock" and boundary motion tear at the seam between blocks.
+       - Prefix frames (0..k-1): CFG = min_cfg (1.0, zero text guidance delta).
+       - Ramp frames (k..k+ramp_latents-1): Smooth linear ramp from min_cfg to full cond_scale.
+       - Core frames (k+ramp_latents..T): Full target CFG (e.g. 6.0) for vivid action.
+    2. Pristine Latent Clamping (sampler_post_cfg_function):
+       Clamps x_0 prediction on prefix frames 0..k-1 to pristine prefix latents during diffusion.
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "prefix_latent": ("LATENT",),
+                "ramp_latents": ("INT", {"default": 3, "min": 0, "max": 10, "step": 1}),
+                "min_cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.1}),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    RETURN_NAMES = ("model",)
+    FUNCTION = "execute"
+    CATEGORY = "model/conditioning/wan"
+
+    def execute(self, model, prefix_latent, ramp_latents=3, min_cfg=1.0):
+        m = model.clone()
+        src_samples = prefix_latent["samples"]  # [B, C, T, H, W] in raw VAE space
+
+        # 1. Temporal CFG Ramp-Up
+        if ramp_latents > 0 or min_cfg != 1.0:
+            def prefix_cfg_ramp(args):
+                cond = args["cond"]        # [B, C, T, H, W]
+                uncond = args["uncond"]    # [B, C, T, H, W]
+                cond_scale = args["cond_scale"]
+
+                if cond.ndim != 5:
+                    return uncond + cond_scale * (cond - uncond)
+
+                B, C, T, H, W = cond.shape
+                scale = torch.full((1, 1, T, 1, 1), cond_scale, device=cond.device, dtype=cond.dtype)
+
+                k = min(src_samples.shape[2], T)
+                if k > 0:
+                    scale[:, :, :k, :, :] = min_cfg
+
+                if ramp_latents > 0 and k < T:
+                    ramp_end = min(k + ramp_latents, T)
+                    ramp_steps = ramp_end - k
+                    ramp_vals = torch.linspace(min_cfg, cond_scale, ramp_steps + 1, device=cond.device, dtype=cond.dtype)
+                    scale[:, :, k:ramp_end, :, :] = ramp_vals[:ramp_steps].view(1, 1, ramp_steps, 1, 1)
+
+                return uncond + scale * (cond - uncond)
+
+            m.set_model_sampler_cfg_function(prefix_cfg_ramp)
+
+        # 2. Pristine Latent Clamping (Diffusion Forcing)
+        def prefix_clamp_hook(args):
+            denoised = args["denoised"]
+            inner_model = args["model"]
+
+            # Convert raw VAE samples to model's normalized diffusion space on current device/dtype
+            p_samples = src_samples.to(device=denoised.device, dtype=denoised.dtype)
+            if p_samples.shape[-2:] != (denoised.shape[-2], denoised.shape[-1]):
+                p_samples = comfy.utils.common_upscale(
+                    p_samples, denoised.shape[-1], denoised.shape[-2], "bilinear", "center"
+                )
+
+            p_norm = inner_model.process_latent_in(p_samples)
+            k = min(p_norm.shape[2], denoised.shape[2])
+            b = min(p_norm.shape[0], denoised.shape[0])
+
+            out_denoised = denoised.clone()
+            out_denoised[:b, :, :k] = p_norm[:b, :, :k]
+            return out_denoised
+
+        m.set_model_sampler_post_cfg_function(prefix_clamp_hook)
+        return (m,)
+
+
+class WanLatentPrefixRestore:
+    """
+    Ensures bit-exact prefix latent frames on KSampler output before VAE decode.
+    Replaces frames 0..k_lat with the pristine raw VAE prefix latent.
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "samples": ("LATENT",),
+                "prefix_latent": ("LATENT",),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("latent",)
+    FUNCTION = "execute"
+    CATEGORY = "model/conditioning/wan"
+
+    def execute(self, samples, prefix_latent):
+        out = {k: v for k, v in samples.items()}
+        s = samples["samples"].clone()
+        p = prefix_latent["samples"].to(device=s.device, dtype=s.dtype)
+        if p.shape[-2:] != (s.shape[-2], s.shape[-1]):
+            p = comfy.utils.common_upscale(p, s.shape[-1], s.shape[-2], "bilinear", "center")
+        k = min(p.shape[2], s.shape[2])
+        b = min(p.shape[0], s.shape[0])
+        s[:b, :, :k] = p[:b, :, :k]
+        out["samples"] = s
+        return (out,)

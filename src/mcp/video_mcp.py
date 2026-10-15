@@ -30,11 +30,28 @@ import importlib
 from core import config, a1111_client, comfy_client, ffmpeg_engine, image_engine, video_pipeline
 
 def reload_core_modules():
-    for m in (config, a1111_client, comfy_client, ffmpeg_engine, image_engine, video_pipeline):
-        try:
-            importlib.reload(m)
-        except Exception as e:
-            log(f"Warning: Failed to reload {m.__name__}: {e}")
+    """
+    Dynamically reloads all loaded modules in sys.modules under 'core' (including
+    core.generators, core.generators.video_generators, etc.) in reverse dependency order,
+    ensuring all code changes take effect immediately without stale memory caches.
+    """
+    global config, a1111_client, comfy_client, ffmpeg_engine, image_engine, video_pipeline
+    core_mods = [k for k in list(sys.modules.keys()) if k == "core" or k.startswith("core.")]
+    # Reload deeper submodules first (e.g. core.generators.video_generators before core.generators)
+    core_mods.sort(key=lambda s: s.count("."), reverse=True)
+    for mod_name in core_mods:
+        m = sys.modules.get(mod_name)
+        if m and hasattr(m, "__file__") and m.__file__:
+            try:
+                importlib.reload(m)
+            except Exception as e:
+                log(f"Warning: Failed to reload {mod_name}: {e}")
+    try:
+        from core import config as _c, a1111_client as _a, comfy_client as _cm, ffmpeg_engine as _f, image_engine as _i, video_pipeline as _v
+        config, a1111_client, comfy_client, ffmpeg_engine, image_engine, video_pipeline = _c, _a, _cm, _f, _i, _v
+    except Exception as e:
+        log(f"Warning: Failed to re-bind core modules: {e}")
+
 
 if hasattr(sys.stdin, "reconfigure"):
     try:
@@ -174,8 +191,10 @@ def tool_video_run_scenario(args: dict) -> dict:
             video=video_cfg
         )
     except Exception as ex:
-        log(f"Pipeline execution failed: {ex}")
-        return {"error": f"Scenario execution failed: {str(ex)}"}
+        import traceback
+        tb = traceback.format_exc()
+        log(f"Pipeline execution failed: {ex}\n{tb}")
+        return {"error": f"Scenario execution failed: {str(ex)}\n{tb}"}
 
 
     final_path = res["video_path"]
@@ -296,7 +315,7 @@ def tool_video_validate_scenario(args: dict) -> dict:
         s_dur = 0.0
         for b_idx, blk in enumerate(blocks):
             dur = float(blk.get("duration", 5.0))
-            overlap = float(blk.get("overlap", 1.5 if b_idx < len(blocks) - 1 else 0.0))
+            overlap = float(blk.get("overlap") or 0.0) if b_idx < len(blocks) - 1 else 0.0
             if dur <= 0:
                 errors.append(f"{s_name} / Block #{b_idx + 1}: duration must be positive.")
             if overlap < 0:
@@ -306,7 +325,7 @@ def tool_video_validate_scenario(args: dict) -> dict:
 
             # Check overlap collision: for any block with both incoming and outgoing overlap,
             # prefix_length + tail_length must be strictly < clip_duration
-            prefix_length = float(blocks[b_idx - 1].get("overlap", 1.5)) if b_idx > 0 else 0.0
+            prefix_length = float(blocks[b_idx - 1].get("overlap") or 0.0) if b_idx > 0 else 0.0
             tail_length = overlap if b_idx < len(blocks) - 1 else 0.0
             if prefix_length + tail_length >= dur:
                 errors.append(
@@ -358,7 +377,7 @@ def tool_video_generate_block(args: dict) -> dict:
     if not prompt:
         return {"error": "Prompt is required."}
 
-    engine = str(args.get("engine", "wan")).lower()
+    engine = str(args.get("engine", "wan-fast")).lower()
     negative_prompt = args.get("negative_prompt") or "blurry, low quality, jitter, static, deformed, extra limbs, bad anatomy, text, watermark"
     duration = float(args.get("duration", 5.0))
     start_image = args.get("start_image")
@@ -543,7 +562,7 @@ TOOLS_SPEC = [
             "type": "object",
             "properties": {
                 "prompt": {"type": "string", "description": "Motion and camera prompt"},
-                "engine": {"type": "string", "enum": ["wan", "ltx"], "description": "Video engine: 'wan' (default) or 'ltx' (LTX-2.3 22B)"},
+                "engine": {"type": "string", "enum": ["wan-fast", "wan", "ltx"], "description": "Video engine: 'wan-fast' (default), 'wan' (Full 20-step), or 'ltx' (LTX-2.3 22B)"},
                 "negative_prompt": {"type": "string", "description": "Negative prompt"},
                 "duration": {"type": "number", "description": "Duration in seconds (default: 5.0)"},
                 "start_image": {"type": "string", "description": "Starting image path"},
