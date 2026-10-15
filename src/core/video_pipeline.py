@@ -20,7 +20,7 @@ import base64
 import random
 import datetime
 import uuid
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 
 from .config import OUTPUT_VID_DIR, OUTPUT_IMG_DIR, TEMP_DIR
 from . import ffmpeg_engine
@@ -134,7 +134,7 @@ def slice_latent_file(
 # ---------------------------------------------------------------------------
 
 def generate_wan_segment(
-    image_path: Optional[str] = None,
+    image_path: Optional[Union[str, List[str]]] = None,
     prefix_video_path: Optional[str] = None,
     prefix_latent_path: Optional[str] = None,
     prefix_frames: int = 0,
@@ -151,12 +151,12 @@ def generate_wan_segment(
     seed: Optional[int] = None,
     out_video_name: Optional[str] = None,
     progress_callback: Optional[Any] = None
-) -> Tuple[bool, str, Optional[str]]:
+) -> Tuple[bool, str, Optional[List[str]]]:
     """
     Submits a Wan 2.2 Video segment to ComfyUI.
-    Supports single image seed, end image keyframe, or true forced prefix latent conditioning.
-    Outputs core video directly and exports tail latent for seamless chaining.
-    Returns: (success, out_video_path, out_tail_latent_path)
+    Supports single image seed, multi-frame PNG sequence prefix, or end keyframe lock.
+    Outputs core video directly and exports tail PNG frames for seamless momentum chaining.
+    Returns: (success, out_video_path, out_tail_png_paths)
     """
     if save_tail_latent is not None:
         save_tail = save_tail_latent
@@ -277,7 +277,33 @@ def generate_wan_segment(
             "class_type": "VHS_LoadVideoPath"
         }
         start_image_node = ["prefix_video_loader", 0]
-    elif image_path and os.path.exists(image_path):
+    elif isinstance(image_path, list) and len(image_path) > 0:
+        log(f"Configuring MULTI-FRAME PNG PREFIX CHAINING ({len(image_path)} frames)...")
+        curr_node = None
+        for i, p in enumerate(image_path):
+            img_fn = comfy_client.upload_file_to_comfy(p)
+            node_key = f"prefix_frame_{i}"
+            wf[node_key] = {
+                "inputs": {
+                    "image": img_fn,
+                    "upload": "image"
+                },
+                "class_type": "LoadImage"
+            }
+            if curr_node is None:
+                curr_node = [node_key, 0]
+            else:
+                batch_key = f"batch_prefix_{i}"
+                wf[batch_key] = {
+                    "inputs": {
+                        "image1": curr_node,
+                        "image2": [node_key, 0]
+                    },
+                    "class_type": "ImageBatch"
+                }
+                curr_node = [batch_key, 0]
+        start_image_node = curr_node
+    elif isinstance(image_path, str) and os.path.exists(image_path):
         img_fn = comfy_client.upload_file_to_comfy(image_path)
         log(f"Configuring start image: {img_fn}")
         wf["start_image"] = {
@@ -400,7 +426,7 @@ def generate_wan_segment(
         }
     })
 
-    slice_batch_idx = 1 if prefix_frames > 0 else 0
+    slice_batch_idx = int(prefix_frames) if prefix_frames > 0 else 0
     if core_frames is not None and core_frames < num_frames:
         wf["slice_core"] = {
             "inputs": {
@@ -435,23 +461,24 @@ def generate_wan_segment(
     })
 
     if save_tail:
-        end_idx = int(core_frames - 1) if slice_batch_idx == 0 else int(core_frames)
-        wf["slice_end_frame"] = {
+        tail_count = 5
+        tail_start = int(slice_batch_idx + core_frames - tail_count)
+        wf["slice_tail_frames"] = {
             "inputs": {
                 "image": ["vae_decode", 0],
-                "batch_index": end_idx,
-                "length": 1
+                "batch_index": tail_start,
+                "length": tail_count
             },
             "class_type": "ImageFromBatch"
         }
-        wf["save_end_frame"] = {
+        wf["save_tail_frames"] = {
             "inputs": {
-                "images": ["slice_end_frame", 0],
-                "filename_prefix": f"{prefix_str}_end"
+                "images": ["slice_tail_frames", 0],
+                "filename_prefix": f"{prefix_str}_tail"
             },
             "class_type": "SaveImage"
         }
-        log(f"Configured ComfyUI to export end keyframe (frame {end_idx}) for next block")
+        log(f"Configured ComfyUI to export {tail_count} tail PNG frames (start frame {tail_start}) for next block")
 
     log(f"Submitting Wan 2.2 segment prompt ({num_frames} frames @ {fps}fps, seed={seed})...")
     ok, prompt_id = comfy_client.queue_prompt(wf)
@@ -495,23 +522,34 @@ def generate_wan_segment(
     else:
         return False, "Wan 2.2 execution completed but output mp4 file could not be located", None
 
-    # Locate generated end keyframe
-    out_end_frame_path = None
+    # Locate generated tail PNG frames
+    out_tail_paths: List[str] = []
     if save_tail:
-        found_end = None
-        for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
-            for f in files:
-                if f.startswith(f"{prefix_str}_end") and (f.endswith(".png") or f.endswith(".jpg")):
-                    found_end = os.path.join(root, f)
-                    break
-            if found_end:
-                break
-        if found_end and os.path.exists(found_end):
-            out_end_frame_path = os.path.join(TEMP_DIR, f"{prefix_str}_end.png")
-            shutil.copy2(found_end, out_end_frame_path)
-            log(f"Successfully captured end keyframe for next block: {out_end_frame_path}")
+        save_tail_out = outputs.get("save_tail_frames", {})
+        saved_imgs = save_tail_out.get("images", [])
+        if saved_imgs:
+            for idx, img_info in enumerate(saved_imgs):
+                fn = img_info.get("filename")
+                sub = img_info.get("subfolder", "")
+                found = comfy_client.find_comfy_output_file(fn, sub)
+                if found and os.path.exists(found):
+                    target_tail_path = os.path.join(TEMP_DIR, f"{prefix_str}_tail_{idx:02d}.png")
+                    shutil.copy2(found, target_tail_path)
+                    out_tail_paths.append(target_tail_path)
+        if not out_tail_paths:
+            found_files = []
+            for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
+                for f in files:
+                    if f.startswith(f"{prefix_str}_tail") and (f.endswith(".png") or f.endswith(".jpg")):
+                        found_files.append(os.path.join(root, f))
+            found_files.sort()
+            for idx, cand in enumerate(found_files):
+                target_tail_path = os.path.join(TEMP_DIR, f"{prefix_str}_tail_{idx:02d}.png")
+                shutil.copy2(cand, target_tail_path)
+                out_tail_paths.append(target_tail_path)
+        log(f"Successfully captured {len(out_tail_paths)} tail PNG frames for next block prefix: {[os.path.basename(p) for p in out_tail_paths]}")
 
-    return True, out_file, out_end_frame_path
+    return True, out_file, out_tail_paths
 
 
 # ---------------------------------------------------------------------------
@@ -1147,7 +1185,7 @@ def execute_scenario_pipeline(
 
             prefix_latent_path = None
             prefix_video_path = None
-            next_end_frame_path = None
+            next_tail_paths = None
 
             for b_idx, blk in enumerate(blocks):
                 if is_interrupted():
@@ -1245,10 +1283,10 @@ def execute_scenario_pipeline(
                         wan_start_img = anchor_img_path
                         wan_save_tail = (len(blocks) > 1)
                     else:
-                        wan_num_frames = 57
+                        wan_num_frames = 61
                         wan_core_frames = 56
-                        wan_pref_frames = 1
-                        wan_start_img = next_end_frame_path or anchor_img_path
+                        wan_pref_frames = 5
+                        wan_start_img = next_tail_paths or anchor_img_path
                         wan_save_tail = (not is_last)
 
                     res = generate_wan_segment(
@@ -1267,10 +1305,10 @@ def execute_scenario_pipeline(
                     )
                     ok = res[0]
                     seg_core_path = res[1]
-                    seg_end_frame = res[2] if len(res) > 2 else None
-                    if seg_end_frame:
-                        next_end_frame_path = seg_end_frame
-                        log(f"Chained end keyframe for next block: {next_end_frame_path}")
+                    seg_tail_paths = res[2] if len(res) > 2 else []
+                    if seg_tail_paths:
+                        next_tail_paths = seg_tail_paths
+                        log(f"Chained {len(next_tail_paths)} tail PNG frames for next block prefix: {[os.path.basename(p) for p in next_tail_paths]}")
                     block_core_frames = wan_core_frames
 
                 if not ok:

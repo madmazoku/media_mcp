@@ -33,8 +33,8 @@ def reload_core_modules():
     for m in (config, a1111_client, comfy_client, ffmpeg_engine, image_engine, video_pipeline):
         try:
             importlib.reload(m)
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"Warning: Failed to reload {m.__name__}: {e}")
 
 if hasattr(sys.stdin, "reconfigure"):
     try:
