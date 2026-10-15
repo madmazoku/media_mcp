@@ -12,6 +12,9 @@ import sys
 import json
 import uuid
 import queue
+import threading
+import shutil
+import base64
 import urllib.parse
 import contextlib
 from pathlib import Path
@@ -42,6 +45,7 @@ if hasattr(sys.stdin, "reconfigure"):
         pass
 
 _REAL_STDOUT = sys.stdout
+_STDOUT_LOCK = threading.Lock()
 _SSE_CLIENTS = {}
 _CURRENT_PROGRESS_TOKEN = None
 
@@ -51,8 +55,10 @@ def log(msg: str):
 
 def send_response(resp: dict):
     line = json.dumps(resp, ensure_ascii=False)
-    _REAL_STDOUT.write(line + "\n")
-    _REAL_STDOUT.flush()
+    with _STDOUT_LOCK:
+        _REAL_STDOUT.write(line + "\n")
+        _REAL_STDOUT.flush()
+
 
 def broadcast_mcp_progress(message: str, progress: Optional[float] = None, total: Optional[float] = None):
     # 1. Standard MCP notification (notifications/message)
@@ -173,21 +179,35 @@ def tool_video_run_scenario(args: dict) -> dict:
         except Exception as e:
             return {"error": f"Failed to parse 'scenario_data' JSON: {e}"}
 
-    log(f"Starting scenario execution: {output_name or 'unnamed'} ({width}x{height} @ {fps}fps, HUD={enable_hud})")
+    image_cfg = args.get("image")
+    video_cfg = args.get("video")
+    video_engine = args.get("video_engine") or args.get("engine")
+    image_engine = args.get("image_engine")
+    image_model = args.get("image_model") or args.get("model")
+    negative_prompt = args.get("negative_prompt")
+
+    log(f"Starting scenario execution: {output_name or 'unnamed'} (video_engine={video_engine or 'default'}, image_engine={image_engine or 'auto'}, image_model={image_model or 'default'}, {width}x{height} @ {fps}fps, HUD={enable_hud})")
 
     try:
         res = video_pipeline.execute_scenario_pipeline(
             scenario_input=scenario_data,
             global_start_image=start_image,
             output_name=output_name,
+            default_negative_prompt=negative_prompt,
+            video_engine=video_engine,
+            image_engine=image_engine,
+            image_model=image_model,
             width=width,
             height=height,
             fps=fps,
-            enable_hud=enable_hud
+            enable_hud=enable_hud,
+            image=image_cfg,
+            video=video_cfg
         )
     except Exception as ex:
         log(f"Pipeline execution failed: {ex}")
         return {"error": f"Scenario execution failed: {str(ex)}"}
+
 
     final_path = res["video_path"]
     hud_path = res.get("hud_video_path")
@@ -312,6 +332,16 @@ def tool_video_validate_scenario(args: dict) -> dict:
             if overlap >= dur:
                 errors.append(f"{s_name} / Block #{b_idx + 1}: overlap ({overlap}s) must be < duration ({dur}s).")
 
+            # Check overlap collision: for any block with both incoming and outgoing overlap,
+            # prefix_length + tail_length must be strictly < clip_duration
+            prefix_length = float(blocks[b_idx - 1].get("overlap", 1.5)) if b_idx > 0 else 0.0
+            tail_length = overlap if b_idx < len(blocks) - 1 else 0.0
+            if prefix_length + tail_length >= dur:
+                errors.append(
+                    f"{s_name} / Block #{b_idx + 1}: combined overlap (prefix {prefix_length}s + tail {tail_length}s = {prefix_length + tail_length:.2f}s) "
+                    f"must be strictly less than duration ({dur}s). Condition 'prefix_length + tail_length < clip_duration' violated."
+                )
+
             if b_idx < len(blocks) - 1:
                 s_dur += max(0.0, dur - overlap)
             else:
@@ -356,42 +386,73 @@ def tool_video_generate_block(args: dict) -> dict:
     if not prompt:
         return {"error": "Prompt is required."}
 
+    engine = str(args.get("engine", "wan")).lower()
+    negative_prompt = args.get("negative_prompt") or "blurry, low quality, jitter, static, deformed, extra limbs, bad anatomy, text, watermark"
     duration = float(args.get("duration", 5.0))
     start_image = args.get("start_image")
     end_image = args.get("end_image")
     prefix_video = args.get("prefix_video")
+    prefix_latent = args.get("prefix_latent")
     width = int(args.get("width", 832))
     height = int(args.get("height", 480))
-    fps = int(args.get("fps", 16))
-    out_name = args.get("output_name") or f"single_{int(time.time())}.mp4"
+    fps = int(args.get("fps", 24 if engine == "ltx" else 16))
+    out_name = args.get("output_name") or f"single_{int(time.time()*1000)}.mp4"
 
+    stride = 8 if engine == "ltx" else 4
     raw_frames = int(round(duration * fps))
-    k = max(4, round((raw_frames - 1) / 4))
-    num_frames = 4 * k + 1
+    k = max(1, round((raw_frames - 1) / stride))
+    num_frames = stride * k + 1
 
-    ok, raw_path = video_pipeline.generate_wan_segment(
-        image_path=start_image,
-        prefix_video_path=prefix_video,
-        end_image_path=end_image,
-        prompt=prompt,
-        width=width,
-        height=height,
-        num_frames=num_frames,
-        fps=fps,
-        out_video_name=out_name
-    )
+    if engine == "ltx":
+        ok, raw_path, _ = video_pipeline.generate_ltx_segment(
+            image_path=start_image,
+            prefix_latent_path=prefix_latent,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            fps=fps,
+            out_video_name=out_name
+        )
+    else:
+        res = video_pipeline.generate_wan_segment(
+            image_path=start_image,
+            prefix_latent_path=prefix_latent,
+            prefix_video_path=prefix_video,
+            end_image_path=end_image,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            fps=fps,
+            out_video_name=out_name
+        )
+        ok, raw_path = res[0], res[1]
     if not ok:
         return {"error": f"Block generation failed: {raw_path}"}
 
     final_path = os.path.join(config.OUTPUT_VID_DIR, out_name)
-    ffmpeg_engine.cut_duration(raw_path, duration=duration, out_path=final_path)
+    ffmpeg_engine.cut_duration(raw_path, duration=duration, out_path=final_path, stream_copy=True)
     actual_dur = ffmpeg_engine.get_duration(final_path)
 
     poster_path = os.path.join(config.OUTPUT_IMG_DIR, f"{os.path.splitext(out_name)[0]}_poster.png")
-    poster_path, poster_b64 = ffmpeg_engine.extract_poster(final_path, poster_path)
+    if start_image and os.path.exists(start_image):
+        try:
+            shutil.copy2(start_image, poster_path)
+        except Exception:
+            pass
+        try:
+            with open(poster_path, "rb") as f:
+                poster_b64 = base64.b64encode(f.read()).decode("utf-8")
+        except Exception:
+            poster_b64 = None
+    else:
+        poster_path, poster_b64 = ffmpeg_engine.extract_poster(final_path, poster_path)
 
     result_text = (
-        f"Video Block Generated Successfully:\n"
+        f"Video Block Generated Successfully ({engine.upper()}):\n"
         f"- Output: `{final_path}`\n"
         f"- Duration: {actual_dur:.2f}s | Resolution: {width}x{height} @ {fps} fps\n\n"
         f"File link: [Open Video](file:///{final_path.replace(os.sep, '/')})\n"
@@ -401,12 +462,12 @@ def tool_video_generate_block(args: dict) -> dict:
     if poster_b64:
         content.append({"type": "image", "data": poster_b64, "mimeType": "image/png"})
 
-    return {"content": content, "video_path": final_path, "duration": actual_dur}
+    return {"content": content, "video_path": final_path, "duration": actual_dur, "engine": engine}
+
 
 
 
 def tool_media_get_status(args: dict) -> dict:
-    reload_core_modules()
     status_lines = []
 
     # 1. Pipeline status
@@ -431,6 +492,13 @@ def tool_media_get_status(args: dict) -> dict:
         status_lines.append(f"\n⚡ ComfyUI (Wan 2.2 / FLUX):\n  - Running tasks: {len(running)}\n  - Pending in queue: {len(pending)}")
         if running:
             status_lines.append(f"  - Active prompt ID: {running[0][1]}")
+            try:
+                p_st = comfy_client.get_prompt_status()
+                node_id = p_st.get("executing", {}).get("node")
+                if node_id:
+                    status_lines.append(f"  - Executing node: {node_id}")
+            except Exception:
+                pass
     except Exception as ex:
         status_lines.append(f"\n⚡ ComfyUI: Connection error ({ex})")
 
@@ -472,24 +540,30 @@ def tool_media_interrupt(args: dict) -> dict:
 TOOLS_SPEC = [
     {
         "name": "video_run_scenario",
-        "description": "Execute a hierarchical multi-scene video scenario with Wan 2.2 using True Forced Prefix continuity and FFmpeg assembly.",
+        "description": "Execute a hierarchical multi-scene video scenario with Wan 2.2 or LTX-2.3 (22B) using Latent-Chaining and lossless Stream Copy assembly.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "scenario_path": {"type": "string", "description": "Path to scenario JSON file (in workflows/ or absolute)"},
                 "scenario_data": {"description": "Hierarchical scenario object or array"},
+                "image": {"type": "object", "description": "Static anchor image configuration: engine (sdxl, flux1, flux2), model, prompt, negative_prompt, cfg, steps, sampler"},
+                "video": {"type": "object", "description": "Static video pipeline configuration: engine (wan, ltx), model, prompt, negative_prompt, width, height, fps"},
+                "video_engine": {"type": "string", "enum": ["wan", "ltx"], "description": "Video generation engine: 'wan' (Wan 2.2 14B, default) or 'ltx' (LTX-2.3 22B)"},
+                "image_engine": {"type": "string", "enum": ["sdxl", "flux1", "flux2", "comfy_flux", "a1111"], "description": "Anchor keyframe image engine: 'sdxl' (A1111 SDXL/Pony), 'flux1' (ComfyUI FLUX 1 Dev), 'flux2' (ComfyUI FLUX 2 Klein)"},
+                "image_model": {"type": "string", "description": "Optional specific checkpoint name for image_engine (e.g. FLUX or A1111 SDXL checkpoint)"},
+                "negative_prompt": {"type": "string", "description": "Default negative prompt across all scenes and blocks"},
                 "start_image": {"type": "string", "description": "Optional global starting image path for Scene 1"},
                 "output_name": {"type": "string", "description": "Custom final output video filename (e.g. 'movie.mp4')"},
-                "width": {"type": "integer", "description": "Width in pixels (default: 832, multiple of 16)"},
-                "height": {"type": "integer", "description": "Height in pixels (default: 480, multiple of 16)"},
-                "fps": {"type": "integer", "description": "Frame rate (default: 16)"},
+                "width": {"type": "integer", "description": "Width in pixels (default: 832)"},
+                "height": {"type": "integer", "description": "Height in pixels (default: 480)"},
+                "fps": {"type": "integer", "description": "Frame rate (default: 16 for Wan, 24 for LTX)"},
                 "enable_hud": {"type": "boolean", "description": "Generate debug video with countdown timeline overlay"}
             }
         }
     },
     {
         "name": "video_validate_scenario",
-        "description": "Validate a hierarchical scenario structure before execution (checks anchor images, timing, overlaps, and models).",
+        "description": "Validate a hierarchical scenario structure before execution (checks anchor images, timing, overlaps, negative prompts, and engines).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -500,23 +574,27 @@ TOOLS_SPEC = [
     },
     {
         "name": "video_generate_block",
-        "description": "Generate a single video segment using Wan 2.2 with optional seed, end keyframe, or prefix video.",
+        "description": "Generate a single video segment using Wan 2.2 or LTX-2.3 (22B) with optional seed, end keyframe, or prefix latent/video.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "prompt": {"type": "string", "description": "Motion and camera prompt"},
+                "engine": {"type": "string", "enum": ["wan", "ltx"], "description": "Video engine: 'wan' (default) or 'ltx' (LTX-2.3 22B)"},
+                "negative_prompt": {"type": "string", "description": "Negative prompt"},
                 "duration": {"type": "number", "description": "Duration in seconds (default: 5.0)"},
                 "start_image": {"type": "string", "description": "Starting image path"},
-                "end_image": {"type": "string", "description": "Target ending keyframe image path"},
-                "prefix_video": {"type": "string", "description": "Prefix video for forced continuity"},
+                "end_image": {"type": "string", "description": "Target ending keyframe image path (Wan only)"},
+                "prefix_latent": {"type": "string", "description": "Prefix .latent safetensors file path for forced continuity"},
+                "prefix_video": {"type": "string", "description": "Prefix video for forced continuity (legacy)"},
                 "width": {"type": "integer", "description": "Width (default: 832)"},
                 "height": {"type": "integer", "description": "Height (default: 480)"},
-                "fps": {"type": "integer", "description": "FPS (default: 16)"},
+                "fps": {"type": "integer", "description": "FPS (default: 16 for Wan, 24 for LTX)"},
                 "output_name": {"type": "string", "description": "Output filename"}
             },
             "required": ["prompt"]
         }
     },
+
     {
         "name": "media_get_status",
         "description": "Query real-time generation and queue status across Video Pipeline, ComfyUI (Wan/FLUX), and Automatic1111 (SD/Pony).",
@@ -701,6 +779,11 @@ def run_sse_server(host: str = "0.0.0.0", port: int = 7866):
     except KeyboardInterrupt:
         server.server_close()
 
+def _async_tool_worker(req: dict):
+    resp = handle_jsonrpc(req)
+    if resp is not None:
+        send_response(resp)
+
 def run_stdio_server():
     log("Starting Video MCP Server over stdio...")
     while True:
@@ -717,9 +800,20 @@ def run_stdio_server():
             req = json.loads(line)
         except json.JSONDecodeError:
             continue
-        resp = handle_jsonrpc(req)
-        if resp is not None:
-            send_response(resp)
+
+        method = req.get("method")
+        params = req.get("params", {})
+        tool_name = params.get("name") if method == "tools/call" else None
+
+        # Dispatch long-running scenario or block generations to a background thread
+        # so stdio reading loop is never blocked and media_get_status/media_interrupt respond in < 50ms
+        if method == "tools/call" and tool_name in ("video_run_scenario", "video_generate_block"):
+            threading.Thread(target=_async_tool_worker, args=(req,), daemon=True).start()
+        else:
+            resp = handle_jsonrpc(req)
+            if resp is not None:
+                send_response(resp)
+
 
 def run_cli_test():
     print(f"Testing Video MCP Server...")

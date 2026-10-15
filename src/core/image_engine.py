@@ -51,7 +51,8 @@ def generate_flux_image(
     guidance: float = 3.5,
     seed: int = -1,
     lora_name: Optional[str] = None,
-    lora_strength: float = 0.8
+    lora_strength: float = 0.8,
+    custom_filename: Optional[str] = None
 ) -> Tuple[bool, Optional[str], Optional[str], Dict[str, Any]]:
     """
     Generates an image via FLUX.1 or FLUX.2 Klein in ComfyUI.
@@ -156,9 +157,12 @@ def generate_flux_image(
         file_type=first_img.get("type", "output")
     )
 
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    req_uuid = uuid.uuid4().hex[:8]
-    save_filename = f"flux_{model_type}_{timestamp}_{req_uuid}.png"
+    if custom_filename:
+        save_filename = custom_filename if custom_filename.endswith(".png") else f"{custom_filename}.png"
+    else:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        req_uuid = uuid.uuid4().hex[:8]
+        save_filename = f"flux_{model_type}_{timestamp}_{req_uuid}.png"
     final_path = os.path.join(OUTPUT_IMG_DIR, save_filename)
 
     with open(final_path, "wb") as f:
@@ -191,7 +195,8 @@ def generate_a1111_image(
     cfg_scale: float = 7.0,
     sampler_name: Optional[str] = None,
     seed: int = -1,
-    highres_fix: bool = True
+    highres_fix: bool = True,
+    custom_filename: Optional[str] = None
 ) -> Tuple[bool, Optional[str], Optional[str], Dict[str, Any]]:
     """
     Generates an image via Automatic1111 WebUI.
@@ -210,30 +215,9 @@ def generate_a1111_image(
     is_sdxl = any(x in model_lower for x in ["xl", "pony", "illustrious", "animagine"])
     is_pony = any(x in model_lower for x in ["pony", "score_"]) or "score_" in prompt.lower()
 
-    # Pony character tag sanitization:
-    # In Pony Diffusion / Danbooru, '1girl' strictly means a human female girl.
-    # Combining '1girl' with 'unicorn/pony' produces an uncanny human girl face pasted onto horse legs.
-    is_mlp_pony = any(x in prompt.lower() for x in ["pony", "unicorn", "pegasus", "alicorn", "mare", "stallion", "filly", "colt"])
-    if is_pony and is_mlp_pony:
-        import re
-        prompt = re.sub(r'\b1girl\b,?\s*', '', prompt, flags=re.IGNORECASE).strip()
-        if "quadruped" not in prompt.lower() and "feral" not in prompt.lower():
-            prompt = f"{prompt}, quadruped, feral pony, cute pony muzzle, mlp:fim style"
-        # Enforce anti-human & anti-anthro tags in negative prompt
-        for neg_tag in ["anthro", "human", "1girl", "humanoid face", "human face", "bipedal"]:
-            if neg_tag not in negative_prompt.lower():
-                negative_prompt = f"{negative_prompt}, {neg_tag}"
-        log("Pony character detected: removed '1girl', enforced quadruped & anti-human tags")
-
-    # Pony XL models overbake and produce burnt contrast/halos at CFG >= 7.0.
-    # Optimal CFG for Pony XL is 5.0 - 5.5.
+    # Pony XL models perform well at CFG 5.0 - 5.5
     if is_pony and abs(cfg_scale - 7.0) < 0.01:
         cfg_scale = 5.5
-        log(f"Auto-adjusting Pony CFG scale to {cfg_scale} to prevent overbaking")
-
-    # Pony-friendly negative prompt if default generic one is provided
-    if is_pony and negative_prompt == "ugly, deformed, low quality, bad anatomy":
-        negative_prompt = "score_4, score_5, score_6, worst quality, low quality, bad anatomy, bad hands, deformed, extra limbs, bipedal, anthro, human, 1girl, blurry"
 
     if not sampler_name and is_pony:
         sampler_name = "Euler a"
@@ -245,7 +229,7 @@ def generate_a1111_image(
     target_w = snap_to_16(width)
     target_h = snap_to_16(height)
 
-    if highres_fix and is_sdxl and (target_w * target_h < 750_000):
+    if is_sdxl and (target_w * target_h < 750_000):
         # Scale to 1280x720 for 16:9, preserving aspect ratio
         aspect = target_w / max(1, target_h)
         if abs(aspect - (16.0 / 9.0)) < 0.15:
@@ -311,9 +295,12 @@ def generate_a1111_image(
         raw_b64 = images[0].split(",", 1)[-1]
         raw_bytes = base64.b64decode(raw_b64)
 
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        req_uuid = uuid.uuid4().hex[:8]
-        save_filename = f"a1111_{timestamp}_{req_uuid}.png"
+        if custom_filename:
+            save_filename = custom_filename if custom_filename.endswith(".png") else f"{custom_filename}.png"
+        else:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            req_uuid = uuid.uuid4().hex[:8]
+            save_filename = f"a1111_{timestamp}_{req_uuid}.png"
         final_path = os.path.join(OUTPUT_IMG_DIR, save_filename)
 
         with open(final_path, "wb") as f:
@@ -338,7 +325,12 @@ def generate_a1111_image(
 # Universal Dispatcher (Used by video pipeline for Anchor Keyframes)
 # ---------------------------------------------------------------------------
 
-def generate_anchor_frame(anchor_meta: Dict[str, Any], width: int = 832, height: int = 480) -> Tuple[bool, str, Optional[str]]:
+def generate_anchor_frame(
+    anchor_meta: Dict[str, Any],
+    width: int = 832,
+    height: int = 480,
+    custom_filename: Optional[str] = None
+) -> Tuple[bool, str, Optional[str]]:
     """
     Generates or verifies an anchor keyframe for a scene.
     Supports:
@@ -352,13 +344,21 @@ def generate_anchor_frame(anchor_meta: Dict[str, Any], width: int = 832, height:
         p = Path(img_path)
         if p.exists() and p.is_file():
             log(f"Anchor keyframe already exists: {p}")
+            target_p = p
+            if custom_filename:
+                target_p = Path(OUTPUT_IMG_DIR) / (custom_filename if custom_filename.endswith(".png") else f"{custom_filename}.png")
+                try:
+                    shutil.copy2(p, target_p)
+                except Exception as ex:
+                    log(f"Warning: could not copy existing anchor to custom filename: {ex}")
+                    target_p = p
             try:
-                with open(p, "rb") as f:
+                with open(target_p, "rb") as f:
                     b64 = base64.b64encode(f.read()).decode("utf-8")
-                return True, str(p.resolve()), b64
+                return True, str(target_p.resolve()), b64
             except Exception as ex:
                 log(f"Warning: could not read existing anchor image base64: {ex}")
-                return True, str(p.resolve()), None
+                return True, str(target_p.resolve()), None
         else:
             log(f"Specified anchor image path not found: {img_path}. Falling back to prompt generation.")
 
@@ -367,19 +367,23 @@ def generate_anchor_frame(anchor_meta: Dict[str, Any], width: int = 832, height:
     if not prompt:
         return False, "Neither valid 'image_path' nor 'prompt' provided for anchor frame", None
 
-    model = anchor_meta.get("model") or anchor_meta.get("model_alias") or "flux1_dev"
-    backend = anchor_meta.get("backend", "auto").lower()
+    model = anchor_meta.get("model") or anchor_meta.get("image_model") or anchor_meta.get("model_alias")
+    engine_val = str(anchor_meta.get("image_engine") or anchor_meta.get("backend") or "auto").lower()
     lora = anchor_meta.get("lora") or anchor_meta.get("lora_alias")
     lora_strength = float(anchor_meta.get("lora_strength", 0.8))
 
-    use_a1111 = (backend == "a1111") or (backend == "auto" and any(x in str(model).lower() for x in ["pony", "sdxl", "illustrious", "animagine"]))
+    use_a1111 = (engine_val in ("a1111", "sdxl", "pony")) or (
+        engine_val == "auto" and model and any(x in str(model).lower() for x in ["sdxl", "pony", "illustrious", "animagine"])
+    )
 
     if use_a1111:
-        cfg = float(anchor_meta.get("cfg_scale", anchor_meta.get("cfg", 5.5 if "pony" in str(model).lower() else 7.0)))
-        sampler = anchor_meta.get("sampler_name", anchor_meta.get("sampler", "Euler a" if "pony" in str(model).lower() else None))
+        if not model or model == "flux1_dev":
+            model = "sdxl"
+        cfg = float(anchor_meta.get("cfg_scale", anchor_meta.get("cfg", 5.5)))
+        sampler = anchor_meta.get("sampler_name", anchor_meta.get("sampler", "Euler a"))
         steps = int(anchor_meta.get("steps", 30))
         seed = int(anchor_meta.get("seed", -1))
-        neg = anchor_meta.get("negative_prompt", "ugly, deformed, low quality, bad anatomy")
+        neg = anchor_meta.get("negative_prompt", "score_6, score_5, score_4, ugly, deformed, low quality, bad anatomy")
 
         ok, path, b64, err = generate_a1111_image(
             prompt=prompt,
@@ -391,20 +395,22 @@ def generate_anchor_frame(anchor_meta: Dict[str, Any], width: int = 832, height:
             cfg_scale=cfg,
             sampler_name=sampler,
             seed=seed,
-            highres_fix=bool(anchor_meta.get("highres_fix", True))
+            highres_fix=bool(anchor_meta.get("highres_fix", False)),
+            custom_filename=custom_filename
         )
         if not ok:
             return False, f"A1111 anchor generation failed: {err.get('error')}", None
         return True, path, b64
     else:
-        m_type = "flux2" if ("flux2" in str(model).lower() or "klein" in str(model).lower()) else "flux1_dev"
+        m_type = "flux2" if (engine_val == "flux2" or "flux2" in str(model).lower() or "klein" in str(model).lower()) else "flux1_dev"
         ok, path, b64, err = generate_flux_image(
             prompt=prompt,
             model_type=m_type,
             width=width,
             height=height,
             lora_name=lora,
-            lora_strength=lora_strength
+            lora_strength=lora_strength,
+            custom_filename=custom_filename
         )
         if not ok:
             return False, f"FLUX anchor generation failed: {err.get('error')}", None

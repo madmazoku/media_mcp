@@ -12,18 +12,28 @@
 
 1. **Разделение ответственности (Separation of Concerns):**
    - `src/mcp/image_mcp.py` — тонкий MCP-интерфейс для генерации и редактирования изображений (A1111 / FLUX).
-   - `src/mcp/video_mcp.py` — тонкий MCP-интерфейс для многосценарных видеороликов (Wan 2.2 / FFmpeg).
+   - `src/mcp/video_mcp.py` — тонкий MCP-интерфейс для многосценарных видеороликов (Wan 2.2 / LTX-2.3 / FFmpeg).
    - `src/core/` — общее ядро с переиспользуемыми клиентами и пайплайнами.
-2. **Истинное префиксное кондиционирование (True Forced Prefix):**
-   - Непрерывное сохранение динамики сцены без рывков и затуханий (crossfade) в латентном пространстве Wan 2.2 через ноду `VHS_LoadVideoPath`.
-3. **Кинематографическая иерархия «Сцена (Scene) -> Блоки движения (Blocks)»:**
-   - Чёткое разделение промптов: **Appearance Prompt** (статичная эстетика опорного кадра для FLUX/SDXL) и **Motion Prompt** (векторы действий и движения камеры для Wan 2.2).
-4. **Гибридный опорный кадр (Hybrid Anchor):**
+2. **True Forced Prefix Conditioning:**
+   - Непрерывное сохранение динамики сцены без рывков, затуханий и деградации цветов: хвосты блоков передаются в следующий как многокадровый префикс (17 кадров при 16 fps = 1.0 сек) через нативный `WanImageToVideo` (`start_image`), маскирующий 100% префиксных кадров как conditioned (`mask = 0.0`). Никаких поломок масок, размазывания контуров и паразитных «червяков»!
+3. **Чистовая основа блоков и Stream Copy (-c copy):**
+   - Чистовая основа каждого блока (`block_core`) сохраняется напрямую в H.264. Финальная сборка сцен и фильма в FFmpeg происходит через мгновенный **Stream Copy (`-c copy`) за 0.05 сек без перекодирования**.
+4. **Двойной видеодвижок (Dual Engine):**
+   - Поддержка **Wan 2.2 (14B)** для кинематографичной плавности, аниме и лиц, и **LTX-2.3 (22B)** с CFG 3.0 и дистиллированной LoRA 1.1 для масштабной динамики и экшена.
+5. **Negative Prompt первого класса:**
+   - Полная поддержка `negative_prompt` на уровне сценария, сцены, блока и тулов. Полное удаление китайского хардкода.
+   - Отказ от искусственного Color-Lock: полная свобода для смены освещения, магии (*Lumos*) и ночных сцен.
+6. **Асинхронный Stdio MCP Server:**
+   - Вызовы генерации выполняются в фоновом worker-потоке: `media_get_status` и `media_interrupt` отвечают за < 50 мс без блокировки stdio.
+7. **Кинематографическая иерархия «Сцена (Scene) -> Блоки движения (Blocks)»:**
+   - Чёткое разделение промптов: **Appearance Prompt** (статичная эстетика опорного кадра для FLUX/SDXL) и **Motion Prompt** (векторы действий и движения камеры).
+8. **Гибридный опорный кадр (Hybrid Anchor):**
    - Мгновенное оживление уже существующего файла (`image_path`), либо автоматическая фоновая генерация по промпту (`prompt`).
-5. **Автоматические постеры в чате (No Context Bloat):**
+9. **Автоматические постеры в чате (No Context Bloat):**
    - Вместо перегрузки контекста десятками мегабайт base64-видео сервер возвращает легкий постер первого кадра через нативный тип MCP `image`, а под ним формирует кликабельную ссылку на воспроизведение.
-6. **Zero External Dependencies:**
-   - Написан исключительно на стандартной библиотеке Python 3.10+ (без внешних pip-пакетов).
+10. **Zero External Dependencies:**
+    - Написан исключительно на стандартной библиотеке Python 3.10+ (без внешних pip-пакетов, со встроенной поддержкой `safetensors`).
+
 
 ---
 
@@ -61,15 +71,66 @@ media_mcp/
 
 ## ⚙️ Системные требования и зависимости
 
-- **Python:** `>= 3.10` (системный, pip-зависимости не требуются).
-- **FFmpeg:** доступен в системе через `PATH` или явно указан в переменной `FFMPEG_BIN` (рекомендуется сборка с поддержкой аппаратного кодировщика `h264_nvenc`).
+### 1. Системные компоненты
+- **Python:** `>= 3.10` (чистая стандартная библиотека Python, встроенный модуль `safetensors.torch`).
+- **FFmpeg:** доступен в системе через `PATH` или указан в `FFMPEG_BIN` (рекомендуется сборка с поддержкой `h264_nvenc`).
 - **ComfyUI:** запущен локально (по умолчанию `http://127.0.0.1:8188`).
-  - Модели для картинок: `persephoneFluxNSFWSFW_20FP16.safetensors` (FLUX.1 Dev) или `aishaNSFWFlux2Klein_betaV88.safetensors` (FLUX.2 Klein).
-  - Модели для видео: `wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors`, `wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors`, `wan2.2_vae.safetensors`, `umt5_xxl_fp8_e4m3fn_scaled.safetensors`.
-  - Ноды ComfyUI: `ComfyUI-VideoHelperSuite` (`VHS_LoadVideoPath`, `VHS_VideoCombine`).
-- **Automatic1111 WebUI (опционально):** запущен с флагом `--api` (по умолчанию `http://127.0.0.1:7860`) для моделей SDXL, Pony или Illustrious.
+- **Automatic1111 WebUI (опционально):** запущен с флагом `--api` (по умолчанию `http://127.0.0.1:7860`).
 
 ---
+
+### 2. Необходимые ноды и пакеты ComfyUI
+
+Большинство нод входят в стандартную поставку современного ComfyUI (`comfy_extras`), но для работы требуются следующие группы:
+
+| Категория | Используемые ноды | Где находится / Пакет |
+| :--- | :--- | :--- |
+| **Базовые ноды** | `LoadImage`, `VAELoader`, `VAEDecode`, `CreateVideo`, `SaveVideo`, `CLIPTextEncode`, `UNETLoader`, `LoraLoaderModelOnly` | ComfyUI Core |
+| **Latent-Chaining** | `SaveLatent`, `LoadLatent` | ComfyUI Core |
+| **Wan 2.2** | `WanImageToVideo`, `WanFirstLastFrameToVideo`, `ModelSamplingSD3`, `CLIPLoader` (type: `"wan"`) | `comfy_extras/nodes_wanvideo.py` |
+| **LTX-2.3 (22B)** | `EmptyLTXVLatentVideo`, `LTXVImgToVideoInplace`, `LTXVConditioning`, `LTXVScheduler`, `DualCLIPLoader` (type: `"ltxv"`) | `comfy_extras/nodes_ltx.py` или `ComfyUI-LTXVideo` |
+| **Продвинутый сэмплинг** | `SamplerCustomAdvanced`, `KSamplerSelect`, `RandomNoise`, `CFGGuider`, `BasicGuider` | `comfy_extras/nodes_custom_sampler.py` |
+| **FLUX / FLUX.2** | `FluxGuidance`, `Flux2Scheduler`, `EmptySD3LatentImage`, `CLIPLoader` (type: `"flux2"`) | `comfy_extras/nodes_sd3.py`, `nodes_flux.py` |
+| **Legacy Video Prefix** | `VHS_LoadVideoPath` | Кастомный пакет `ComfyUI-VideoHelperSuite` |
+
+---
+
+### 3. Комбинации моделей и пути размещения в ComfyUI
+
+Для каждого из поддерживаемых движков требуется строго согласованная комбинация весов:
+
+#### А. Видеодвижок Wan 2.2 (14B I2V — Двухстадийная дистилляция 4 шага)
+* **UNET (High Noise):** `wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors` $\rightarrow$ `ComfyUI/models/diffusion_models/` (или `unet/`)
+* **UNET (Low Noise):** `wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors` $\rightarrow$ `ComfyUI/models/diffusion_models/` (или `unet/`)
+* **LoRA (High Noise 4-step):** `wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors` $\rightarrow$ `ComfyUI/models/loras/`
+* **LoRA (Low Noise 4-step):** `wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors` $\rightarrow$ `ComfyUI/models/loras/`
+* **Text Encoder (CLIP):** `umt5_xxl_fp8_e4m3fn_scaled.safetensors` $\rightarrow$ `ComfyUI/models/text_encoders/` (или `clip/`)
+* **VAE:** `wan_2.1_vae.safetensors` $\rightarrow$ `ComfyUI/models/vae/`
+
+#### Б. Видеодвижок LTX-2.3 (22B — Дистиллированный CFG 3.0)
+* **UNET:** `ltx-2.3-22b-dev-fp8.safetensors` $\rightarrow$ `ComfyUI/models/diffusion_models/` (или `unet/`)
+* **LoRA (Distilled 1.1):** `ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors` $\rightarrow$ `ComfyUI/models/loras/`
+* **Text Encoder (DualCLIP):** `ltx-2-3-22b-text_encoder.safetensors` $\rightarrow$ `ComfyUI/models/text_encoders/` (или `clip/`)
+* **VAE:** `ltx-2-3-22b-VAE.safetensors` $\rightarrow$ `ComfyUI/models/vae/`
+
+#### В. Генерация опорных кадров через FLUX.1 Dev
+* **UNET:** `persephoneFluxNSFWSFW_20FP16.safetensors` $\rightarrow$ `ComfyUI/models/unet/`
+* **CLIP:** `t5xxl_fp16.safetensors` + `clip_l.safetensors` $\rightarrow$ `ComfyUI/models/clip/`
+* **VAE:** `ae.safetensors` $\rightarrow$ `ComfyUI/models/vae/`
+* **LoRA (опционально):** `aidmaNSFWunlock-FLUX-V0.2.safetensors` $\rightarrow$ `ComfyUI/models/loras/`
+
+#### Г. Генерация опорных кадров через FLUX.2 Klein
+* **UNET:** `aishaNSFWFlux2Klein_betaV88.safetensors` $\rightarrow$ `ComfyUI/models/unet/`
+* **CLIP:** `qwen_3_8b_fp8mixed.safetensors` $\rightarrow$ `ComfyUI/models/clip/`
+* **VAE:** `flux2-vae.safetensors` $\rightarrow$ `ComfyUI/models/vae/`
+* *(Внимание: LoRA от FLUX.1 несовместимы с FLUX.2 Klein из-за несовпадения формы тензоров).*
+
+#### Д. Опорные кадры через Automatic1111 (SDXL / Pony / Illustrious)
+* **Чекпоинты:** `models/Stable-diffusion/`
+* **LoRA:** `models/Lora/`
+
+---
+
 
 ## 🔧 Конфигурация (`.env`)
 

@@ -85,6 +85,10 @@ VIDEO_MCP_PORT = int(get_setting("video_mcp_port", "VIDEO_MCP_PORT", 7866))
 def ensure_directories():
     for d in [OUTPUT_DIR, OUTPUT_IMG_DIR, OUTPUT_VID_DIR, TEMP_DIR, WORKFLOWS_DIR]:
         if d:
-            os.makedirs(d, exist_ok=True)
+            try:
+                os.makedirs(d, exist_ok=True)
+            except Exception as ex:
+                sys.stderr.write(f"[config] Notice: could not create directory {d}: {ex}\n")
 
 ensure_directories()
+
