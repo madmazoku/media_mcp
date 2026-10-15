@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Hierarchical Scene-based Video Pipeline with True Forced Prefix Continuity for Wan 2.2.
-Supports:
-1. Scene-based hierarchy: Scene (Anchor Image) -> Shot Sequence (Motion Blocks).
-2. Hybrid Anchor Frame: accepts ready 'image_path' OR visual 'prompt' generated via image_engine.
-3. True Forced Prefix Conditioning: tails of previous blocks condition the latent space of subsequent blocks.
-4. Seamless FFmpeg cut assembly + dynamic countdown HUD.
-5. Automatic poster extraction (returns file and base64).
-6. Backward compatibility with legacy flat block arrays.
+Hierarchical Scene-based Video Pipeline with True Forced Prefix Continuity.
+Routes block rendering through the polymorphic Generator Strategy & Factory pattern.
+Supports Wan 2.2 Fast Mode (4-step LoRA), Wan 2.2 Full (20-step UNet), and LTX-2.3 22B.
+Seamless FFmpeg stream copy assembly + dynamic countdown HUD.
 """
 
 import os
@@ -26,10 +22,20 @@ from .config import OUTPUT_VID_DIR, OUTPUT_IMG_DIR, TEMP_DIR
 from . import ffmpeg_engine
 from . import comfy_client
 from . import image_engine as img_engine_mod
+from .generators import (
+    create_video_generator,
+    VideoRequest,
+    GenerationResult,
+    LtxVideoGenerator,
+    snap_to_16,
+    snap_to_32,
+)
+
 
 def log(msg: str):
     sys.stderr.write(f"[video-pipeline] {msg}\n")
     sys.stderr.flush()
+
 
 _GLOBAL_PROGRESS_CALLBACK = None
 
@@ -47,26 +53,32 @@ _PIPELINE_STATUS = {
     "started_at": 0.0
 }
 
+
 def get_pipeline_status() -> Dict[str, Any]:
     st = dict(_PIPELINE_STATUS)
     if st["is_running"] and st["started_at"] > 0:
         st["elapsed_seconds"] = round(time.time() - st["started_at"], 1)
     return st
 
+
 _INTERRUPT_REQUESTED = False
+
 
 def request_interrupt():
     global _INTERRUPT_REQUESTED
     _INTERRUPT_REQUESTED = True
     comfy_client.interrupt()
 
+
 def is_interrupted() -> bool:
     return _INTERRUPT_REQUESTED or comfy_client.is_interrupted()
+
 
 def set_global_progress_callback(cb):
     global _GLOBAL_PROGRESS_CALLBACK
     _GLOBAL_PROGRESS_CALLBACK = cb
     comfy_client.set_global_progress_callback(cb)
+
 
 def notify_progress(msg: str, progress: Optional[float] = None, total: Optional[float] = None, cb: Optional[Any] = None):
     callback = cb or _GLOBAL_PROGRESS_CALLBACK
@@ -77,8 +89,9 @@ def notify_progress(msg: str, progress: Optional[float] = None, total: Optional[
             pass
     log(msg)
 
+
 # ---------------------------------------------------------------------------
-# Latent Slicing & File Helpers
+# Latent Slicing & File Helpers (Standalone fallback utility)
 # ---------------------------------------------------------------------------
 
 def slice_latent_file(
@@ -91,7 +104,6 @@ def slice_latent_file(
     Slices `tail_frames` along the temporal dimension of a .latent (safetensors) file.
     If start_idx is provided (e.g. -k), slices from start_idx to start_idx + tail_frames.
     Otherwise slices the last tail_frames.
-    KSampler outputs pure raw VAE latents directly; no re-scaling or denormalization is applied.
     """
     try:
         import safetensors.torch
@@ -129,8 +141,9 @@ def slice_latent_file(
         log(f"slice_latent_file error: {ex}")
         return False
 
+
 # ---------------------------------------------------------------------------
-# Wan 2.2 ComfyUI Graph Builder
+# Generator Strategy Facades (Backward Compatibility for direct callers)
 # ---------------------------------------------------------------------------
 
 def generate_wan_segment(
@@ -145,416 +158,51 @@ def generate_wan_segment(
     height: int = 480,
     num_frames: int = 81,
     core_frames: Optional[int] = None,
+    tail_frames: int = 0,
     save_tail: bool = True,
     save_tail_latent: Optional[bool] = None,
     fps: int = 16,
     seed: Optional[int] = None,
+    fast_mode: bool = False,
+    steps: Optional[int] = None,
+    cfg: Optional[float] = None,
     out_video_name: Optional[str] = None,
     progress_callback: Optional[Any] = None
-) -> Tuple[bool, str, Optional[List[str]]]:
+) -> Tuple[bool, str, Optional[str]]:
     """
-    Submits a Wan 2.2 Video segment to ComfyUI.
-    Supports single image seed, multi-frame PNG sequence prefix, or end keyframe lock.
-    Outputs core video directly and exports tail PNG frames for seamless momentum chaining.
-    Returns: (success, out_video_path, out_tail_png_paths)
+    Submits a Wan 2.2 Video segment via WanFastVideoGenerator or WanFullVideoGenerator.
+    Outputs core video directly and exports tail latent for seamless zero-loss momentum chaining.
+    Returns: (success, out_video_path, out_tail_latent_path)
     """
+    engine_name = "wan-fast" if fast_mode else "wan"
+    generator = create_video_generator(engine_name)
     if save_tail_latent is not None:
         save_tail = save_tail_latent
 
-    width = (width // 16) * 16
-    height = (height // 16) * 16
-    out_video_name = out_video_name or f"wan_{int(time.time()*1000)}.mp4"
-    if seed is None or seed < 0:
-        seed = random.randint(1, 1_000_000_000)
+    req = VideoRequest(
+        image_path=image_path,
+        prefix_video_path=prefix_video_path,
+        prefix_latent_path=prefix_latent_path,
+        prefix_frames=prefix_frames,
+        end_image_path=end_image_path,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        width=width,
+        height=height,
+        num_frames=num_frames,
+        core_frames=core_frames,
+        tail_frames=tail_frames,
+        save_tail=save_tail,
+        fps=fps,
+        seed=seed,
+        steps=steps,
+        cfg=cfg,
+        out_video_name=out_video_name,
+        progress_callback=progress_callback
+    )
+    res = generator.generate(req)
+    return res.success, (res.file_path or res.error or ""), res.tail_latent_path
 
-    clean_base = os.path.splitext(os.path.basename(out_video_name))[0]
-    if clean_base.endswith("_core"):
-        clean_base = clean_base[:-5]
-    prefix_str = clean_base
-
-    wf: Dict[str, Any] = {
-        # 1. CLIP / Text Encoder
-        "clip_loader": {
-            "inputs": {
-                "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
-                "type": "wan",
-                "device": "default"
-            },
-            "class_type": "CLIPLoader"
-        },
-        # 2. VAE
-        "vae_loader": {
-            "inputs": {
-                "vae_name": "wan_2.1_vae.safetensors"
-            },
-            "class_type": "VAELoader"
-        },
-        # 3. High Noise Diffusion Model
-        "unet_high": {
-            "inputs": {
-                "unet_name": "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
-                "weight_dtype": "default"
-            },
-            "class_type": "UNETLoader"
-        },
-        # 4. Low Noise Diffusion Model
-        "unet_low": {
-            "inputs": {
-                "unet_name": "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
-                "weight_dtype": "default"
-            },
-            "class_type": "UNETLoader"
-        },
-        # 5. LoRA for High Noise (4-steps distillation)
-        "lora_high": {
-            "inputs": {
-                "model": ["unet_high", 0],
-                "lora_name": "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors",
-                "strength_model": 1.0
-            },
-            "class_type": "LoraLoaderModelOnly"
-        },
-        # 6. LoRA for Low Noise (4-steps distillation)
-        "lora_low": {
-            "inputs": {
-                "model": ["unet_low", 0],
-                "lora_name": "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors",
-                "strength_model": 1.0
-            },
-            "class_type": "LoraLoaderModelOnly"
-        },
-        # 7. ModelSamplingSD3 (shift = 5.0)
-        "sampling_high": {
-            "inputs": {
-                "model": ["lora_high", 0],
-                "shift": 5.0
-            },
-            "class_type": "ModelSamplingSD3"
-        },
-        "sampling_low": {
-            "inputs": {
-                "model": ["lora_low", 0],
-                "shift": 5.0
-            },
-            "class_type": "ModelSamplingSD3"
-        },
-        # 8. Text Encoders
-        "positive_cond": {
-            "inputs": {
-                "clip": ["clip_loader", 0],
-                "text": prompt
-            },
-            "class_type": "CLIPTextEncode"
-        },
-        "negative_cond": {
-            "inputs": {
-                "clip": ["clip_loader", 0],
-                "text": negative_prompt
-            },
-            "class_type": "CLIPTextEncode"
-        }
-    }
-
-    # 9. Conditioning start: Prefix Video (Forced Prefix) > Start Image Keyframe
-    if prefix_video_path and os.path.exists(prefix_video_path):
-        prefix_fn = comfy_client.upload_file_to_comfy(
-            prefix_video_path,
-            custom_filename=f"wan_prefix_{int(time.time()*1000)}.mp4"
-        )
-        abs_prefix_in_comfy = os.path.join(comfy_client.COMFY_INPUT_DIR, prefix_fn)
-        log(f"Configuring TRUE MULTI-FRAME FORCED PREFIX from video: {abs_prefix_in_comfy}")
-        wf["prefix_video_loader"] = {
-            "inputs": {
-                "video": os.path.abspath(abs_prefix_in_comfy),
-                "force_rate": float(fps),
-                "custom_width": width,
-                "custom_height": height,
-                "frame_load_cap": 0,
-                "skip_first_frames": 0,
-                "select_every_nth": 1,
-                "format": "Wan"
-            },
-            "class_type": "VHS_LoadVideoPath"
-        }
-        start_image_node = ["prefix_video_loader", 0]
-    elif isinstance(image_path, list) and len(image_path) > 0:
-        log(f"Configuring MULTI-FRAME PNG PREFIX CHAINING ({len(image_path)} frames)...")
-        curr_node = None
-        for i, p in enumerate(image_path):
-            img_fn = comfy_client.upload_file_to_comfy(p)
-            node_key = f"prefix_frame_{i}"
-            wf[node_key] = {
-                "inputs": {
-                    "image": img_fn,
-                    "upload": "image"
-                },
-                "class_type": "LoadImage"
-            }
-            if curr_node is None:
-                curr_node = [node_key, 0]
-            else:
-                batch_key = f"batch_prefix_{i}"
-                wf[batch_key] = {
-                    "inputs": {
-                        "image1": curr_node,
-                        "image2": [node_key, 0]
-                    },
-                    "class_type": "ImageBatch"
-                }
-                curr_node = [batch_key, 0]
-        start_image_node = curr_node
-    elif isinstance(image_path, str) and os.path.exists(image_path):
-        img_fn = comfy_client.upload_file_to_comfy(image_path)
-        log(f"Configuring start image: {img_fn}")
-        wf["start_image"] = {
-            "inputs": {
-                "image": img_fn,
-                "upload": "image"
-            },
-            "class_type": "LoadImage"
-        }
-        start_image_node = ["start_image", 0]
-    else:
-        return False, f"No valid start input provided: img={image_path}, vid={prefix_video_path}", None
-
-    if end_image_path and os.path.exists(end_image_path):
-        end_fn = comfy_client.upload_file_to_comfy(end_image_path)
-        log(f"Configuring END-KEYFRAME boundary lock: {end_fn}")
-        wf["end_image"] = {
-            "inputs": {
-                "image": end_fn,
-                "upload": "image"
-            },
-            "class_type": "LoadImage"
-        }
-        wf["wan_i2v"] = {
-            "inputs": {
-                "positive": ["positive_cond", 0],
-                "negative": ["negative_cond", 0],
-                "vae": ["vae_loader", 0],
-                "start_image": start_image_node,
-                "end_image": ["end_image", 0],
-                "width": width,
-                "height": height,
-                "length": num_frames,
-                "batch_size": 1
-            },
-            "class_type": "WanFirstLastFrameToVideo"
-        }
-    else:
-        wf["wan_i2v"] = {
-            "inputs": {
-                "positive": ["positive_cond", 0],
-                "negative": ["negative_cond", 0],
-                "vae": ["vae_loader", 0],
-                "start_image": start_image_node,
-                "width": width,
-                "height": height,
-                "length": num_frames,
-                "batch_size": 1
-            },
-            "class_type": "WanImageToVideo"
-        }
-    cond_positive = ["wan_i2v", 0]
-    cond_negative = ["wan_i2v", 1]
-    latent_input = ["wan_i2v", 2]
-
-    if prefix_latent_path and os.path.exists(prefix_latent_path):
-        prefix_fn = comfy_client.upload_file_to_comfy(
-            prefix_latent_path,
-            custom_filename=f"wan_pref_{int(time.time()*1000)}.latent"
-        )
-        log(f"Configuring TRUE FORCED PREFIX LATENT: {prefix_fn}")
-        wf["load_prefix_latent"] = {
-            "inputs": {"latent": prefix_fn},
-            "class_type": "LoadLatent"
-        }
-        wf["replace_latent"] = {
-            "inputs": {
-                "destination": ["wan_i2v", 2],
-                "source": ["load_prefix_latent", 0],
-                "index": 0
-            },
-            "class_type": "ReplaceVideoLatentFrames"
-        }
-        latent_input = ["replace_latent", 0]
-
-    # 10. 2-Stage Distilled KSamplers (High Noise 0..2, Low Noise 2..4) + SaveVideo
-    wf.update({
-        "sampler_stage1": {
-            "inputs": {
-                "model": ["sampling_high", 0],
-                "positive": cond_positive,
-                "negative": cond_negative,
-                "latent_image": latent_input,
-                "add_noise": "enable",
-                "noise_seed": seed,
-                "steps": 4,
-                "cfg": 1.0,
-                "sampler_name": "euler",
-                "scheduler": "simple",
-                "start_at_step": 0,
-                "end_at_step": 2,
-                "return_with_leftover_noise": "enable"
-            },
-            "class_type": "KSamplerAdvanced"
-        },
-        "sampler_stage2": {
-            "inputs": {
-                "model": ["sampling_low", 0],
-                "positive": cond_positive,
-                "negative": cond_negative,
-                "latent_image": ["sampler_stage1", 0],
-                "add_noise": "disable",
-                "noise_seed": seed,
-                "steps": 4,
-                "cfg": 1.0,
-                "sampler_name": "euler",
-                "scheduler": "simple",
-                "start_at_step": 2,
-                "end_at_step": 4,
-                "return_with_leftover_noise": "disable"
-            },
-            "class_type": "KSamplerAdvanced"
-        },
-        "vae_decode": {
-            "inputs": {
-                "samples": ["sampler_stage2", 0],
-                "vae": ["vae_loader", 0]
-            },
-            "class_type": "VAEDecode"
-        }
-    })
-
-    slice_batch_idx = int(prefix_frames) if prefix_frames > 0 else 0
-    if core_frames is not None and core_frames < num_frames:
-        wf["slice_core"] = {
-            "inputs": {
-                "image": ["vae_decode", 0],
-                "batch_index": int(slice_batch_idx),
-                "length": int(core_frames)
-            },
-            "class_type": "ImageFromBatch"
-        }
-        video_images_input = ["slice_core", 0]
-        log(f"Configured ComfyUI ImageFromBatch core: start={slice_batch_idx}, length={core_frames}")
-    else:
-        video_images_input = ["vae_decode", 0]
-
-    wf.update({
-        "create_video": {
-            "inputs": {
-                "images": video_images_input,
-                "fps": fps
-            },
-            "class_type": "CreateVideo"
-        },
-        "save_video": {
-            "inputs": {
-                "video": ["create_video", 0],
-                "filename_prefix": prefix_str,
-                "format": "mp4",
-                "codec": "h264"
-            },
-            "class_type": "SaveVideo"
-        }
-    })
-
-    if save_tail:
-        tail_count = 5
-        tail_start = int(slice_batch_idx + core_frames - tail_count)
-        wf["slice_tail_frames"] = {
-            "inputs": {
-                "image": ["vae_decode", 0],
-                "batch_index": tail_start,
-                "length": tail_count
-            },
-            "class_type": "ImageFromBatch"
-        }
-        wf["save_tail_frames"] = {
-            "inputs": {
-                "images": ["slice_tail_frames", 0],
-                "filename_prefix": f"{prefix_str}_tail"
-            },
-            "class_type": "SaveImage"
-        }
-        log(f"Configured ComfyUI to export {tail_count} tail PNG frames (start frame {tail_start}) for next block")
-
-    log(f"Submitting Wan 2.2 segment prompt ({num_frames} frames @ {fps}fps, seed={seed})...")
-    ok, prompt_id = comfy_client.queue_prompt(wf)
-    if not ok:
-        return False, prompt_id, None, None, None
-
-    ok, history = comfy_client.wait_for_prompt(prompt_id, timeout=900, progress_callback=progress_callback)
-    if not ok:
-        return False, str(history), None, None, None
-
-    outputs = history.get("outputs", {})
-
-    # Locate generated core video
-    save_video_out = outputs.get("save_video", {})
-    videos = save_video_out.get("videos", []) or save_video_out.get("gifs", []) or save_video_out.get("images", [])
-
-    found_local_file = None
-    if videos:
-        fn = videos[0]["filename"]
-        sub = videos[0].get("subfolder", "")
-        found_local_file = comfy_client.find_comfy_output_file(fn, sub)
-
-    if not found_local_file:
-        for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
-            for f in files:
-                if f.startswith(prefix_str) and not f.startswith(f"{prefix_str}_tail") and f.endswith(".mp4"):
-                    found_local_file = os.path.join(root, f)
-                    break
-            if found_local_file:
-                break
-
-    out_file = os.path.join(TEMP_DIR, out_video_name)
-    if found_local_file and os.path.exists(found_local_file):
-        shutil.copy2(found_local_file, out_file)
-    elif videos:
-        fn = videos[0]["filename"]
-        sub = videos[0].get("subfolder", "")
-        raw_bytes = comfy_client.download_output_file(filename=fn, subfolder=sub)
-        with open(out_file, "wb") as f:
-            f.write(raw_bytes)
-    else:
-        return False, "Wan 2.2 execution completed but output mp4 file could not be located", None
-
-    # Locate generated tail PNG frames
-    out_tail_paths: List[str] = []
-    if save_tail:
-        save_tail_out = outputs.get("save_tail_frames", {})
-        saved_imgs = save_tail_out.get("images", [])
-        if saved_imgs:
-            for idx, img_info in enumerate(saved_imgs):
-                fn = img_info.get("filename")
-                sub = img_info.get("subfolder", "")
-                found = comfy_client.find_comfy_output_file(fn, sub)
-                if found and os.path.exists(found):
-                    target_tail_path = os.path.join(TEMP_DIR, f"{prefix_str}_tail_{idx:02d}.png")
-                    shutil.copy2(found, target_tail_path)
-                    out_tail_paths.append(target_tail_path)
-        if not out_tail_paths:
-            found_files = []
-            for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
-                for f in files:
-                    if f.startswith(f"{prefix_str}_tail") and (f.endswith(".png") or f.endswith(".jpg")):
-                        found_files.append(os.path.join(root, f))
-            found_files.sort()
-            for idx, cand in enumerate(found_files):
-                target_tail_path = os.path.join(TEMP_DIR, f"{prefix_str}_tail_{idx:02d}.png")
-                shutil.copy2(cand, target_tail_path)
-                out_tail_paths.append(target_tail_path)
-        log(f"Successfully captured {len(out_tail_paths)} tail PNG frames for next block prefix: {[os.path.basename(p) for p in out_tail_paths]}")
-
-    return True, out_file, out_tail_paths
-
-
-# ---------------------------------------------------------------------------
-# LTX-2.3 (22B) ComfyUI Graph Builder
-# ---------------------------------------------------------------------------
 
 def generate_ltx_segment(
     image_path: Optional[str] = None,
@@ -576,343 +224,36 @@ def generate_ltx_segment(
     progress_callback: Optional[Any] = None
 ) -> Tuple[bool, str, Optional[str]]:
     """
-    Submits an LTX-2.3 (22B) Video segment to ComfyUI with CFG 3.0 and distilled LoRA 1.1.
-    Supports single image seed or multi-frame forced prefix video conditioning.
+    Submits an LTX-2.3 (22B) Video segment via LtxVideoGenerator.
     Outputs core video directly and optionally exports clean tail video for next block chaining.
     Returns: (success, out_video_path, out_tail_path)
     """
+    generator = create_video_generator("ltx")
     if save_tail_latent is not None:
         save_tail = save_tail_latent
 
-    width = (width // 32) * 32
-    height = (height // 32) * 32
-    out_video_name = out_video_name or f"ltx_{int(time.time()*1000)}.mp4"
-    if seed is None or seed < 0:
-        seed = random.randint(1, 1_000_000_000)
-
-    prefix_str = f"ltx23_{int(time.time()*1000)}"
-
-    wf: Dict[str, Any] = {
-        # 1. UNET Loader (LTX-2.3 22B Dev FP8)
-        "unet_loader": {
-            "inputs": {
-                "unet_name": "ltx-2.3-22b-dev-fp8.safetensors",
-                "weight_dtype": "default"
-            },
-            "class_type": "UNETLoader"
-        },
-        # 2. Distilled LoRA 1.1 Loader
-        "lora_loader": {
-            "inputs": {
-                "model": ["unet_loader", 0],
-                "lora_name": "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors",
-                "strength_model": 1.0
-            },
-            "class_type": "LoraLoaderModelOnly"
-        },
-        # 3. Dual CLIP Loader
-        "clip_loader": {
-            "inputs": {
-                "clip_name1": "ltx-2-3-22b-text_encoder.safetensors",
-                "clip_name2": "ltx-2-3-22b-text_encoder.safetensors",
-                "type": "ltxv"
-            },
-            "class_type": "DualCLIPLoader"
-        },
-        # 4. VAE Loader
-        "vae_loader": {
-            "inputs": {
-                "vae_name": "ltx-2-3-22b-VAE.safetensors"
-            },
-            "class_type": "VAELoader"
-        },
-        # 5. Prompts
-        "positive_cond": {
-            "inputs": {
-                "clip": ["clip_loader", 0],
-                "text": prompt
-            },
-            "class_type": "CLIPTextEncode"
-        },
-        "negative_cond": {
-            "inputs": {
-                "clip": ["clip_loader", 0],
-                "text": negative_prompt
-            },
-            "class_type": "CLIPTextEncode"
-        },
-        # 6. LTXV Conditioning
-        "ltxv_cond": {
-            "inputs": {
-                "positive": ["positive_cond", 0],
-                "negative": ["negative_cond", 0],
-                "frame_rate": float(fps)
-            },
-            "class_type": "LTXVConditioning"
-        },
-        # 7. Empty Video Latent
-        "empty_latent": {
-            "inputs": {
-                "width": width,
-                "height": height,
-                "length": num_frames,
-                "batch_size": 1
-            },
-            "class_type": "EmptyLTXVLatentVideo"
-        }
-    }
-
-    # 8. Start Conditioning (Prefix Video, Prefix Latent, or Image)
-    if prefix_video_path and os.path.exists(prefix_video_path):
-        prefix_fn = comfy_client.upload_file_to_comfy(
-            prefix_video_path,
-            custom_filename=f"ltx_prefix_{int(time.time()*1000)}.mp4"
-        )
-        abs_prefix_in_comfy = os.path.join(comfy_client.COMFY_INPUT_DIR, prefix_fn)
-        log(f"LTX multi-frame prefix from video: {abs_prefix_in_comfy}")
-        wf["prefix_video_loader"] = {
-            "inputs": {
-                "video": os.path.abspath(abs_prefix_in_comfy),
-                "force_rate": float(fps),
-                "custom_width": width,
-                "custom_height": height,
-                "frame_load_cap": 0,
-                "skip_first_frames": 0,
-                "select_every_nth": 1,
-                "format": "LTXV"
-            },
-            "class_type": "VHS_LoadVideoPath"
-        }
-        start_image_node = ["prefix_video_loader", 0]
-    elif prefix_latent_path and os.path.exists(prefix_latent_path):
-        prefix_fn = comfy_client.upload_file_to_comfy(
-            prefix_latent_path,
-            custom_filename=f"ltx_prefix_{int(time.time()*1000)}.latent"
-        )
-        log(f"LTX Latent-Chaining from: {prefix_fn}")
-        wf["prefix_latent_loader"] = {
-            "inputs": {"latent": prefix_fn},
-            "class_type": "LoadLatent"
-        }
-        wf["prefix_latent_decode"] = {
-            "inputs": {
-                "samples": ["prefix_latent_loader", 0],
-                "vae": ["vae_loader", 0]
-            },
-            "class_type": "VAEDecode"
-        }
-        start_image_node = ["prefix_latent_decode", 0]
-    elif image_path and os.path.exists(image_path):
-        img_fn = comfy_client.upload_file_to_comfy(image_path)
-        log(f"LTX start image: {img_fn}")
-        wf["start_image"] = {
-            "inputs": {
-                "image": img_fn,
-                "upload": "image"
-            },
-            "class_type": "LoadImage"
-        }
-        start_image_node = ["start_image", 0]
-    else:
-        start_image_node = None
-
-    if start_image_node:
-        wf["inplace_cond"] = {
-            "inputs": {
-                "image": start_image_node,
-                "vae": ["vae_loader", 0],
-                "latent": ["empty_latent", 0]
-            },
-            "class_type": "LTXVImgToVideoInplace"
-        }
-        active_latent_node = ["inplace_cond", 0]
-    else:
-        active_latent_node = ["empty_latent", 0]
-
-    # 9. CFGGuider + LTXVScheduler + SamplerCustomAdvanced
-    wf.update({
-        "cfg_guider": {
-            "inputs": {
-                "model": ["lora_loader", 0],
-                "positive": ["ltxv_cond", 0],
-                "negative": ["ltxv_cond", 1],
-                "cfg": float(cfg)
-            },
-            "class_type": "CFGGuider"
-        },
-        "scheduler": {
-            "inputs": {
-                "steps": int(steps),
-                "max_shift": 2.05,
-                "base_shift": 0.95,
-                "stretch": True,
-                "terminal": 0.1,
-                "latent": active_latent_node
-            },
-            "class_type": "LTXVScheduler"
-        },
-        "sampler_select": {
-            "inputs": {
-                "sampler_name": "euler"
-            },
-            "class_type": "KSamplerSelect"
-        },
-        "random_noise": {
-            "inputs": {
-                "noise_seed": seed
-            },
-            "class_type": "RandomNoise"
-        },
-        "sampler": {
-            "inputs": {
-                "noise": ["random_noise", 0],
-                "guider": ["cfg_guider", 0],
-                "sampler": ["sampler_select", 0],
-                "sigmas": ["scheduler", 0],
-                "latent_image": active_latent_node
-            },
-            "class_type": "SamplerCustomAdvanced"
-        },
-        "vae_decode": {
-            "inputs": {
-                "samples": ["sampler", 0],
-                "vae": ["vae_loader", 0]
-            },
-            "class_type": "VAEDecode"
-        }
-    })
-
-    if core_frames is not None and core_frames < num_frames:
-        wf["slice_core"] = {
-            "inputs": {
-                "image": ["vae_decode", 0],
-                "batch_index": 0,
-                "length": int(core_frames)
-            },
-            "class_type": "ImageFromBatch"
-        }
-        video_images_input = ["slice_core", 0]
-        log(f"Configured ComfyUI ImageFromBatch to output exactly {core_frames} core frames directly into MP4 (LTX)")
-    else:
-        video_images_input = ["vae_decode", 0]
-
-    wf.update({
-        "create_video": {
-            "inputs": {
-                "images": video_images_input,
-                "fps": fps
-            },
-            "class_type": "CreateVideo"
-        },
-        "save_video": {
-            "inputs": {
-                "video": ["create_video", 0],
-                "filename_prefix": prefix_str,
-                "format": "mp4",
-                "codec": "h264"
-            },
-            "class_type": "SaveVideo"
-        }
-    })
-
-    if save_tail and core_frames is not None and core_frames < num_frames:
-        tail_len = int(num_frames - core_frames)
-        wf["slice_tail"] = {
-            "inputs": {
-                "image": ["vae_decode", 0],
-                "batch_index": int(core_frames),
-                "length": tail_len
-            },
-            "class_type": "ImageFromBatch"
-        }
-        wf["create_tail_video"] = {
-            "inputs": {
-                "images": ["slice_tail", 0],
-                "fps": fps
-            },
-            "class_type": "CreateVideo"
-        }
-        wf["save_tail_video"] = {
-            "inputs": {
-                "video": ["create_tail_video", 0],
-                "filename_prefix": f"{prefix_str}_tail",
-                "format": "mp4",
-                "codec": "h264"
-            },
-            "class_type": "SaveVideo"
-        }
-        log(f"Configured ComfyUI to export tail video ({tail_len} frames, start={core_frames}) directly for multi-frame forced prefix chaining (LTX)")
-
-    log(f"Submitting LTX-2.3 (22B) prompt ({num_frames} frames @ {fps}fps, CFG={cfg}, seed={seed})...")
-    ok, prompt_id = comfy_client.queue_prompt(wf)
-    if not ok:
-        return False, prompt_id, None
-
-    ok, history = comfy_client.wait_for_prompt(prompt_id, timeout=900, progress_callback=progress_callback)
-    if not ok:
-        return False, str(history), None
-
-    outputs = history.get("outputs", {})
-    save_video_out = outputs.get("save_video", {})
-    videos = save_video_out.get("videos", []) or save_video_out.get("gifs", []) or save_video_out.get("images", [])
-
-    found_local_file = None
-    if videos:
-        fn = videos[0]["filename"]
-        sub = videos[0].get("subfolder", "")
-        found_local_file = comfy_client.find_comfy_output_file(fn, sub)
-
-    if not found_local_file:
-        for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
-            for f in files:
-                if f.startswith(prefix_str) and not f.startswith(f"{prefix_str}_tail") and f.endswith(".mp4"):
-                    found_local_file = os.path.join(root, f)
-                    break
-            if found_local_file:
-                break
-
-    out_file = os.path.join(TEMP_DIR, out_video_name)
-    if found_local_file and os.path.exists(found_local_file):
-        shutil.copy2(found_local_file, out_file)
-    elif videos:
-        fn = videos[0]["filename"]
-        sub = videos[0].get("subfolder", "")
-        raw_bytes = comfy_client.download_output_file(filename=fn, subfolder=sub)
-        with open(out_file, "wb") as f:
-            f.write(raw_bytes)
-    else:
-        return False, "LTX-2.3 execution completed but output mp4 file could not be located", None
-
-    # Locate generated tail video (if requested)
-    out_tail_path = None
-    if save_tail and core_frames is not None and core_frames < num_frames:
-        save_tail_out = outputs.get("save_tail_video", {})
-        tail_videos = save_tail_out.get("videos", []) or save_tail_out.get("gifs", []) or save_tail_out.get("images", [])
-        found_tail_file = None
-        if tail_videos:
-            fn = tail_videos[0]["filename"]
-            sub = tail_videos[0].get("subfolder", "")
-            found_tail_file = comfy_client.find_comfy_output_file(fn, sub)
-
-        if not found_tail_file:
-            for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
-                for f in files:
-                    if f.startswith(f"{prefix_str}_tail") and f.endswith(".mp4"):
-                        found_tail_file = os.path.join(root, f)
-                        break
-                if found_tail_file:
-                    break
-
-        if found_tail_file and os.path.exists(found_tail_file):
-            out_tail_path = os.path.join(TEMP_DIR, f"{prefix_str}_tail.mp4")
-            shutil.copy2(found_tail_file, out_tail_path)
-            log(f"Successfully captured tail video for forced prefix (LTX): {out_tail_path}")
-
-    return True, out_file, out_tail_path
+    req = VideoRequest(
+        image_path=image_path,
+        prefix_video_path=prefix_video_path,
+        prefix_latent_path=prefix_latent_path,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        width=width,
+        height=height,
+        num_frames=num_frames,
+        core_frames=core_frames,
+        save_tail=save_tail,
+        fps=fps,
+        seed=seed,
+        cfg=cfg,
+        steps=steps,
+        out_video_name=out_video_name,
+        progress_callback=progress_callback
+    )
+    res = generator.generate(req)
+    return res.success, (res.file_path or res.error or ""), res.tail_video_path
 
 
-
-# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Deep Merge & Prompt Inheritance Helpers
 # ---------------------------------------------------------------------------
@@ -929,6 +270,7 @@ def deep_merge(base: Any, overlay: Any) -> Any:
             merged[k] = v
     return merged
 
+
 def combine_prompts(base: Optional[str], local: Optional[str]) -> str:
     """Combines base prompt with local prompt using newline formatting."""
     b = str(base).strip() if base else ""
@@ -936,6 +278,7 @@ def combine_prompts(base: Optional[str], local: Optional[str]) -> str:
     if b and l:
         return f"{b}\n {l}"
     return b or l
+
 
 def combine_negative_prompts(base: Optional[str], local: Optional[str]) -> str:
     """Combines base and local negative prompts, deduplicating tags if comma-separated."""
@@ -957,7 +300,7 @@ def combine_negative_prompts(base: Optional[str], local: Optional[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Hierarchical Scene Normalizer (Backward Compatibility & Structured Config)
+# Hierarchical Scene Normalizer
 # ---------------------------------------------------------------------------
 
 def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
@@ -966,7 +309,7 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
     [
       {
         "scene_name": str,
-        "engine": "wan" | "ltx",
+        "engine": "wan" | "wan-fast" | "ltx",
         "negative_prompt": str,
         "anchor_image": { "image_path": Optional[str], "prompt": Optional[str], ... },
         "blocks": [ { "name": str, "duration": float, "overlap": float, "motion_prompt": str, "negative_prompt": str, "engine": str, ... } ]
@@ -987,13 +330,13 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
     image_cfg = scenario_dict.get("image", {})
     video_cfg = scenario_dict.get("video", {})
 
-    root_video_engine = video_cfg.get("engine") or scenario_dict.get("engine", "wan")
-    root_video_model = video_cfg.get("model") or scenario_dict.get("model")
-    root_video_negative = video_cfg.get("negative_prompt") or scenario_dict.get("default_negative_prompt") or scenario_dict.get("negative_prompt", "")
+    root_video_engine = video_cfg.get("engine", "wan")
+    root_video_model = video_cfg.get("model")
+    root_video_negative = video_cfg.get("negative_prompt", "")
     root_video_prompt = video_cfg.get("prompt", "")
 
-    root_image_engine = image_cfg.get("engine") or scenario_dict.get("image_engine") or "sdxl"
-    root_image_model = image_cfg.get("model") or scenario_dict.get("image_model")
+    root_image_engine = image_cfg.get("engine", "sdxl")
+    root_image_model = image_cfg.get("model")
     root_image_negative = image_cfg.get("negative_prompt", "")
     root_image_prompt = image_cfg.get("prompt", "")
 
@@ -1016,7 +359,6 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
             if k in image_cfg and k not in anchor:
                 anchor[k] = image_cfg[k]
 
-        # Combine anchor prompts: base prompt + "\n " + local prompt
         anchor["prompt"] = combine_prompts(root_image_prompt, anchor.get("prompt"))
         anchor["negative_prompt"] = combine_negative_prompts(root_image_negative, anchor.get("negative_prompt"))
 
@@ -1024,7 +366,6 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
         norm_blocks = []
         for b_idx, blk in enumerate(raw_blocks):
             b_engine = blk.get("engine") or sc_engine
-            # Combine motion prompts: base video prompt + "\n " + local block prompt
             b_prompt = combine_prompts(root_video_prompt, blk.get("motion_prompt") or blk.get("prompt", ""))
             b_neg = combine_negative_prompts(sc_negative, blk.get("negative_prompt"))
 
@@ -1035,7 +376,9 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
                 "motion_prompt": b_prompt,
                 "negative_prompt": b_neg,
                 "engine": b_engine,
-                "use_next_as_end": blk.get("use_next_as_end", False)
+                "use_next_as_end": blk.get("use_next_as_end", False),
+                "steps": blk.get("steps"),
+                "cfg": blk.get("cfg") or blk.get("cfg_scale")
             })
 
         normalized_scenes.append({
@@ -1055,25 +398,16 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
 
 def execute_scenario_pipeline(
     scenario_input: Any,
-    global_start_image: Optional[str] = None,
     output_name: Optional[str] = None,
-    default_negative_prompt: Optional[str] = None,
-    video_engine: Optional[str] = None,
-    image_engine: Optional[str] = None,
-    image_model: Optional[str] = None,
-    default_engine: Optional[str] = None,
-    default_model: Optional[str] = None,
-    width: int = 832,
-    height: int = 480,
-    fps: int = 16,
     enable_hud: bool = False,
     progress_callback: Optional[Any] = None,
     image: Optional[Dict[str, Any]] = None,
     video: Optional[Dict[str, Any]] = None,
-    request_overrides: Optional[Dict[str, Any]] = None
+    request_overrides: Optional[Dict[str, Any]] = None,
+    **kwargs
 ) -> Dict[str, Any]:
     """
-    Executes a multi-scene video scenario using Latent-Chaining and clean core saving.
+    Executes a multi-scene video scenario using polymorphic generator dispatch and Latent-Chaining.
     Supports top-level 'image' and 'video' structured parameters and Deep Merge.
     Returns structured results including video paths, duration, and poster base64.
     """
@@ -1083,37 +417,13 @@ def execute_scenario_pipeline(
     if video:
         req_ov["video"] = deep_merge(req_ov.get("video", {}), video)
 
-    # Flat arguments support (backward compatibility)
-    if image_engine or image_model:
-        img_ov = req_ov.get("image", {})
-        if image_engine and image_engine != "auto":
-            img_ov["engine"] = image_engine
-        if image_model:
-            img_ov["model"] = image_model
-        req_ov["image"] = img_ov
-
-    if video_engine or default_engine or default_negative_prompt or width != 832 or height != 480 or fps != 16:
-        vid_ov = req_ov.get("video", {})
-        v_eng = video_engine or default_engine
-        if v_eng:
-            vid_ov["engine"] = v_eng
-        if default_negative_prompt:
-            vid_ov["negative_prompt"] = default_negative_prompt
-        if width != 832:
-            vid_ov["width"] = width
-        if height != 480:
-            vid_ov["height"] = height
-        if fps != 16:
-            vid_ov["fps"] = fps
-        req_ov["video"] = vid_ov
-
     scenes = normalize_scenario_structure(scenario_input, request_overrides=req_ov)
 
     effective_vid = req_ov.get("video", {})
     v_engine = effective_vid.get("engine", "wan").lower()
-    width = int(effective_vid.get("width", width))
-    height = int(effective_vid.get("height", height))
-    fps = int(effective_vid.get("fps", fps))
+    width = int(effective_vid.get("width", 832))
+    height = int(effective_vid.get("height", 480))
+    fps = int(effective_vid.get("fps", 16))
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_hash = uuid.uuid4().hex[:6]
@@ -1151,8 +461,9 @@ def execute_scenario_pipeline(
             anchor_meta = sc.get("anchor_image", {})
             blocks = sc.get("blocks", [])
 
-            if s_idx == 0 and global_start_image:
-                anchor_meta["image_path"] = global_start_image
+            start_img_override = kwargs.get("global_start_image") or kwargs.get("start_image") or req_ov.get("image", {}).get("image_path")
+            if s_idx == 0 and start_img_override:
+                anchor_meta["image_path"] = start_img_override
 
             log(f"\n==========================================")
             log(f"[{scene_name}] Preparing Scene Anchor Frame...")
@@ -1185,7 +496,8 @@ def execute_scenario_pipeline(
 
             prefix_latent_path = None
             prefix_video_path = None
-            next_tail_paths = None
+            next_tail_latent = None
+            next_tail_image = None
 
             for b_idx, blk in enumerate(blocks):
                 if is_interrupted():
@@ -1195,6 +507,7 @@ def execute_scenario_pipeline(
                 b_name = blk.get("name", f"Block {block_idx}")
                 dur = float(blk.get("duration", 5.0))
                 overlap = float(blk.get("overlap", 1.5 if b_idx < len(blocks) - 1 else 0.0))
+
                 # Enforce non-colliding overlap constraint:
                 # prefix_length + tail_length < clip_duration
                 prefix_length = float(blocks[b_idx - 1].get("overlap", 1.5)) if b_idx > 0 else 0.0
@@ -1204,59 +517,61 @@ def execute_scenario_pipeline(
                         f"[{scene_name} : {b_name}] Overlap constraint violated: prefix_length ({prefix_length}s) + tail_length ({tail_length}s) = "
                         f"{prefix_length + tail_length:.2f}s >= clip_duration ({dur}s). Condition 'prefix_length + tail_length < clip_duration' is required so transition zones do not collide."
                     )
+
                 motion_prompt = blk.get("motion_prompt") or blk.get("prompt", "")
-                b_neg = blk.get("negative_prompt") or default_negative_prompt or ""
-                b_engine = (blk.get("engine") or v_engine).lower()
+                b_neg = blk.get("negative_prompt") or ""
+                b_engine_raw = (blk.get("engine") or v_engine).lower()
+
+                # Instantiate the generator strategy
+                generator = create_video_generator(b_engine_raw, settings=effective_vid)
+                is_ltx = isinstance(generator, LtxVideoGenerator) or any(x in b_engine_raw for x in ["ltx", "22b"])
 
                 is_last = (b_idx == len(blocks) - 1)
-                stride = 8 if b_engine == "ltx" else 4
+                stride = 8 if is_ltx else 4
 
-                # Dynamic time quantization strictly matching model VAE stride:
-                # 1. Total block frames quantized to stride * k_total + 1
-                raw_frames = int(round(dur * fps))
-                k_total = max(1, round((raw_frames - 1) / stride))
-                num_frames = stride * k_total + 1
-
-                # 2. Overlap quantization & core frames:
-                if not is_last and overlap > 0:
-                    k_overlap = max(1, round(round(overlap * fps) / stride))
-                    overlap_frames = k_overlap * stride
-                    # Core frames for video: exactly (num_frames - 1) - overlap_frames
-                    # so block core ends at frame N-1, and next block starts at frame N (no duplicate boundary frame!)
-                    core_frames = max(stride, (num_frames - 1) - overlap_frames)
-                    tail_frames = num_frames - core_frames
-                    save_tail = True
-                else:
-                    core_frames = num_frames
-                    tail_frames = 0
-                    save_tail = False
+                # Dynamic time quantization matching model VAE stride:
+                block_prefix = f"{run_prefix}_s{scene_idx:03d}_b{block_idx:03d}"
+                out_core_name = f"{block_prefix}_core.mp4"
 
                 _PIPELINE_STATUS["block_index"] = block_idx
                 _PIPELINE_STATUS["block_name"] = b_name
-                _PIPELINE_STATUS["phase"] = f"{b_engine}_diffusion ({scene_name} - {b_name})"
+                _PIPELINE_STATUS["phase"] = f"{generator.name}_diffusion ({scene_name} - {b_name})"
 
                 notify_progress(
-                    f"Scene {scene_idx}/{total_scenes} [{scene_name}] - {b_name} ({dur}s): Diffusing {b_engine.upper()}...",
+                    f"Scene {scene_idx}/{total_scenes} [{scene_name}] - {b_name} ({dur}s): Diffusing {generator.name.upper()}...",
                     progress=processed_blocks,
                     total=total_blocks,
                     cb=progress_callback
                 )
 
-                log(f"\n[{scene_name} : {b_name}] Engine: {b_engine.upper()}, Duration: {dur}s, Overlap: {overlap}s")
-                log(f"Quantized frames: total={num_frames}, core={core_frames}, tail_frames={tail_frames}")
-                log(f"Motion prompt: '{motion_prompt[:60]}...'")
+                if is_ltx:
+                    raw_frames = int(round(dur * fps))
+                    k_total = max(1, round((raw_frames - 1) / stride))
+                    num_frames = stride * k_total + 1
 
-                block_prefix = f"{run_prefix}_s{scene_idx:03d}_b{block_idx:03d}"
-                block_core = os.path.join(TEMP_DIR, f"{block_prefix}_core.mp4")
+                    if not is_last and overlap > 0:
+                        k_overlap = max(1, round(round(overlap * fps) / stride))
+                        overlap_frames = k_overlap * stride
+                        core_frames = max(stride, (num_frames - 1) - overlap_frames)
+                        tail_frames = num_frames - core_frames
+                        save_tail = True
+                    else:
+                        core_frames = num_frames
+                        tail_frames = 0
+                        save_tail = False
 
-                if b_engine == "ltx":
                     if prefix_video_path and os.path.exists(prefix_video_path):
                         start_img = None
                         pref_vid = prefix_video_path
                     else:
                         start_img = anchor_img_path
                         pref_vid = None
-                    ok, seg_core_path, seg_tail_path = generate_ltx_segment(
+
+                    log(f"\n[{scene_name} : {b_name}] Engine: {generator.name.upper()}, Duration: {dur}s, Overlap: {overlap}s")
+                    log(f"LTX quantized frames: total={num_frames}, core={core_frames}, tail_frames={tail_frames}")
+                    log(f"Motion prompt: '{motion_prompt[:60]}...'")
+
+                    req = VideoRequest(
                         image_path=start_img,
                         prefix_video_path=pref_vid,
                         prompt=motion_prompt,
@@ -1267,60 +582,70 @@ def execute_scenario_pipeline(
                         core_frames=core_frames,
                         save_tail=save_tail,
                         fps=fps,
-                        out_video_name=f"{block_prefix}_core.mp4",
+                        out_video_name=out_core_name,
                         progress_callback=progress_callback
                     )
-                    if save_tail and seg_tail_path and os.path.exists(seg_tail_path):
-                        prefix_video_path = seg_tail_path
+                    res = generator.generate(req)
+                    if save_tail and res.tail_video_path and os.path.exists(res.tail_video_path):
+                        prefix_video_path = res.tail_video_path
                     else:
                         prefix_video_path = None
                     block_core_frames = core_frames
                 else:
-                    if b_idx == 0:
-                        wan_num_frames = 57
-                        wan_core_frames = 56
-                        wan_pref_frames = 0
-                        wan_start_img = anchor_img_path
-                        wan_save_tail = (len(blocks) > 1)
-                    else:
-                        wan_num_frames = 61
-                        wan_core_frames = 56
-                        wan_pref_frames = 5
-                        wan_start_img = next_tail_paths or anchor_img_path
-                        wan_save_tail = (not is_last)
+                    k_dur = max(1, round(dur * fps / 4))
+                    base_frames = 4 * k_dur + 1
 
-                    res = generate_wan_segment(
+                    if b_idx == 0:
+                        wan_start_img = anchor_img_path
+                        wan_pref_frames = 0
+                        wan_num_frames = base_frames
+                        wan_core_frames = base_frames
+                    else:
+                        wan_start_img = next_tail_image
+                        wan_pref_frames = 1
+                        wan_num_frames = base_frames
+                        wan_core_frames = base_frames - 1
+
+                    blk_steps = blk.get("steps") or effective_vid.get("steps")
+                    blk_cfg = blk.get("cfg") or blk.get("cfg_scale") or effective_vid.get("cfg")
+
+                    log(f"\n[{scene_name} : {b_name}] Engine: {generator.name.upper()}, Duration: {dur}s, Frames: {wan_num_frames} (core={wan_core_frames})")
+                    log(f"Start anchor image: {os.path.basename(wan_start_img) if wan_start_img else 'None'}")
+                    log(f"Motion prompt: '{motion_prompt[:60]}...'")
+
+                    req = VideoRequest(
                         image_path=wan_start_img,
                         prefix_frames=wan_pref_frames,
+                        core_frames=wan_core_frames,
                         prompt=motion_prompt,
                         negative_prompt=b_neg,
                         width=width,
                         height=height,
                         num_frames=wan_num_frames,
-                        core_frames=wan_core_frames,
-                        save_tail=wan_save_tail,
                         fps=fps,
-                        out_video_name=f"{block_prefix}_core.mp4",
+                        steps=blk_steps,
+                        cfg=blk_cfg,
+                        out_video_name=out_core_name,
                         progress_callback=progress_callback
                     )
-                    ok = res[0]
-                    seg_core_path = res[1]
-                    seg_tail_paths = res[2] if len(res) > 2 else []
-                    if seg_tail_paths:
-                        next_tail_paths = seg_tail_paths
-                        log(f"Chained {len(next_tail_paths)} tail PNG frames for next block prefix: {[os.path.basename(p) for p in next_tail_paths]}")
+                    res = generator.generate(req)
+                    if not is_last and res.success and res.file_path:
+                        tail_img_name = f"{block_prefix}_last.png"
+                        tail_img_path = os.path.join(TEMP_DIR, tail_img_name)
+                        ffmpeg_engine.extract_last_frame(res.file_path, tail_img_path)
+                        next_tail_image = tail_img_path
+                        log(f"Extracted pristine tail frame for next block anchor: {os.path.basename(next_tail_image)}")
                     block_core_frames = wan_core_frames
 
-                if not ok:
-                    raise RuntimeError(f"Block generation failed [{scene_name} : {b_name}]: {seg_core_path}")
+                if not res.success or not res.file_path:
+                    raise RuntimeError(f"Block generation failed [{scene_name} : {b_name}]: {res.error}")
 
                 processed_blocks += 1
                 _PIPELINE_STATUS["processed_blocks"] = processed_blocks
 
-                # Direct core output from ComfyUI: zero FFmpeg post-cutting!
-                all_block_cores.append(block_core)
+                all_block_cores.append(res.file_path)
                 actual_core_dur = block_core_frames / fps
-                generated_block_metadata.append((block_core, actual_core_dur, overlap if not is_last else 0.0))
+                generated_block_metadata.append((res.file_path, actual_core_dur, overlap if not is_last else 0.0))
 
         # Clean up any leftover temporary tail videos
         if prefix_video_path and os.path.exists(prefix_video_path):
@@ -1364,7 +689,6 @@ def execute_scenario_pipeline(
                 except Exception:
                     pass
         else:
-            # Fallback only when scenario has no anchor image
             poster_path, poster_b64 = ffmpeg_engine.extract_poster(final_path, poster_path)
 
         # Optional HUD generation
@@ -1392,4 +716,3 @@ def execute_scenario_pipeline(
     finally:
         _PIPELINE_STATUS["is_running"] = False
         _PIPELINE_STATUS["phase"] = "idle"
-

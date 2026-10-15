@@ -138,11 +138,7 @@ def tool_video_run_scenario(args: dict) -> dict:
     reload_core_modules()
     scenario_data = args.get("scenario_data") or args.get("scenes") or args.get("blocks")
     scenario_path = args.get("scenario_path")
-    start_image = args.get("start_image")
     output_name = args.get("output_name")
-    width = int(args.get("width", 832))
-    height = int(args.get("height", 480))
-    fps = int(args.get("fps", 16))
     enable_hud = bool(args.get("enable_hud", False))
 
     if not scenario_data and scenario_path:
@@ -156,22 +152,7 @@ def tool_video_run_scenario(args: dict) -> dict:
             return {"error": f"Failed to parse scenario file '{p}': {e}"}
 
     if not scenario_data:
-        # Check for simple direct prompt invocation without workflow files
-        prompt = args.get("prompt")
-        motion_prompt = args.get("motion_prompt")
-        if prompt or motion_prompt:
-            scenario_data = [{
-                "scene_name": "Scene 1",
-                "anchor_image": {"prompt": prompt} if prompt else {},
-                "blocks": [{
-                    "name": "Block 1",
-                    "duration": float(args.get("duration", 5.0)),
-                    "motion_prompt": motion_prompt or prompt or ""
-                }]
-            }]
-
-    if not scenario_data:
-        return {"error": "Scenario data is required (pass 'scenes', 'scenario_data', 'blocks', or 'scenario_path')."}
+        return {"error": "Scenario data is required (pass 'scenario_path' or 'scenario_data')."}
 
     if isinstance(scenario_data, str):
         try:
@@ -179,27 +160,15 @@ def tool_video_run_scenario(args: dict) -> dict:
         except Exception as e:
             return {"error": f"Failed to parse 'scenario_data' JSON: {e}"}
 
-    image_cfg = args.get("image")
-    video_cfg = args.get("video")
-    video_engine = args.get("video_engine") or args.get("engine")
-    image_engine = args.get("image_engine")
-    image_model = args.get("image_model") or args.get("model")
-    negative_prompt = args.get("negative_prompt")
+    image_cfg = args.get("image") or {}
+    video_cfg = args.get("video") or {}
 
-    log(f"Starting scenario execution: {output_name or 'unnamed'} (video_engine={video_engine or 'default'}, image_engine={image_engine or 'auto'}, image_model={image_model or 'default'}, {width}x{height} @ {fps}fps, HUD={enable_hud})")
+    log(f"Starting scenario execution: {output_name or 'unnamed'} (image={image_cfg}, video={video_cfg}, HUD={enable_hud})")
 
     try:
         res = video_pipeline.execute_scenario_pipeline(
             scenario_input=scenario_data,
-            global_start_image=start_image,
             output_name=output_name,
-            default_negative_prompt=negative_prompt,
-            video_engine=video_engine,
-            image_engine=image_engine,
-            image_model=image_model,
-            width=width,
-            height=height,
-            fps=fps,
             enable_hud=enable_hud,
             image=image_cfg,
             video=video_cfg
@@ -215,6 +184,9 @@ def tool_video_run_scenario(args: dict) -> dict:
     poster_path = res.get("poster_path")
     poster_b64 = res.get("poster_base64")
     scenes_count = res.get("scenes_count", 1)
+    width = res.get("width", 832)
+    height = res.get("height", 480)
+    fps = res.get("fps", 16)
 
     video_filename = os.path.basename(final_path)
     openwebui_url = f"http://host.docker.internal:{config.VIDEO_MCP_PORT}/video/{video_filename}"
@@ -545,18 +517,10 @@ TOOLS_SPEC = [
             "type": "object",
             "properties": {
                 "scenario_path": {"type": "string", "description": "Path to scenario JSON file (in workflows/ or absolute)"},
-                "scenario_data": {"description": "Hierarchical scenario object or array"},
-                "image": {"type": "object", "description": "Static anchor image configuration: engine (sdxl, flux1, flux2), model, prompt, negative_prompt, cfg, steps, sampler"},
-                "video": {"type": "object", "description": "Static video pipeline configuration: engine (wan, ltx), model, prompt, negative_prompt, width, height, fps"},
-                "video_engine": {"type": "string", "enum": ["wan", "ltx"], "description": "Video generation engine: 'wan' (Wan 2.2 14B, default) or 'ltx' (LTX-2.3 22B)"},
-                "image_engine": {"type": "string", "enum": ["sdxl", "flux1", "flux2", "comfy_flux", "a1111"], "description": "Anchor keyframe image engine: 'sdxl' (A1111 SDXL/Pony), 'flux1' (ComfyUI FLUX 1 Dev), 'flux2' (ComfyUI FLUX 2 Klein)"},
-                "image_model": {"type": "string", "description": "Optional specific checkpoint name for image_engine (e.g. FLUX or A1111 SDXL checkpoint)"},
-                "negative_prompt": {"type": "string", "description": "Default negative prompt across all scenes and blocks"},
-                "start_image": {"type": "string", "description": "Optional global starting image path for Scene 1"},
+                "scenario_data": {"description": "Hierarchical scenario object or array of scenes"},
+                "image": {"type": "object", "description": "Global anchor image configuration: engine (sdxl, flux1, flux2), model, prompt, negative_prompt, cfg, steps, sampler, width, height"},
+                "video": {"type": "object", "description": "Global video configuration: engine ('wan-fast', 'wan', 'ltx'), model, prompt, negative_prompt, width, height, fps, steps, cfg"},
                 "output_name": {"type": "string", "description": "Custom final output video filename (e.g. 'movie.mp4')"},
-                "width": {"type": "integer", "description": "Width in pixels (default: 832)"},
-                "height": {"type": "integer", "description": "Height in pixels (default: 480)"},
-                "fps": {"type": "integer", "description": "Frame rate (default: 16 for Wan, 24 for LTX)"},
                 "enable_hud": {"type": "boolean", "description": "Generate debug video with countdown timeline overlay"}
             }
         }

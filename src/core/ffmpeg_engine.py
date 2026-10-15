@@ -52,7 +52,20 @@ def extract_tail_clip(video_path: str, tail_duration: float, out_clip_path: str)
         out_clip_path
     ]
     subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-    return out_clip_path
+def extract_last_frame(video_path: str, out_image_path: str) -> str:
+    """Extracts final frame of video as a pristine image file."""
+    cmd = [
+        FFMPEG_BIN,
+        "-y",
+        "-sseof", "-0.1",
+        "-i", video_path,
+        "-update", "1",
+        "-frames:v", "1",
+        "-q:v", "2",
+        out_image_path
+    ]
+    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    return out_image_path
 
 def cut_duration(video_path: str, duration: float, out_path: str, stream_copy: bool = True) -> str:
     if stream_copy:
