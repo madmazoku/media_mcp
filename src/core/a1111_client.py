@@ -35,7 +35,7 @@ def get_models() -> List[Dict[str, Any]]:
 
 def get_current_model() -> Optional[str]:
     try:
-        opt = make_request("/sdapi/v1/options")
+        opt = make_request("/sdapi/v1/options", timeout=5)
         return opt.get("sd_model_checkpoint")
     except Exception:
         return None
@@ -52,6 +52,18 @@ def set_model(model_title: str) -> bool:
 
 def get_loras() -> List[Dict[str, Any]]:
     return make_request("/sdapi/v1/loras")
+
+
+def get_samplers() -> List[Dict[str, Any]]:
+    return make_request("/sdapi/v1/samplers")
+
+
+def is_available() -> bool:
+    try:
+        make_request("/sdapi/v1/progress", timeout=2)
+        return True
+    except Exception:
+        return False
 
 
 def txt2img(payload: Dict[str, Any]) -> Dict[str, Any]:

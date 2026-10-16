@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mcp_image_generate.json",
+  "title": "image_generate",
+  "description": "Generate an image using SDXL/Pony (A1111) or FLUX.1/FLUX.2 (ComfyUI).",
+  "$ref": "image_spec.json"
+}

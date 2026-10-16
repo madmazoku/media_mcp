@@ -1,7 +1,7 @@
 ---
 name: image-generation
 description: >-
-  Руководство и алгоритм генерации изображений через media_mcp (Automatic1111 Stable Diffusion WebUI и ComfyUI FLUX).
+  Руководство и алгоритм генерации изображений через единый media_mcp (Automatic1111 Stable Diffusion WebUI и ComfyUI FLUX).
   Используется при генерации и редактировании изображений, поиске LoRA и составлении промптов.
 ---
 
@@ -16,12 +16,23 @@ description: >-
 ---
 
 ## Доступные инструменты (Tools):
-- `comfy_flux_txt2img` (`schemas/mcp_comfy_flux_txt2img.json`): генерация через FLUX.1 Dev или FLUX.2 Klein в ComfyUI (`prompt`, `model_type`, `width`, `height`, `steps`, `guidance`, `seed`, `lora_name`, `lora_strength`).
-- `sd_txt2img` (`schemas/mcp_sd_txt2img.json`): генерация через A1111 (`prompt`, `negative_prompt`, `model_name`, `steps`, `cfg_scale`, `width`, `height`, `sampler_name`, `seed`).
+- **`image_generate`** (`schemas/mcp_image_generate.json`): единый инструмент генерации изображений:
+  - `prompt` *(string, обязателен)*: текстовое описание сцены.
+  - `engine` *(`"sdxl"` | `"flux1"` | `"flux2"`, по умолчанию `"sdxl"`)*.
+  - `model` *(string, опционально)*: имя файла модели/чекпоинта.
+  - `width`, `height` *(int, кратны 16)*.
+  - `steps` *(int)*, `seed` *(int)*.
+  - `cfg` *(number, для SDXL; для Pony автоматически подставляется 5.5)*.
+  - `guidance` *(number, для FLUX.1/FLUX.2)*.
+  - `sampler` *(string, опционально)*.
+  - `loras` *(array of `{"name": str, "strength": float}`, опционально)*: поддержка цепочки нескольких LoRA.
+  - `negative_prompt` *(string, SDXL only)*.
+  - **Автоматическое сохранение спецификации:** каждый запуск сохраняет итоговый разрешённый JSON-спецификатор в `workflows/{run_prefix}-spec.json` и возвращает `run_prefix` и `spec_path` в ответе.
+  - **Автономный CLI запуск:** `cmd\cli.cmd [--config config.json] image_generate [request_file | -]`.
   - **Автоматическое повышение разрешения для SDXL/Pony:** при запросе невысокого разрешения (< 0.75 МП, например, 832x480) движок автоматически рендерит в полноценном высоком разрешении (1280x720), предотвращая деградацию внимания SDXL и деформацию анатомии.
-  - **Pony CFG Scale:** для моделей Pony рекомендуется и автоматически подставляется CFG 5.5 для исключения пережарки.
-- `sd_get_models` / `sd_set_model`: получение списка и смена модели в A1111.
-- `sd_get_loras`: получение списка LoRA.
+- **`media_get_models`** (`schemas/mcp_media_get_models.json`): инспекция моделей чекпоинтов с фильтром `type="image"`.
+- **`media_get_samplers`** (`schemas/mcp_media_get_samplers.json`): список совместимых сэмплеров для конкретного `engine` и `model`.
+- **`media_get_loras`** (`schemas/mcp_media_get_loras.json`): список совместимых LoRA с извлечёнными триггерными словами. Поддерживает опциональный `pattern` (регистронезависимый Python regex для фильтрации по имени LoRA и её триггерам, например `'hermione|emma'`, `'cyber.*'`, `'bikini'`).
 
 ---
 
@@ -30,9 +41,9 @@ description: >-
 - Клиент автоматически кэширует его в локальный offload (`[Resource offloaded to file:///.../media_0.png]`).
 - Всегда выводить полученный путь в чат через markdown:
   ```markdown
-  ![Описание](file:///C:/Users/.../media_0.png)
+  ![Описание](file:///path/to/media_0.png)
   ```
-- Ниже давать ссылку на оригинальный файл в папке вывода `media_mcp/images/` (имя файла формируется строго по дефисному шаблону: `{timestamp}-{random}-{engine}.png`).
+- Ниже давать ссылку на оригинальный файл в папке вывода `media_mcp/images/` (имя файла формируется строго по каноническому шаблону: `{run_prefix}-final.png`, а спек: `{run_prefix}-spec.json`).
 
 ## Запрет на самопроверку
 - **Категорически запрещено** вызывать `view_file` или анализировать сгенерированные картинки без явного запроса пользователя. Сразу отдавать результат генерации в ответ.

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mcp_video_generate.json",
+  "title": "video_generate",
+  "description": "Execute video generation from scenario_path and/or inline scenario scenes.",
+  "type": "object",
+  "additionalProperties": false,
+  "anyOf": [
+    { "required": ["scenario_path"] },
+    { "required": ["scenes"] }
+  ],
+  "properties": {
+    "scenario_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to a base scenario file on disk to execute or overlay onto"
+    },
+    "enable_hud": {
+      "type": "boolean",
+      "default": false,
+      "description": "Generate dynamic diagnostic countdown HUD overlay"
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable scenario title"
+    },
+    "image": {
+      "$ref": "scenario.json#/$defs/image_root_config"
+    },
+    "video": {
+      "$ref": "scenario.json#/$defs/video_root_config"
+    },
+    "scenes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "scenario.json#/$defs/scene"
+      },
+      "description": "Inline montage scenes"
+    }
+  }
+}

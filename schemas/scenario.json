@@ -2,21 +2,26 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "scenario.json",
   "title": "Media MCP Video Scenario",
-  "description": "Strict hierarchical Scene -> Blocks video scenario schema with engine-specific validation.",
+  "description": "Strict hierarchical Scene -> Blocks video scenario schema with unified naming conventions.",
   "type": "object",
   "additionalProperties": false,
   "required": ["scenes"],
   "properties": {
+    "scenario_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional path to a base scenario file on disk to inherit and overlay from"
+    },
     "name": {
       "type": "string",
       "minLength": 1,
-      "description": "Optional human-readable scenario title (used for logging only; output files always follow the server hyphen template)"
+      "description": "Human-readable scenario title"
     },
     "image": {
-      "$ref": "#/$defs/image_config"
+      "$ref": "#/$defs/image_root_config"
     },
     "video": {
-      "$ref": "#/$defs/video_config"
+      "$ref": "#/$defs/video_root_config"
     },
     "scenes": {
       "type": "array",
@@ -28,7 +33,7 @@
     }
   },
   "$defs": {
-    "image_config": {
+    "image_root_config": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -41,12 +46,7 @@
         "model": {
           "type": "string",
           "minLength": 1,
-          "description": "Checkpoint model name"
-        },
-        "checkpoint": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Explicit checkpoint filename"
+          "description": "Model filename or identifier"
         },
         "prompt": {
           "type": "string",
@@ -89,47 +89,86 @@
           "type": "integer",
           "minimum": -1
         },
-        "lora": {
+        "loras": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/lora_item"
+          }
+        }
+      }
+    },
+    "video_root_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "engine": {
           "type": "string",
-          "minLength": 1
+          "enum": ["wan-fast", "wan-full", "ltx"],
+          "default": "wan-fast",
+          "description": "Video generation engine"
         },
-        "lora_strength": {
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Video checkpoint model name"
+        },
+        "prompt": {
+          "type": "string",
+          "description": "Base motion prompt inherited by all blocks"
+        },
+        "negative_prompt": {
+          "type": "string",
+          "description": "Base negative prompt inherited by all blocks"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 64,
+          "multipleOf": 16,
+          "default": 832
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 64,
+          "multipleOf": 16,
+          "default": 480
+        },
+        "fps": {
+          "type": "integer",
+          "enum": [16, 24, 25, 30, 60],
+          "default": 16
+        },
+        "max_duration": {
+          "type": "number",
+          "minimum": 1.0,
+          "maximum": 60.0,
+          "default": 15.0
+        },
+        "loras": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/lora_item"
+          }
+        }
+      }
+    },
+    "lora_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "LoRA model name or filename"
+        },
+        "strength": {
           "type": "number",
           "minimum": 0.0,
-          "maximum": 2.0
+          "maximum": 2.0,
+          "default": 0.8,
+          "description": "LoRA weight strength"
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "engine": { "enum": ["flux1", "flux2"] }
-            },
-            "required": ["engine"]
-          },
-          "then": {
-            "not": {
-              "anyOf": [
-                { "required": ["negative_prompt"] },
-                { "required": ["sampler"] }
-              ]
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "engine": { "const": "flux2" }
-            },
-            "required": ["engine"]
-          },
-          "then": {
-            "not": {
-              "required": ["lora"]
-            }
-          }
-        }
-      ]
+      }
     },
     "anchor_image": {
       "type": "object",
@@ -144,6 +183,11 @@
           "minLength": 1,
           "description": "Path to an existing anchor keyframe image on disk"
         },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Visual prompt text describing the scene appearance"
+        },
         "engine": {
           "type": "string",
           "enum": ["sdxl", "flux1", "flux2"],
@@ -152,17 +196,7 @@
         "model": {
           "type": "string",
           "minLength": 1,
-          "description": "Checkpoint model name"
-        },
-        "checkpoint": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Explicit checkpoint filename"
-        },
-        "prompt": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Visual appearance prompt for generating the scene anchor frame"
+          "description": "Model filename"
         },
         "negative_prompt": {
           "type": "string",
@@ -201,213 +235,10 @@
           "type": "integer",
           "minimum": -1
         },
-        "lora": {
-          "type": "string",
-          "minLength": 1
-        },
-        "lora_strength": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 2.0
-        }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "engine": { "enum": ["flux1", "flux2"] }
-            },
-            "required": ["engine"]
-          },
-          "then": {
-            "not": {
-              "anyOf": [
-                { "required": ["negative_prompt"] },
-                { "required": ["sampler"] }
-              ]
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "engine": { "const": "flux2" }
-            },
-            "required": ["engine"]
-          },
-          "then": {
-            "not": {
-              "required": ["lora"]
-            }
-          }
-        }
-      ]
-    },
-    "video_config": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "engine": {
-          "type": "string",
-          "enum": ["wan-fast", "wan", "ltx"],
-          "default": "wan-fast",
-          "description": "Video diffusion engine ('wan-fast' default, 'wan' full 20-step, 'ltx' LTX-2.3 22B)"
-        },
-        "model": {
-          "type": "string",
-          "minLength": 1
-        },
-        "checkpoint": {
-          "type": "string",
-          "minLength": 1
-        },
-        "checkpoint_low": {
-          "type": "string",
-          "minLength": 1
-        },
-        "prompt": {
-          "type": "string",
-          "description": "Global base motion/style prompt inherited by all blocks"
-        },
-        "negative_prompt": {
-          "type": "string",
-          "description": "Global negative prompt inherited by scenes and blocks"
-        },
-        "width": {
-          "type": "integer",
-          "minimum": 64,
-          "multipleOf": 16,
-          "default": 832
-        },
-        "height": {
-          "type": "integer",
-          "minimum": 64,
-          "multipleOf": 16,
-          "default": 480
-        },
-        "fps": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 120,
-          "default": 16
-        },
-        "max_duration": {
-          "type": "number",
-          "exclusiveMinimum": 0,
-          "default": 10.0,
-          "description": "Maximum single-pass generation window (prefix_duration + clip_duration < max_duration)"
-        },
-        "steps": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 100
-        },
-        "cfg": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 30.0
-        },
-        "seed": {
-          "type": "integer",
-          "minimum": -1
-        },
-        "lora_name": {
-          "type": "string",
-          "minLength": 1
-        },
-        "lora_strength": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 2.0
-        },
-        "weight_dtype": {
-          "type": "string",
-          "enum": ["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"]
-        },
-        "ramp_latents": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 10
-        },
-        "min_cfg": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 10.0
-        }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "engine": { "const": "ltx" }
-            },
-            "required": ["engine"]
-          },
-          "then": {
-            "properties": {
-              "width": { "multipleOf": 32 },
-              "height": { "multipleOf": 32 }
-            },
-            "not": {
-              "anyOf": [
-                { "required": ["checkpoint_low"] },
-                { "required": ["ramp_latents"] },
-                { "required": ["min_cfg"] }
-              ]
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "engine": { "enum": ["wan-fast", "wan"] }
-            },
-            "required": ["engine"]
-          },
-          "then": {
-            "not": {
-              "anyOf": [
-                { "required": ["lora_name"] },
-                { "required": ["lora_strength"] },
-                { "required": ["weight_dtype"] }
-              ]
-            }
-          }
-        }
-      ]
-    },
-    "scene": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["anchor_image", "blocks"],
-      "properties": {
-        "scene_name": {
-          "type": "string",
-          "minLength": 1
-        },
-        "engine": {
-          "type": "string",
-          "enum": ["wan-fast", "wan", "ltx"]
-        },
-        "model": {
-          "type": "string",
-          "minLength": 1
-        },
-        "checkpoint": {
-          "type": "string",
-          "minLength": 1
-        },
-        "negative_prompt": {
-          "type": "string"
-        },
-        "anchor_image": {
-          "$ref": "#/$defs/anchor_image"
-        },
-        "blocks": {
+        "loras": {
           "type": "array",
-          "minItems": 1,
           "items": {
-            "$ref": "#/$defs/block"
+            "$ref": "#/$defs/lora_item"
           }
         }
       }
@@ -419,39 +250,41 @@
       "properties": {
         "name": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "Descriptive title for this video block"
         },
         "duration": {
           "type": "number",
-          "exclusiveMinimum": 0,
+          "minimum": 0.5,
+          "maximum": 30.0,
           "default": 5.0,
-          "description": "Clip duration in seconds (must satisfy prefix_duration + clip_duration < max_duration)"
+          "description": "Duration in seconds for this block"
         },
         "overlap": {
           "type": "number",
           "minimum": 0.0,
+          "maximum": 5.0,
           "default": 0.0,
-          "description": "Tail overlap duration in seconds passed as prefix to the next block (must satisfy overlap < duration)"
+          "description": "Tail latent overlap duration into subsequent block"
         },
         "motion_prompt": {
           "type": "string",
           "minLength": 1,
-          "description": "Action and camera trajectory prompt for this block"
+          "description": "Action and camera dynamics prompt"
         },
         "negative_prompt": {
-          "type": "string"
+          "type": "string",
+          "description": "Block-specific negative prompt"
         },
         "engine": {
           "type": "string",
-          "enum": ["wan-fast", "wan", "ltx"]
+          "enum": ["wan-fast", "wan-full", "ltx"],
+          "description": "Block-level video generator engine override"
         },
         "model": {
           "type": "string",
-          "minLength": 1
-        },
-        "checkpoint": {
-          "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "Block-level model override"
         },
         "steps": {
           "type": "integer",
@@ -467,60 +300,64 @@
           "type": "integer",
           "minimum": -1
         },
-        "lora_strength": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 2.0
+        "loras": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/lora_item"
+          }
         },
         "weight_dtype": {
           "type": "string",
-          "enum": ["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"]
+          "enum": ["default", "fp8_e4m3fn", "fp8_e5m2"]
         },
         "ramp_latents": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 10
+          "maximum": 20
         },
         "min_cfg": {
           "type": "number",
           "minimum": 0.0,
           "maximum": 10.0
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "engine": { "const": "ltx" }
-            },
-            "required": ["engine"]
-          },
-          "then": {
-            "not": {
-              "anyOf": [
-                { "required": ["ramp_latents"] },
-                { "required": ["min_cfg"] }
-              ]
-            }
-          }
+      }
+    },
+    "scene": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["anchor_image", "blocks"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Descriptive scene title"
         },
-        {
-          "if": {
-            "properties": {
-              "engine": { "enum": ["wan-fast", "wan"] }
-            },
-            "required": ["engine"]
+        "engine": {
+          "type": "string",
+          "enum": ["wan-fast", "wan-full", "ltx"],
+          "description": "Scene-level default video engine"
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Scene-level default model"
+        },
+        "negative_prompt": {
+          "type": "string",
+          "description": "Scene-level negative prompt"
+        },
+        "anchor_image": {
+          "$ref": "#/$defs/anchor_image"
+        },
+        "blocks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/block"
           },
-          "then": {
-            "not": {
-              "anyOf": [
-                { "required": ["lora_strength"] },
-                { "required": ["weight_dtype"] }
-              ]
-            }
-          }
+          "description": "Ordered sequence of motion blocks inside this scene"
         }
-      ]
+      }
     }
   }
 }

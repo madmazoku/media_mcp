@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mcp_media_get_models.json",
+  "title": "media_get_models",
+  "description": "Inspect available checkpoint and UNET models across engines.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": ["image", "video"],
+      "description": "Optional filter by media kind"
+    },
+    "engine": {
+      "type": "string",
+      "description": "Optional filter by engine (e.g. 'sdxl', 'flux1', 'wan-fast')"
+    }
+  }
+}
