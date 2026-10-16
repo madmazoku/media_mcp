@@ -72,6 +72,24 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
     elif "lora" in params and params["lora"]:
         loras = [{"name": str(params["lora"]), "strength": float(params.get("lora_strength", 0.8))}]
 
+    # img2img source path and denoise resolution
+    source_img_path = None
+    denoise_val = float(params.get("denoise", 0.65))
+    if params.get("image_path"):
+        raw_src = params["image_path"]
+        p = Path(raw_src)
+        if not p.is_file():
+            found = False
+            for parent_cand in [Path.cwd(), Path(config.OUTPUT_IMG_DIR), Path(config.WORKFLOWS_DIR), Path(config.REPO_DIR)]:
+                cand = parent_cand / raw_src
+                if cand.is_file():
+                    p = cand
+                    found = True
+                    break
+            if not found:
+                return False, None, None, {"error": f"Source image for img2img not found on disk: {raw_src}"}
+        source_img_path = str(p.resolve())
+
     try:
         generator = create_image_generator(engine_name, settings=params)
     except Exception as ex:
@@ -88,14 +106,16 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
         guidance=guidance_val,
         sampler=sampler,
         seed=seed,
-        loras=loras
+        loras=loras,
+        image_path=source_img_path,
+        denoise=denoise_val
     )
 
     res = generator.generate(req)
     if not res.success:
         return False, None, None, {"error": res.error or f"{engine_name.upper()} generation failed"}
 
-    # Extract run_prefix from image_path filename: {timestamp}-{hash}-{engine}.png -> {timestamp}-{hash}
+    # Extract run_prefix from image_path filename: {timestamp}-{hash}-final.png -> {timestamp}-{hash}
     image_basename = os.path.basename(res.image_path)
     if "-" in image_basename:
         run_prefix = image_basename.rsplit("-", 1)[0]
@@ -110,6 +130,9 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
     resolved_spec["seed"] = actual_seed
     resolved_spec["width"] = actual_width
     resolved_spec["height"] = actual_height
+    if source_img_path:
+        resolved_spec["image_path"] = source_img_path
+        resolved_spec["denoise"] = denoise_val
     if res.metadata.get("model") and "model" not in resolved_spec:
         resolved_spec["model"] = res.metadata["model"]
 
@@ -140,15 +163,25 @@ def generate_anchor_frame(
     """
     Generates or verifies an anchor keyframe for a scene using strict schema fields.
     Supports:
-    1. Ready image path: {"image_path": "path/to/image.png"} -> validates and returns existing image + base64.
-    2. Prompt-based generation: delegates directly to generate_image(anchor_meta).
+    1. Ready keyframe: {"image_path": "path/to/image.png"} (no prompt) -> returns existing file directly.
+    2. img2img refinement: {"image_path": "path/to/image.png", "prompt": "..."} -> runs img2img through generate_image().
+    3. txt2img generation: {"prompt": "..."} (no image_path) -> runs txt2img through generate_image().
     Returns: (success, image_path, base64_data)
     """
     img_path = anchor_meta.get("image_path")
-    if img_path:
+    has_prompt = bool(anchor_meta.get("prompt", "").strip())
+
+    # Case 1: Ready keyframe (image_path specified, NO prompt)
+    if img_path and not has_prompt:
         p = Path(img_path)
-        if p.exists() and p.is_file():
-            log(f"Anchor keyframe already exists: {p}")
+        if not p.is_file():
+            for base in [Path.cwd(), Path(config.OUTPUT_IMG_DIR), Path(config.WORKFLOWS_DIR), Path(config.REPO_DIR)]:
+                cand = base / img_path
+                if cand.is_file():
+                    p = cand
+                    break
+        if p.is_file():
+            log(f"Using ready anchor keyframe: {p}")
             try:
                 with open(p, "rb") as f:
                     b64 = base64.b64encode(f.read()).decode("utf-8")
@@ -156,12 +189,10 @@ def generate_anchor_frame(
             except Exception as ex:
                 log(f"Warning: could not read existing anchor image base64: {ex}")
                 return True, str(p.resolve()), None
-        elif not anchor_meta.get("prompt"):
-            return False, f"Anchor image_path not found on disk: {img_path}", None
-        else:
-            log(f"Specified anchor image_path not found: {img_path}. Falling back to prompt generation.")
+        return False, f"Anchor image_path not found on disk: {img_path}", None
 
-    if not anchor_meta.get("prompt"):
+    # Case 2 & 3: Generation (either txt2img or img2img)
+    if not has_prompt:
         return False, "Neither valid 'image_path' nor 'prompt' provided for anchor frame", None
 
     # Prepare merged generation parameters

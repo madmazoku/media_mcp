@@ -81,6 +81,13 @@
           "minimum": 0.0,
           "maximum": 30.0
         },
+        "denoise": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 1.0,
+          "default": 0.65,
+          "description": "Default img2img denoising strength for anchor frames"
+        },
         "sampler": {
           "type": "string",
           "minLength": 1
@@ -181,62 +188,31 @@
         "image_path": {
           "type": "string",
           "minLength": 1,
-          "description": "Path to an existing anchor keyframe image on disk"
+          "description": "Path to an existing anchor keyframe image on disk (for ready keyframe or img2img refinement)"
         },
         "prompt": {
           "type": "string",
           "minLength": 1,
           "description": "Visual prompt text describing the scene appearance"
         },
-        "engine": {
-          "type": "string",
-          "enum": ["sdxl", "flux1", "flux2"],
-          "description": "Anchor image generation engine"
-        },
-        "model": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Model filename"
-        },
         "negative_prompt": {
           "type": "string",
-          "description": "Negative prompt (SDXL only)"
+          "description": "Negative prompt (SDXL only, concatenated with global negative_prompt)"
         },
-        "width": {
-          "type": "integer",
-          "minimum": 64,
-          "multipleOf": 16
-        },
-        "height": {
-          "type": "integer",
-          "minimum": 64,
-          "multipleOf": 16
-        },
-        "steps": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 150
-        },
-        "cfg": {
+        "denoise": {
           "type": "number",
-          "minimum": 0.0,
-          "maximum": 30.0
-        },
-        "guidance": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 30.0
-        },
-        "sampler": {
-          "type": "string",
-          "minLength": 1
+          "minimum": 0.05,
+          "maximum": 1.0,
+          "description": "Denoising strength for img2img refinement of this scene's anchor frame (overrides global image.denoise)"
         },
         "seed": {
           "type": "integer",
-          "minimum": -1
+          "minimum": -1,
+          "description": "Optional scene-specific random seed (-1 for randomized)"
         },
         "loras": {
           "type": "array",
+          "description": "Scene-specific LoRAs to merge with global image.loras",
           "items": {
             "$ref": "#/$defs/lora_item"
           }

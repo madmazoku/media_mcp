@@ -44,6 +44,12 @@ class ImageRequest(GenerationRequest):
     loras: Optional[List[Dict[str, Any]]] = None
     model: Optional[str] = None
     custom_filename: Optional[str] = None
+    image_path: Optional[str] = None
+    denoise: float = 0.65
+
+    @property
+    def is_img2img(self) -> bool:
+        return bool(self.image_path)
 
     # Compatibility aliases
     @property

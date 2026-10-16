@@ -126,6 +126,14 @@ class SdxlImageGenerator(BaseImageGenerator):
         if sampler:
             payload["sampler_name"] = sampler
 
+        if request.is_img2img:
+            if not os.path.exists(request.image_path):
+                return GenerationResult(success=False, error=f"Source image not found on disk: {request.image_path}")
+            with open(request.image_path, "rb") as f:
+                init_b64 = base64.b64encode(f.read()).decode("utf-8")
+            payload["init_images"] = [init_b64]
+            payload["denoising_strength"] = float(request.denoise)
+
         cb = _IMAGE_PROGRESS_CALLBACK
         stop_event = threading.Event()
 
@@ -158,7 +166,10 @@ class SdxlImageGenerator(BaseImageGenerator):
         t = threading.Thread(target=poll_heartbeat, daemon=True)
         t.start()
         try:
-            res = a1111_client.txt2img(payload)
+            if request.is_img2img:
+                res = a1111_client.img2img(payload)
+            else:
+                res = a1111_client.txt2img(payload)
             images = res.get("images", [])
             if not images:
                 return GenerationResult(success=False, error="A1111 returned no images")
@@ -176,6 +187,7 @@ class SdxlImageGenerator(BaseImageGenerator):
 
             meta = {
                 "engine": "sdxl",
+                "mode": "img2img" if request.is_img2img else "txt2img",
                 "model": current_model,
                 "width": gen_w,
                 "height": gen_h,
@@ -187,6 +199,10 @@ class SdxlImageGenerator(BaseImageGenerator):
                 "seed": seed,
                 "loras": request.loras or []
             }
+            if request.is_img2img:
+                meta["source_image_path"] = request.image_path
+                meta["denoise"] = float(request.denoise)
+
             return GenerationResult(success=True, image_path=final_path, file_path=final_path, base64_data=raw_b64, metadata=meta)
         except Exception as ex:
             return GenerationResult(success=False, error=str(ex))
@@ -237,7 +253,7 @@ class Flux1ImageGenerator(BaseImageGenerator):
                 l_name = lora_entry.get("name", "").strip()
                 l_strength = float(lora_entry.get("strength", 0.8))
                 if l_name and l_name.lower() not in ("none", "disabled", "false", ""):
-                    lora_fn = lora_name if l_name.endswith(".safetensors") else f"{l_name}.safetensors"
+                    lora_fn = l_name if l_name.endswith(".safetensors") else f"{l_name}.safetensors"
                     node_key = str(lora_node_id)
                     wf[node_key] = {
                         "class_type": "LoraLoaderModelOnly",
@@ -246,10 +262,25 @@ class Flux1ImageGenerator(BaseImageGenerator):
                     sampler_model = [node_key, 0]
                     lora_node_id += 1
 
+        if request.is_img2img:
+            if not os.path.exists(request.image_path):
+                return GenerationResult(success=False, error=f"Source image not found on disk: {request.image_path}")
+            try:
+                comfy_input_fn = comfy_client.copy_to_comfy_input(request.image_path)
+            except Exception as ex:
+                return GenerationResult(success=False, error=f"Failed to prepare input image for ComfyUI: {ex}")
+            wf["6"] = {"class_type": "LoadImage", "inputs": {"image": comfy_input_fn}}
+            wf["10"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["6", 0], "vae": ["3", 0]}}
+            latent_source = ["10", 0]
+            denoise_val = float(request.denoise)
+        else:
+            latent_source = ["6", 0]
+            denoise_val = 1.0
+
         wf["7"] = {
             "class_type": "KSampler",
             "inputs": {
-                "cfg": 1.0, "denoise": 1.0, "latent_image": ["6", 0],
+                "cfg": 1.0, "denoise": denoise_val, "latent_image": latent_source,
                 "model": sampler_model, "negative": ["5", 0], "positive": ["4", 0],
                 "sampler_name": request.sampler or "euler", "scheduler": "beta", "seed": seed, "steps": steps
             }
@@ -291,6 +322,7 @@ class Flux1ImageGenerator(BaseImageGenerator):
         b64_data = base64.b64encode(raw_bytes).decode("utf-8")
         meta = {
             "engine": "flux1",
+            "mode": "img2img" if request.is_img2img else "txt2img",
             "model": unet_name,
             "width": width,
             "height": height,
@@ -300,6 +332,10 @@ class Flux1ImageGenerator(BaseImageGenerator):
             "sampler": request.sampler or "euler",
             "loras": request.loras or []
         }
+        if request.is_img2img:
+            meta["source_image_path"] = request.image_path
+            meta["denoise"] = float(request.denoise)
+
         return GenerationResult(success=True, image_path=final_path, file_path=final_path, base64_data=b64_data, metadata=meta)
 
 
@@ -341,13 +377,31 @@ class Flux2ImageGenerator(BaseImageGenerator):
             "1022": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
             "1023": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": request.sampler or "euler"}},
             "1024": {"class_type": "Flux2Scheduler", "inputs": {"steps": steps, "width": width, "height": height}},
-            "1021": {"class_type": "SamplerCustomAdvanced", "inputs": {
-                "noise": ["1022", 0], "guider": ["1006", 0], "sampler": ["1023", 0],
-                "sigmas": ["1024", 0], "latent_image": ["1007", 0]
-            }},
             "1010": {"class_type": "VAELoader", "inputs": {"vae_name": vae_name}},
             "1009": {"class_type": "VAEDecode", "inputs": {"samples": ["1021", 0], "vae": ["1010", 0]}},
             "1011": {"class_type": "SaveImage", "inputs": {"filename_prefix": "media_mcp_flux2", "images": ["1009", 0]}}
+        }
+
+        if request.is_img2img:
+            if not os.path.exists(request.image_path):
+                return GenerationResult(success=False, error=f"Source image not found on disk: {request.image_path}")
+            try:
+                comfy_input_fn = comfy_client.copy_to_comfy_input(request.image_path)
+            except Exception as ex:
+                return GenerationResult(success=False, error=f"Failed to prepare input image for ComfyUI: {ex}")
+            wf["1007"] = {"class_type": "LoadImage", "inputs": {"image": comfy_input_fn}}
+            wf["1008"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["1007", 0], "vae": ["1010", 0]}}
+            latent_source = ["1008", 0]
+            wf["1024"]["inputs"]["denoise"] = float(request.denoise)
+        else:
+            latent_source = ["1007", 0]
+
+        wf["1021"] = {
+            "class_type": "SamplerCustomAdvanced",
+            "inputs": {
+                "noise": ["1022", 0], "guider": ["1006", 0], "sampler": ["1023", 0],
+                "sigmas": ["1024", 0], "latent_image": latent_source
+            }
         }
 
         log(f"Queuing FLUX.2 Klein image generation: '{full_prompt[:60]}...' ({width}x{height})")
@@ -386,6 +440,7 @@ class Flux2ImageGenerator(BaseImageGenerator):
         b64_data = base64.b64encode(raw_bytes).decode("utf-8")
         meta = {
             "engine": "flux2",
+            "mode": "img2img" if request.is_img2img else "txt2img",
             "model": unet_name,
             "width": width,
             "height": height,
@@ -394,4 +449,8 @@ class Flux2ImageGenerator(BaseImageGenerator):
             "guidance": guidance,
             "sampler": request.sampler or "euler"
         }
+        if request.is_img2img:
+            meta["source_image_path"] = request.image_path
+            meta["denoise"] = float(request.denoise)
+
         return GenerationResult(success=True, image_path=final_path, file_path=final_path, base64_data=b64_data, metadata=meta)

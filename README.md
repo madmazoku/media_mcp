@@ -104,6 +104,8 @@ media_mcp/
     - `sampler` *(string, опционально)*: сэмплер.
     - `loras` *(array of `{"name": str, "strength": float}`, опционально; запрещён для FLUX.2)*.
     - `negative_prompt` *(string, SDXL only)*.
+    - `image_path` *(string, опционально)*: путь к исходному изображению на диске для режима перерисовки / стилизации (img2img).
+    - `denoise` *(number, 0.05..1.0, по умолчанию 0.65)*: сила трансформации исходника в режиме img2img.
   - Сохраняет разрешённую чистую спецификацию в `workflows/{run_prefix}-spec.json` и возвращает `run_prefix` и `spec_path`.
 - **`video_generate`** (`schemas/mcp_video_generate.json`):
   - Поддерживает `scenario_path` *(string)* и/или инлайн объект сценария (`scenes`).

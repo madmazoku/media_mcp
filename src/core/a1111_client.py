@@ -70,6 +70,10 @@ def txt2img(payload: Dict[str, Any]) -> Dict[str, Any]:
     return make_request("/sdapi/v1/txt2img", payload, method="POST")
 
 
+def img2img(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return make_request("/sdapi/v1/img2img", payload, method="POST")
+
+
 def interrupt() -> bool:
     try:
         make_request("/sdapi/v1/interrupt", method="POST")

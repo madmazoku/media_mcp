@@ -202,6 +202,10 @@ def upload_file_to_comfy(src_path: str, custom_filename: Optional[str] = None) -
     return filename
 
 
+# Compatibility alias
+copy_to_comfy_input = upload_file_to_comfy
+
+
 def find_comfy_output_file(filename: str, subfolder: str = "") -> Optional[str]:
     """
     Directly checks COMFY_OUTPUT_DIR for an output file.
