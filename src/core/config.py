@@ -16,6 +16,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from core.schema_validator import validate_config
+
 # Base repository directory
 REPO_DIR = Path(__file__).resolve().parent.parent.parent
 
@@ -39,48 +41,41 @@ if not config_file_path:
             config_file_path = candidate
             break
 
-# Load JSON configuration if present
+# Load and validate JSON configuration if present
 cfg_json: dict = {}
 if config_file_path and config_file_path.exists():
-    try:
-        with open(config_file_path, "r", encoding="utf-8") as f:
-            cfg_json = json.load(f)
-        sys.stderr.write(f"[config] Loaded configuration from {config_file_path.resolve()}\n")
-    except Exception as ex:
-        sys.stderr.write(f"[config] Warning: Failed to read {config_file_path}: {ex}\n")
-
-def get_setting(key: str, env_name: str, default: Any) -> Any:
-    """Settings priority: Environment Variable > config.json > Default."""
-    if env_name in os.environ:
-        return os.environ[env_name]
-    if key in cfg_json:
-        return cfg_json[key]
-    return default
+    with open(config_file_path, "r", encoding="utf-8") as f:
+        cfg_json = json.load(f)
+    validate_config(cfg_json)
+    sys.stderr.write(f"[config] Loaded and validated configuration from {config_file_path.resolve()}\n")
 
 # Network endpoints
-COMFY_URL = str(get_setting("comfy_url", "COMFY_URL", "http://127.0.0.1:8188")).rstrip("/")
-SD_WEBUI_URL = str(get_setting("sd_webui_url", "SD_WEBUI_URL", "http://127.0.0.1:7860")).rstrip("/")
+COMFY_URL = str(cfg_json.get("comfy_url", "http://127.0.0.1:8188")).rstrip("/")
+SD_WEBUI_URL = str(cfg_json.get("sd_webui_url", "http://127.0.0.1:7860")).rstrip("/")
 
 # Binaries (default: find in PATH, no hardcoded drive letters)
 default_ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
 default_ffprobe = shutil.which("ffprobe") or "ffprobe"
-FFMPEG_BIN = str(get_setting("ffmpeg_bin", "FFMPEG_BIN", default_ffmpeg))
-FFPROBE_BIN = str(get_setting("ffprobe_bin", "FFPROBE_BIN", default_ffprobe))
+FFMPEG_BIN = str(cfg_json.get("ffmpeg_bin", default_ffmpeg))
+FFPROBE_BIN = str(cfg_json.get("ffprobe_bin", default_ffprobe))
 
 # Storage Directories
-OUTPUT_DIR = str(get_setting("output_dir", "MEDIA_OUTPUT_DIR", str(REPO_DIR / "output")))
-OUTPUT_IMG_DIR = str(get_setting("output_img_dir", "MEDIA_OUTPUT_IMG_DIR", os.path.join(OUTPUT_DIR, "images")))
-OUTPUT_VID_DIR = str(get_setting("output_vid_dir", "MEDIA_OUTPUT_VID_DIR", os.path.join(OUTPUT_DIR, "videos")))
-TEMP_DIR = str(get_setting("temp_dir", "MEDIA_TEMP_DIR", os.path.join(OUTPUT_DIR, "temp")))
-WORKFLOWS_DIR = str(get_setting("workflows_dir", "WORKFLOWS_DIR", str(REPO_DIR / "workflows")))
+OUTPUT_DIR = str(cfg_json.get("output_dir", str(REPO_DIR / "output")))
+OUTPUT_IMG_DIR = str(cfg_json.get("output_img_dir", os.path.join(OUTPUT_DIR, "images")))
+OUTPUT_VID_DIR = str(cfg_json.get("output_vid_dir", os.path.join(OUTPUT_DIR, "videos")))
+TEMP_DIR = str(cfg_json.get("temp_dir", os.path.join(OUTPUT_DIR, "temp")))
+WORKFLOWS_DIR = str(cfg_json.get("workflows_dir", str(REPO_DIR / "workflows")))
 
 # ComfyUI filesystem integration (optional for local setups)
-COMFY_INPUT_DIR = str(get_setting("comfy_input_dir", "COMFY_INPUT_DIR", ""))
-COMFY_OUTPUT_DIR = str(get_setting("comfy_output_dir", "COMFY_OUTPUT_DIR", ""))
+COMFY_INPUT_DIR = str(cfg_json.get("comfy_input_dir", ""))
+COMFY_OUTPUT_DIR = str(cfg_json.get("comfy_output_dir", ""))
 
 # MCP SSE server ports
-IMAGE_MCP_PORT = int(get_setting("image_mcp_port", "IMAGE_MCP_PORT", 7865))
-VIDEO_MCP_PORT = int(get_setting("video_mcp_port", "VIDEO_MCP_PORT", 7866))
+IMAGE_MCP_PORT = int(cfg_json.get("image_mcp_port", 7865))
+VIDEO_MCP_PORT = int(cfg_json.get("video_mcp_port", 7866))
+
+# Maximum single-pass block diffusion window (prefix_duration + clip_duration < max_video_duration)
+MAX_VIDEO_DURATION = float(cfg_json.get("max_video_duration", 10.0))
 
 def ensure_directories():
     for d in [OUTPUT_DIR, OUTPUT_IMG_DIR, OUTPUT_VID_DIR, TEMP_DIR, WORKFLOWS_DIR]:

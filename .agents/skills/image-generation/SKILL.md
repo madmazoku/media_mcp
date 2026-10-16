@@ -16,13 +16,12 @@ description: >-
 ---
 
 ## Доступные инструменты (Tools):
-- `comfy_flux_txt2img`: генерация через FLUX.1 Dev или FLUX.2 Klein в ComfyUI (`prompt`, `model_type`, `width`, `height`, `steps`, `guidance`, `seed`, `lora_name`, `lora_strength`).
-- `sd_txt2img`: генерация через A1111 (`prompt`, `negative_prompt`, `model_name`, `steps`, `cfg_scale`, `width`, `height`, `sampler_name`, `seed`, `highres_fix`).
-  - **Автоматический High-Res Fix для SDXL/Pony:** при запросе невысокого разрешения (например, 832x480) движок автоматически рендерит в 1.5x (1248x720) и делает даунскейл Lanczos, предотвращая деформацию конечностей и сохраняя правильные пропорции.
-  - **Pony CFG Scale:** для моделей Pony рекомендуется и автоматически подставляется CFG 5.0–5.5 для исключения пережарки.
+- `comfy_flux_txt2img` (`schemas/mcp_comfy_flux_txt2img.json`): генерация через FLUX.1 Dev или FLUX.2 Klein в ComfyUI (`prompt`, `model_type`, `width`, `height`, `steps`, `guidance`, `seed`, `lora_name`, `lora_strength`).
+- `sd_txt2img` (`schemas/mcp_sd_txt2img.json`): генерация через A1111 (`prompt`, `negative_prompt`, `model_name`, `steps`, `cfg_scale`, `width`, `height`, `sampler_name`, `seed`).
+  - **Автоматическое повышение разрешения для SDXL/Pony:** при запросе невысокого разрешения (< 0.75 МП, например, 832x480) движок автоматически рендерит в полноценном высоком разрешении (1280x720), предотвращая деградацию внимания SDXL и деформацию анатомии.
+  - **Pony CFG Scale:** для моделей Pony рекомендуется и автоматически подставляется CFG 5.5 для исключения пережарки.
 - `sd_get_models` / `sd_set_model`: получение списка и смена модели в A1111.
 - `sd_get_loras`: получение списка LoRA.
-- `sd_interrupt`: отмена генерации.
 
 ---
 

@@ -7,7 +7,6 @@ Supports FLUX.1 Dev, FLUX.2 Klein (ComfyUI) and SD 1.5, SDXL, Pony, Illustrious 
 Returns local file path, metadata, and base64 representation.
 """
 
-import os
 import sys
 import shutil
 import base64
@@ -18,8 +17,6 @@ from .config import OUTPUT_IMG_DIR
 from .generators import (
     create_image_generator,
     ImageRequest,
-    GenerationResult,
-    snap_to_16,
     set_image_progress_callback,
 )
 
@@ -78,7 +75,6 @@ def generate_a1111_image(
     cfg_scale: float = 7.0,
     sampler_name: Optional[str] = None,
     seed: int = -1,
-    highres_fix: bool = True,
     custom_filename: Optional[str] = None
 ) -> Tuple[bool, Optional[str], Optional[str], Dict[str, Any]]:
     """
@@ -97,7 +93,6 @@ def generate_a1111_image(
         cfg_scale=cfg_scale,
         sampler_name=sampler_name,
         seed=seed,
-        highres_fix=highres_fix,
         custom_filename=custom_filename
     )
     res = generator.generate(req)
@@ -113,14 +108,13 @@ def generate_anchor_frame(
     custom_filename: Optional[str] = None
 ) -> Tuple[bool, str, Optional[str]]:
     """
-    Generates or verifies an anchor keyframe for a scene.
+    Generates or verifies an anchor keyframe for a scene using strict schema fields.
     Supports:
     1. Ready image path: {"image_path": "G:/..."} -> validates and returns existing image + base64.
-    2. Prompt-based generation: polymorphic dispatch via create_image_generator.
+    2. Prompt-based generation: polymorphic dispatch via create_image_generator(engine).
     Returns: (success, file_path, base64_data)
     """
-    # CASE 1: Existing image file provided
-    img_path = anchor_meta.get("image_path") or anchor_meta.get("start_image") or anchor_meta.get("source_image")
+    img_path = anchor_meta.get("image_path")
     if img_path:
         p = Path(img_path)
         if p.exists() and p.is_file():
@@ -140,33 +134,25 @@ def generate_anchor_frame(
             except Exception as ex:
                 log(f"Warning: could not read existing anchor image base64: {ex}")
                 return True, str(target_p.resolve()), None
+        elif not anchor_meta.get("prompt"):
+            return False, f"Anchor image_path not found on disk: {img_path}", None
         else:
-            log(f"Specified anchor image path not found: {img_path}. Falling back to prompt generation.")
+            log(f"Specified anchor image_path not found: {img_path}. Falling back to prompt generation.")
 
-    # CASE 2: Generate via prompt
     prompt = anchor_meta.get("prompt", "")
     if not prompt:
         return False, "Neither valid 'image_path' nor 'prompt' provided for anchor frame", None
 
-    model = anchor_meta.get("model") or anchor_meta.get("image_model") or anchor_meta.get("model_alias")
-    engine_val = str(anchor_meta.get("image_engine") or anchor_meta.get("backend") or "auto").lower()
-    lora = anchor_meta.get("lora") or anchor_meta.get("lora_alias")
+    engine_name = str(anchor_meta.get("engine") or "sdxl").strip().lower()
+    model = anchor_meta.get("model") or anchor_meta.get("checkpoint")
+    lora = anchor_meta.get("lora")
     lora_strength = float(anchor_meta.get("lora_strength", 0.8))
 
-    use_a1111 = (engine_val in ("a1111", "sdxl", "pony")) or (
-        engine_val == "auto" and model and any(x in str(model).lower() for x in ["sdxl", "pony", "illustrious", "animagine"])
-    )
-
-    if use_a1111:
-        engine_name = "sdxl"
-    elif engine_val in ("flux2", "klein") or (model and any(x in str(model).lower() for x in ["flux2", "klein"])):
-        engine_name = "flux2"
-    else:
-        engine_name = "flux1"
-
     generator = create_image_generator(engine_name, settings=anchor_meta)
-    cfg = float(anchor_meta.get("cfg_scale", anchor_meta.get("cfg", 5.5 if engine_name == "sdxl" else 3.5)))
-    sampler = anchor_meta.get("sampler_name", anchor_meta.get("sampler", "Euler a" if engine_name == "sdxl" else "euler"))
+    default_cfg = 5.5 if engine_name == "sdxl" else 3.5
+    cfg = float(anchor_meta.get("cfg", default_cfg))
+    guidance = float(anchor_meta.get("guidance", cfg))
+    sampler = anchor_meta.get("sampler", "Euler a" if engine_name == "sdxl" else "euler")
     steps = int(anchor_meta.get("steps", 30))
     seed = int(anchor_meta.get("seed", -1))
     neg = anchor_meta.get("negative_prompt", "score_6, score_5, score_4, ugly, deformed, low quality, bad anatomy")
@@ -175,16 +161,15 @@ def generate_anchor_frame(
         prompt=prompt,
         negative_prompt=neg,
         model_name=model,
-        width=width,
-        height=height,
+        width=int(anchor_meta.get("width") or width),
+        height=int(anchor_meta.get("height") or height),
         steps=steps,
         cfg_scale=cfg,
-        guidance=cfg,
+        guidance=guidance,
         sampler_name=sampler,
         seed=seed,
         lora_name=lora,
         lora_strength=lora_strength,
-        highres_fix=bool(anchor_meta.get("highres_fix", False)),
         custom_filename=custom_filename
     )
     res = generator.generate(req)

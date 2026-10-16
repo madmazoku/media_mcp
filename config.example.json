@@ -11,5 +11,6 @@
   "comfy_input_dir": "",
   "comfy_output_dir": "",
   "image_mcp_port": 7865,
-  "video_mcp_port": 7866
+  "video_mcp_port": 7866,
+  "max_video_duration": 10.0
 }

@@ -45,13 +45,12 @@ class BaseVideoGenerator(BaseGenerator):
         prefix_str: str,
         out_video_name: str,
         save_tail_latent: bool = False,
-        save_tail_video: bool = False,
         save_tail_image: bool = False,
         progress_callback: Optional[Any] = None
     ) -> GenerationResult:
         """
         Submits workflow to ComfyUI, waits for completion, and extracts
-        the core video, optional tail latent, and optional tail video.
+        the core video, optional tail latent, and optional tail image.
         """
         log(f"Submitting {self.name} workflow (prefix={prefix_str})...")
         ok, prompt_id = comfy_client.queue_prompt(wf)
@@ -77,7 +76,7 @@ class BaseVideoGenerator(BaseGenerator):
         if not found_local_file:
             for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
                 for f in files:
-                    if f.startswith(prefix_str) and not f.startswith(f"{prefix_str}_tail") and not f.startswith(f"{prefix_str}-tail") and f.endswith(".mp4"):
+                    if f.startswith(prefix_str) and not f.startswith(f"{prefix_str}-tail") and f.endswith(".mp4"):
                         found_local_file = os.path.join(root, f)
                         break
                 if found_local_file:
@@ -110,7 +109,7 @@ class BaseVideoGenerator(BaseGenerator):
             if not out_tail_latent_path:
                 for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
                     for f in files:
-                        if (f.startswith(f"{prefix_str}-tail") or f.startswith(f"{prefix_str}_tail")) and f.endswith(".latent"):
+                        if f.startswith(f"{prefix_str}-tail") and f.endswith(".latent"):
                             cand = os.path.join(root, f)
                             out_tail_latent_path = os.path.join(TEMP_DIR, f"{prefix_str}-tail.latent")
                             shutil.copy2(cand, out_tail_latent_path)
@@ -122,32 +121,7 @@ class BaseVideoGenerator(BaseGenerator):
             else:
                 log(f"Warning: Tail latent output file not found for {prefix_str}")
 
-        # 3. Locate tail video (if requested)
-        out_tail_video_path: Optional[str] = None
-        if save_tail_video:
-            save_tail_out = outputs.get("save_tail_video", {})
-            tail_videos = save_tail_out.get("videos", []) or save_tail_out.get("gifs", []) or save_tail_out.get("images", [])
-            found_tail_file = None
-            if tail_videos:
-                fn = tail_videos[0]["filename"]
-                sub = tail_videos[0].get("subfolder", "")
-                found_tail_file = comfy_client.find_comfy_output_file(fn, sub)
-
-            if not found_tail_file:
-                for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
-                    for f in files:
-                        if (f.startswith(f"{prefix_str}-tail") or f.startswith(f"{prefix_str}_tail")) and f.endswith(".mp4"):
-                            found_tail_file = os.path.join(root, f)
-                            break
-                    if found_tail_file:
-                        break
-
-            if found_tail_file and os.path.exists(found_tail_file):
-                out_tail_video_path = os.path.join(TEMP_DIR, f"{prefix_str}-tail.mp4")
-                shutil.copy2(found_tail_file, out_tail_video_path)
-                log(f"Successfully captured tail video: {os.path.basename(out_tail_video_path)}")
-
-        # 3b. Locate tail image (if requested)
+        # 3. Locate tail image (if requested)
         out_tail_image_path: Optional[str] = None
         if save_tail_image:
             save_tail_img_out = outputs.get("save_tail_image", {})
@@ -161,7 +135,7 @@ class BaseVideoGenerator(BaseGenerator):
             if not found_tail_img:
                 for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
                     for f in files:
-                        if (f.startswith(f"{prefix_str}-tail") or f.startswith(f"{prefix_str}_tail")) and f.endswith(".png"):
+                        if f.startswith(f"{prefix_str}-tail") and f.endswith(".png"):
                             found_tail_img = os.path.join(root, f)
                             break
                     if found_tail_img:
@@ -174,37 +148,11 @@ class BaseVideoGenerator(BaseGenerator):
             else:
                 log(f"Warning: Tail image output file not found for {prefix_str}")
 
-        # 4. Locate prefix video (if requested / generated)
-        out_prefix_video_path: Optional[str] = None
-        save_prefix_out = outputs.get("save_prefix_video", {})
-        prefix_videos = save_prefix_out.get("videos", []) or save_prefix_out.get("gifs", []) or save_prefix_out.get("images", [])
-        found_prefix_file = None
-        if prefix_videos:
-            fn = prefix_videos[0]["filename"]
-            sub = prefix_videos[0].get("subfolder", "")
-            found_prefix_file = comfy_client.find_comfy_output_file(fn, sub)
-
-        if not found_prefix_file:
-            for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
-                for f in files:
-                    if (f.startswith(f"{prefix_str}-prefix") or f.startswith(f"{prefix_str}_prefix")) and f.endswith(".mp4"):
-                        found_prefix_file = os.path.join(root, f)
-                        break
-                if found_prefix_file:
-                    break
-
-        if found_prefix_file and os.path.exists(found_prefix_file):
-            out_prefix_video_path = os.path.join(TEMP_DIR, f"{prefix_str}-prefix.mp4")
-            shutil.copy2(found_prefix_file, out_prefix_video_path)
-            log(f"Successfully captured prefix video: {os.path.basename(out_prefix_video_path)}")
-
         return GenerationResult(
             success=True,
             file_path=out_file,
             tail_latent_path=out_tail_latent_path,
-            tail_video_path=out_tail_video_path,
             tail_image_path=out_tail_image_path,
-            prefix_video_path=out_prefix_video_path,
             metadata={"name": self.name, "prefix": prefix_str}
         )
 
@@ -317,53 +265,15 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
                 },
                 "class_type": "WanLatentPrefixToVideo"
             }
-        elif request.end_image_path and os.path.exists(request.end_image_path):
-            start_fn = comfy_client.upload_file_to_comfy(request.image_path)
-            end_fn = comfy_client.upload_file_to_comfy(request.end_image_path)
-            wf["start_image"] = {"inputs": {"image": start_fn, "upload": "image"}, "class_type": "LoadImage"}
-            wf["end_image"] = {"inputs": {"image": end_fn, "upload": "image"}, "class_type": "LoadImage"}
+        elif request.image_path and os.path.exists(request.image_path):
+            img_fn = comfy_client.upload_file_to_comfy(request.image_path)
+            wf["start_image"] = {"inputs": {"image": img_fn, "upload": "image"}, "class_type": "LoadImage"}
             wf["wan_conditioning"] = {
                 "inputs": {
                     "positive": ["positive_cond", 0],
                     "negative": ["negative_cond", 0],
                     "vae": ["vae_loader", 0],
                     "start_image": ["start_image", 0],
-                    "end_image": ["end_image", 0],
-                    "width": width,
-                    "height": height,
-                    "length": num_frames,
-                    "batch_size": 1
-                },
-                "class_type": "WanFirstLastFrameToVideo"
-            }
-        else:
-            start_img = request.image_path
-            if isinstance(start_img, list) and len(start_img) > 0:
-                curr_node = None
-                for i, p in enumerate(start_img):
-                    img_fn = comfy_client.upload_file_to_comfy(p)
-                    node_key = f"prefix_frame_{i}"
-                    wf[node_key] = {"inputs": {"image": img_fn, "upload": "image"}, "class_type": "LoadImage"}
-                    if curr_node is None:
-                        curr_node = [node_key, 0]
-                    else:
-                        batch_key = f"batch_prefix_{i}"
-                        wf[batch_key] = {"inputs": {"image1": curr_node, "image2": [node_key, 0]}, "class_type": "ImageBatch"}
-                        curr_node = [batch_key, 0]
-                start_image_node = curr_node
-            elif isinstance(start_img, str) and os.path.exists(start_img):
-                img_fn = comfy_client.upload_file_to_comfy(start_img)
-                wf["start_image"] = {"inputs": {"image": img_fn, "upload": "image"}, "class_type": "LoadImage"}
-                start_image_node = ["start_image", 0]
-            else:
-                raise ValueError(f"No valid start input provided for Wan video generator: {start_img}")
-
-            wf["wan_conditioning"] = {
-                "inputs": {
-                    "positive": ["positive_cond", 0],
-                    "negative": ["negative_cond", 0],
-                    "vae": ["vae_loader", 0],
-                    "start_image": start_image_node,
                     "width": width,
                     "height": height,
                     "length": num_frames,
@@ -371,6 +281,8 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
                 },
                 "class_type": "WanImageToVideo"
             }
+        else:
+            raise ValueError(f"No valid start input provided for Wan video generator: {request.image_path}")
 
         cond_positive = ["wan_conditioning", 0]
         cond_negative = ["wan_conditioning", 1]
@@ -475,33 +387,6 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
             }
             video_images_input = ["slice_core", 0]
             log(f"Configured ComfyUI ImageFromBatch core: start={slice_batch_idx}, length={request.core_frames}")
-
-            if slice_batch_idx > 1:
-                wf["slice_prefix"] = {
-                    "inputs": {
-                        "image": ["vae_decode", 0],
-                        "batch_index": 0,
-                        "length": int(slice_batch_idx)
-                    },
-                    "class_type": "ImageFromBatch"
-                }
-                wf["create_prefix_video"] = {
-                    "inputs": {
-                        "images": ["slice_prefix", 0],
-                        "fps": fps
-                    },
-                    "class_type": "CreateVideo"
-                }
-                wf["save_prefix_video"] = {
-                    "inputs": {
-                        "video": ["create_prefix_video", 0],
-                        "filename_prefix": f"{prefix_str}-prefix",
-                        "format": "mp4",
-                        "codec": "h264"
-                    },
-                    "class_type": "SaveVideo"
-                }
-                log(f"Configured ComfyUI ImageFromBatch prefix debug video: length={slice_batch_idx}, prefix={prefix_str}-prefix")
         else:
             video_images_input = ["vae_decode", 0]
 
@@ -585,9 +470,7 @@ class WanFastVideoGenerator(BaseWanVideoGenerator):
             req_hash = uuid.uuid4().hex[:6]
             out_video_name = f"{timestamp}-{req_hash}-wan-fast.mp4"
         clean_base = os.path.splitext(os.path.basename(out_video_name))[0]
-        if clean_base.endswith("_core"):
-            clean_base = clean_base[:-5]
-        elif clean_base.endswith("-core"):
+        if clean_base.endswith("-core"):
             clean_base = clean_base[:-5]
         prefix_str = clean_base
 
@@ -653,9 +536,7 @@ class WanFullVideoGenerator(BaseWanVideoGenerator):
             req_hash = uuid.uuid4().hex[:6]
             out_video_name = f"{timestamp}-{req_hash}-wan-full.mp4"
         clean_base = os.path.splitext(os.path.basename(out_video_name))[0]
-        if clean_base.endswith("_core"):
-            clean_base = clean_base[:-5]
-        elif clean_base.endswith("-core"):
+        if clean_base.endswith("-core"):
             clean_base = clean_base[:-5]
         prefix_str = clean_base
 
@@ -686,7 +567,7 @@ class LtxVideoGenerator(BaseVideoGenerator):
     """
     LTX-2.3 22B Video Generator via ComfyUI.
     Uses 20 steps, CFG 3.0, Distilled LoRA 1.1, and LTXVConditioning.
-    Supports multi-frame forced prefix video conditioning.
+    Supports true tail latent prefix conditioning.
     """
 
     def generate(self, request: VideoRequest) -> GenerationResult:
@@ -705,9 +586,7 @@ class LtxVideoGenerator(BaseVideoGenerator):
             req_hash = uuid.uuid4().hex[:6]
             out_video_name = f"{timestamp}-{req_hash}-ltx.mp4"
         clean_base = os.path.splitext(os.path.basename(out_video_name))[0]
-        if clean_base.endswith("_core"):
-            clean_base = clean_base[:-5]
-        elif clean_base.endswith("-core"):
+        if clean_base.endswith("-core"):
             clean_base = clean_base[:-5]
         prefix_str = clean_base
 
@@ -730,8 +609,6 @@ class LtxVideoGenerator(BaseVideoGenerator):
 
         weight_dtype = str(self.settings.get("weight_dtype") or "default").strip()
         lora_setting = self.settings.get("lora_strength")
-        if lora_setting is None:
-            lora_setting = self.settings.get("strength_model")
         lora_strength = float(lora_setting) if lora_setting is not None else 1.0
 
         wf: Dict[str, Any] = {
@@ -789,7 +666,7 @@ class LtxVideoGenerator(BaseVideoGenerator):
             }
         }
 
-        # Start conditioning (Prefix latent, prefix video, or start image)
+        # Start conditioning (Prefix latent or start image)
         start_image_node = None
         if request.prefix_latent_path and os.path.exists(request.prefix_latent_path):
             pref_filename = os.path.basename(request.prefix_latent_path)
@@ -810,27 +687,6 @@ class LtxVideoGenerator(BaseVideoGenerator):
                 "class_type": "VAEDecode"
             }
             start_image_node = ["prefix_latent_decode", 0]
-        elif request.prefix_video_path and os.path.exists(request.prefix_video_path):
-            prefix_fn = comfy_client.upload_file_to_comfy(
-                request.prefix_video_path,
-                custom_filename=f"ltx-prefix-{int(time.time()*1000)}.mp4"
-            )
-            abs_prefix_in_comfy = os.path.join(comfy_client.COMFY_INPUT_DIR, prefix_fn)
-            log(f"LTX multi-frame prefix from video: {abs_prefix_in_comfy}")
-            wf["prefix_video_loader"] = {
-                "inputs": {
-                    "video": os.path.abspath(abs_prefix_in_comfy),
-                    "force_rate": float(fps),
-                    "custom_width": width,
-                    "custom_height": height,
-                    "frame_load_cap": 0,
-                    "skip_first_frames": 0,
-                    "select_every_nth": 1,
-                    "format": "AnimateDiff"
-                },
-                "class_type": "VHS_LoadVideoPath"
-            }
-            start_image_node = ["prefix_video_loader", 0]
         elif request.image_path and os.path.exists(str(request.image_path)):
             img_fn = comfy_client.upload_file_to_comfy(str(request.image_path))
             wf["start_image"] = {"inputs": {"image": img_fn, "upload": "image"}, "class_type": "LoadImage"}

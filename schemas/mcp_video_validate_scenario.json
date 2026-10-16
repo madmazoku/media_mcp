@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mcp_video_validate_scenario.json",
+  "title": "MCP Tool Arguments: video_validate_scenario",
+  "description": "Validate a hierarchical scenario structure before execution (checks schema, anchor images, timing, and overlap constraints).",
+  "type": "object",
+  "additionalProperties": false,
+  "oneOf": [
+    { "required": ["scenario_path"] },
+    { "required": ["scenario_data"] }
+  ],
+  "properties": {
+    "scenario_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to scenario JSON file"
+    },
+    "scenario_data": {
+      "$ref": "scenario.json",
+      "description": "Scenario JSON object matching scenario.json"
+    }
+  }
+}

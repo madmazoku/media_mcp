@@ -1,6 +1,7 @@
-# media-mcp uses Python standard library for zero-dependency execution.
-# Requires Python >= 3.10
-# External requirements:
+# Python >= 3.10
+jsonschema>=4.20.0
+
+# External runtime requirements:
 # - FFmpeg (with h264_nvenc or standard libx264)
-# - ComfyUI (running with Wan 2.2 / FLUX nodes)
+# - ComfyUI (running with Wan 2.2 / LTX-2.3 / FLUX nodes)
 # - Automatic1111 Stable Diffusion WebUI (optional, for SDXL / Pony)
