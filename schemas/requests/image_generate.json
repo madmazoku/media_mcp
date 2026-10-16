@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "image_generate.json",
+  "title": "image_generate",
+  "description": "Generate high-quality images via SDXL/Pony (Automatic1111) or FLUX.1/FLUX.2 (ComfyUI).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["prompt"],
+  "properties": {
+    "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Visual prompt text describing the scene"
+    },
+    "negative_prompt": {
+      "type": "string",
+      "description": "Negative prompt (SDXL / Pony only)"
+    },
+    "image_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional path to an existing image on disk for img2img refinement"
+    },
+    "mask_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional path to an inpainting mask image on disk (grayscale: white=regenerate, black=keep). Allowed only with image_path."
+    },
+    "denoise": {
+      "type": "number",
+      "minimum": 0.05,
+      "maximum": 1.0,
+      "default": 0.65,
+      "description": "Denoising strength for img2img (0.05 = subtle change, 1.0 = complete redraw)"
+    },
+    "engine": {
+      "type": "string",
+      "enum": ["sdxl", "flux1", "flux2"],
+      "default": "sdxl",
+      "description": "Image generation engine"
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Model filename or identifier"
+    },
+    "width": {
+      "type": "integer",
+      "minimum": 64,
+      "multipleOf": 16,
+      "description": "Output width in pixels (multiple of 16)"
+    },
+    "height": {
+      "type": "integer",
+      "minimum": 64,
+      "multipleOf": 16,
+      "description": "Output height in pixels (multiple of 16)"
+    },
+    "steps": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 150,
+      "description": "Sampling steps"
+    },
+    "cfg": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 30.0,
+      "description": "Classifier-Free Guidance scale (SDXL)"
+    },
+    "guidance": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 30.0,
+      "description": "Flux guidance scale (FLUX.1 / FLUX.2)"
+    },
+    "sampler": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Sampler name"
+    },
+    "seed": {
+      "type": "integer",
+      "minimum": -1,
+      "description": "Random seed (-1 for randomized)"
+    },
+    "loras": {
+      "$ref": "common/requests/loras_spec.json"
+    },
+    "fit": {
+      "type": "string",
+      "enum": ["crop", "outpaint"],
+      "description": "Fitting strategy when overriding dimensions for an existing image_path: 'crop' center-crops to target dimensions, 'outpaint' pads canvas and inpaints new borders. Allowed only with image_path, width, and height."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["fit"]
+      },
+      "then": {
+        "required": ["image_path", "width", "height"]
+      }
+    },
+    {
+      "if": {
+        "required": ["image_path"],
+        "not": { "required": ["fit"] }
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            { "required": ["width"] },
+            { "required": ["height"] }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["denoise"]
+      },
+      "then": {
+        "required": ["image_path"]
+      }
+    },
+    {
+      "if": {
+        "required": ["mask_path"]
+      },
+      "then": {
+        "required": ["image_path"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "engine": { "enum": ["flux1", "flux2"] }
+        },
+        "required": ["engine"]
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            { "required": ["negative_prompt"] },
+            { "required": ["cfg"] }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "engine": { "const": "flux2" }
+        },
+        "required": ["engine"]
+      },
+      "then": {
+        "not": {
+          "required": ["loras"]
+        }
+      }
+    }
+  ]
+}

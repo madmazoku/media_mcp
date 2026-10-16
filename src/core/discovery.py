@@ -9,6 +9,7 @@ and LoRA compatibility inspection with activation trigger extraction.
 import os
 import sys
 import re
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 from . import a1111_client
@@ -110,11 +111,16 @@ def get_models_tree(type_filter: Optional[str] = None, engine_filter: Optional[s
                 log(f"Notice: Failed to fetch ComfyUI Wan Full models: {ex}")
                 vid_branch["wan"] = []
 
-        # LTX-2.3 22B (ComfyUI)
+        # LTX-2.3 22B / Sulphur (ComfyUI)
         if not e_filter or e_filter == "ltx":
             try:
+                c_unets = comfy_client.get_unet_models()
                 c_ckpts = comfy_client.get_checkpoint_models()
-                ltx_list = [c for c in c_ckpts if "ltx" in c.lower()]
+                all_models = list(dict.fromkeys(c_unets + c_ckpts))
+                ltx_list = [
+                    m for m in all_models
+                    if any(k in m.lower() for k in ("ltx", "sulphur", "sulfur"))
+                ]
                 vid_branch["ltx"] = ltx_list
             except Exception as ex:
                 log(f"Notice: Failed to fetch ComfyUI LTX models: {ex}")
@@ -191,7 +197,7 @@ def get_loras_for_model(engine: str, model: str, pattern: Optional[str] = None) 
             raw_loras = comfy_client.get_loras()
             results = []
             for l_name in raw_loras:
-                clean_name = os.path.splitext(l_name)[0]
+                clean_name = Path(l_name).stem
                 results.append({"name": clean_name, "triggers": []})
         except Exception as ex:
             log(f"Notice: Failed to fetch ComfyUI LoRAs: {ex}")
@@ -215,7 +221,7 @@ def get_loras_for_model(engine: str, model: str, pattern: Optional[str] = None) 
 
             # Inspect metadata from .safetensors file directly if accessible
             meta = {}
-            if l_path and os.path.exists(l_path):
+            if l_path and Path(l_path).is_file():
                 meta = read_safetensors_metadata(l_path)
             else:
                 meta = lora_obj.get("metadata") or {}

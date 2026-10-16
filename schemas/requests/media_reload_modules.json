@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "media_reload_modules.json",
+  "title": "media_reload_modules",
+  "description": "Hot-reload core python modules in memory. Takes no arguments.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

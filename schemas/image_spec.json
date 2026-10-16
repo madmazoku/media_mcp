@@ -85,27 +85,7 @@
       "description": "Random seed (-1 for randomized)"
     },
     "loras": {
-      "type": "array",
-      "description": "Optional list of LoRAs to apply in order",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["name"],
-        "properties": {
-          "name": {
-            "type": "string",
-            "minLength": 1,
-            "description": "LoRA model name or filename"
-          },
-          "strength": {
-            "type": "number",
-            "minimum": 0.0,
-            "maximum": 2.0,
-            "default": 0.8,
-            "description": "LoRA weight strength"
-          }
-        }
-      }
+      "$ref": "common/requests/loras_spec.json"
     },
     "fit": {
       "type": "string",

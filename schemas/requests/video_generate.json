@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "mcp_video_validate.json",
-  "title": "video_validate",
-  "description": "Dry-run validation of a video scenario against JSON Schema and timing constraints.",
+  "$id": "video_generate.json",
+  "title": "video_generate",
+  "description": "Execute video generation from scenario_path and/or inline scenario scenes.",
   "type": "object",
   "additionalProperties": false,
   "anyOf": [
@@ -13,7 +13,12 @@
     "scenario_path": {
       "type": "string",
       "minLength": 1,
-      "description": "Path to a base scenario file on disk to validate"
+      "description": "Path to a base scenario file on disk to execute or overlay onto"
+    },
+    "enable_hud": {
+      "type": "boolean",
+      "default": false,
+      "description": "Generate dynamic diagnostic countdown HUD overlay"
     },
     "name": {
       "type": "string",
@@ -31,7 +36,7 @@
       "items": {
         "$ref": "scenario.json#/$defs/scene"
       },
-      "description": "Inline montage scenes to validate"
+      "description": "Inline montage scenes"
     }
   }
 }

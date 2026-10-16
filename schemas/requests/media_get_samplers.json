@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "mcp_media_get_samplers.json",
+  "$id": "media_get_samplers.json",
   "title": "media_get_samplers",
   "description": "Inspect compatible samplers for a specific engine and model.",
   "type": "object",

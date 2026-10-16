@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "video_generate.json",
+  "title": "Video Generate Response Schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_prefix",
+    "video_path",
+    "poster_path",
+    "spec_path",
+    "duration",
+    "width",
+    "height",
+    "fps",
+    "scenes_count",
+    "blocks_count"
+  ],
+  "properties": {
+    "run_prefix": {
+      "type": "string",
+      "description": "Unique run prefix ({timestamp}-{hash})"
+    },
+    "video_path": {
+      "type": "string",
+      "description": "Absolute path to the final assembled video file (.mp4)"
+    },
+    "poster_path": {
+      "type": "string",
+      "description": "Absolute path to the video poster / first keyframe image file (.png)"
+    },
+    "hud_video_path": {
+      "type": ["string", "null"],
+      "description": "Optional path to HUD diagnostic video with burned-in overlays"
+    },
+    "spec_path": {
+      "type": "string",
+      "description": "Absolute path to the resolved scenario specification file (.json)"
+    },
+    "duration": {
+      "type": "number",
+      "description": "Total video duration in seconds"
+    },
+    "width": {
+      "type": "integer",
+      "description": "Video frame width in pixels"
+    },
+    "height": {
+      "type": "integer",
+      "description": "Video frame height in pixels"
+    },
+    "fps": {
+      "type": "integer",
+      "description": "Video frame rate (fps)"
+    },
+    "scenes_count": {
+      "type": "integer",
+      "description": "Number of montage scenes rendered"
+    },
+    "blocks_count": {
+      "type": "integer",
+      "description": "Total number of continuous motion blocks rendered"
+    }
+  }
+}

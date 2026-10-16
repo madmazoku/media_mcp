@@ -127,14 +127,14 @@ class SdxlImageGenerator(BaseImageGenerator):
             payload["sampler_name"] = sampler
 
         if request.is_img2img:
-            if not os.path.exists(request.image_path):
+            if not Path(request.image_path).is_file():
                 return GenerationResult(success=False, error=f"Source image not found on disk: {request.image_path}")
             with open(request.image_path, "rb") as f:
                 init_b64 = base64.b64encode(f.read()).decode("utf-8")
             payload["init_images"] = [init_b64]
             payload["denoising_strength"] = float(request.denoise)
             if request.is_inpaint and request.mask_path:
-                if not os.path.exists(request.mask_path):
+                if not Path(request.mask_path).is_file():
                     return GenerationResult(success=False, error=f"Mask image not found on disk: {request.mask_path}")
                 with open(request.mask_path, "rb") as f:
                     mask_b64 = base64.b64encode(f.read()).decode("utf-8")
@@ -193,7 +193,8 @@ class SdxlImageGenerator(BaseImageGenerator):
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             req_hash = uuid.uuid4().hex[:6]
             save_filename = request.custom_filename or f"{timestamp}-{req_hash}-final.png"
-            final_path = os.path.join(OUTPUT_IMG_DIR, save_filename)
+            p_save = Path(save_filename)
+            final_path = (p_save if p_save.is_absolute() else (Path(OUTPUT_IMG_DIR) / p_save)).resolve().as_posix()
 
             with open(final_path, "wb") as f:
                 f.write(raw_bytes)
@@ -280,7 +281,7 @@ class Flux1ImageGenerator(BaseImageGenerator):
                     lora_node_id += 1
 
         if request.is_img2img:
-            if not os.path.exists(request.image_path):
+            if not Path(request.image_path).is_file():
                 return GenerationResult(success=False, error=f"Source image not found on disk: {request.image_path}")
             try:
                 comfy_input_fn = comfy_client.copy_to_comfy_input(request.image_path)
@@ -291,7 +292,7 @@ class Flux1ImageGenerator(BaseImageGenerator):
             latent_source = ["10", 0]
             denoise_val = float(request.denoise)
             if request.is_inpaint and request.mask_path:
-                if not os.path.exists(request.mask_path):
+                if not Path(request.mask_path).is_file():
                     return GenerationResult(success=False, error=f"Mask image not found on disk: {request.mask_path}")
                 try:
                     comfy_mask_fn = comfy_client.copy_to_comfy_input(request.mask_path)
@@ -344,7 +345,8 @@ class Flux1ImageGenerator(BaseImageGenerator):
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         req_hash = uuid.uuid4().hex[:6]
         save_filename = request.custom_filename or f"{timestamp}-{req_hash}-final.png"
-        final_path = os.path.join(OUTPUT_IMG_DIR, save_filename)
+        p_save = Path(save_filename)
+        final_path = (p_save if p_save.is_absolute() else (Path(OUTPUT_IMG_DIR) / p_save)).resolve().as_posix()
 
         with open(final_path, "wb") as f:
             f.write(raw_bytes)
@@ -417,7 +419,7 @@ class Flux2ImageGenerator(BaseImageGenerator):
         }
 
         if request.is_img2img:
-            if not os.path.exists(request.image_path):
+            if not Path(request.image_path).is_file():
                 return GenerationResult(success=False, error=f"Source image not found on disk: {request.image_path}")
             try:
                 comfy_input_fn = comfy_client.copy_to_comfy_input(request.image_path)
@@ -435,7 +437,7 @@ class Flux2ImageGenerator(BaseImageGenerator):
             }
             sigmas_source = ["1026", 1]
             if request.is_inpaint and request.mask_path:
-                if not os.path.exists(request.mask_path):
+                if not Path(request.mask_path).is_file():
                     return GenerationResult(success=False, error=f"Mask image not found on disk: {request.mask_path}")
                 try:
                     comfy_mask_fn = comfy_client.copy_to_comfy_input(request.mask_path)
@@ -487,7 +489,8 @@ class Flux2ImageGenerator(BaseImageGenerator):
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         req_hash = uuid.uuid4().hex[:6]
         save_filename = request.custom_filename or f"{timestamp}-{req_hash}-final.png"
-        final_path = os.path.join(OUTPUT_IMG_DIR, save_filename)
+        p_save = Path(save_filename)
+        final_path = (p_save if p_save.is_absolute() else (Path(OUTPUT_IMG_DIR) / p_save)).resolve().as_posix()
 
         with open(final_path, "wb") as f:
             f.write(raw_bytes)

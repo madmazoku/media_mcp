@@ -32,23 +32,42 @@
 
 ```
 media_mcp/
+├── docs/                       # Инженерные правила, исследования и база знаний
+│   ├── RULES.md                # Инженерные правила репозитория
+│   ├── MEDIA_MCP_KNOWLEDGE_BASE.md # База знаний архитектуры, решений и устранённых багов
+│   ├── VIDEO_BLOCK_CHAINING_RESEARCH.md # Исследование латентного чейнинга (Prefix Conditioning)
+│   └── COMFYUI_GUIDE.md        # Справочник окружения ComfyUI
+│
 ├── schemas/                    # Централизованные JSON Schema (Draft 2020-12)
 │   ├── config.json             # Схема файла конфигурации
-│   ├── image_spec.json         # Каноническая спецификация параметров изображения
 │   ├── scenario.json           # Каноническая спецификация видеосценария
-│   ├── mcp_image_generate.json # Схема вызова image_generate
-│   ├── mcp_video_generate.json # Схема вызова video_generate
-│   ├── mcp_video_validate.json # Схема вызова video_validate
-│   ├── mcp_media_get_models.json
-│   ├── mcp_media_get_samplers.json
-│   ├── mcp_media_get_loras.json
-│   └── mcp_empty.json
+│   ├── requests/               # Схемы валидации входящих аргументов инструментов
+│   │   ├── image_generate.json
+│   │   ├── video_generate.json
+│   │   ├── video_validate.json
+│   │   ├── media_get_models.json
+│   │   ├── media_get_samplers.json
+│   │   ├── media_get_loras.json
+│   │   ├── media_get_status.json
+│   │   ├── media_interrupt.json
+│   │   └── media_reload_modules.json
+│   └── responses/              # Строгие схемы ответов инструментов (Response Schemas)
+│       ├── image_generate.json
+│       ├── video_generate.json
+│       ├── video_validate.json
+│       ├── media_get_models.json
+│       ├── media_get_samplers.json
+│       ├── media_get_loras.json
+│       ├── media_get_status.json
+│       ├── media_interrupt.json
+│       └── media_reload_modules.json
 │
 ├── src/
 │   ├── core/                   # Единое ядро генерации (Core Engine)
 │   │   ├── __init__.py
-│   │   ├── config.py           # Конфигурация + валидация config.json по схеме
-│   │   ├── schema_validator.py # Загрузчик, инлайнер $ref и валидатор JSON Schema
+│   │   ├── config.py           # Строгая конфигурация без CWD-автопоиска
+│   │   ├── schema_validator.py # Загрузчик, инлайнер $ref, валидатор входа и выхода
+│   │   ├── schema_formatter.py # Движок терминальной справки CLI и валидации примеров
 │   │   ├── comfy_client.py     # HTTP-клиент ComfyUI (очередь, опрос, прерывание)
 │   │   ├── a1111_client.py     # HTTP-клиент Automatic1111 (модели, сэмплеры, LoRA)
 │   │   ├── discovery.py        # Инвариантная инспекция моделей, сэмплеров и LoRA
@@ -59,24 +78,27 @@ media_mcp/
 │   │   ├── tools.py            # Единый движок исполнения и реестр всех инструментов
 │   │   └── generators/         # Полиморфные стратегии генераторов (SDXL, FLUX, Wan, LTX)
 │   │
-│   ├── cli.py                  # Автономный CLI runner
+│   ├── cli.py                  # Автономный CLI runner с чистым JSON stdout и справкой
 │   └── mcp/                    # Единый MCP-сервер (JSON-RPC 2.0)
 │       ├── __init__.py
 │       └── media_mcp.py        # Единый сервер (Stdio + SSE :7865)
 │
 ├── examples/                   # Эталонные примеры конфигурации, сценария и запросов
-│   ├── config.json             # Эталонный шаблон конфигурации
+│   ├── config.json             # Минималистичный шаблон конфигурации
 │   ├── scenario.json           # Эталонный многосценарный видеоролик
 │   ├── mcp_image_generate.json
+│   ├── mcp_image_generate_inpaint.json
+│   ├── mcp_image_generate_outpaint.json
 │   ├── mcp_video_generate.json
 │   ├── mcp_video_validate.json
 │   ├── mcp_media_get_models.json
 │   ├── mcp_media_get_samplers.json
 │   └── mcp_media_get_loras.json
 │
-├── cmd/                        # Командные файлы запуска
-│   ├── cli.cmd                 # Автономный CLI runner для всех инструментов
-│   └── run_media_sse.cmd       # Запуск единого MCP SSE сервера (:7865)
+├── bin/                        # Кросс-платформенные лаунчеры (Windows .cmd + Unix .sh)
+│   ├── cli.cmd / cli.sh        # Автономный CLI runner для всех инструментов
+│   ├── run_media_sse.cmd / .sh # Запуск единого MCP SSE сервера (:7865)
+│   └── run_media_stdio.cmd/.sh # Запуск MCP Stdio сервера для Antigravity / Claude
 │
 ├── tests/                      # Автоматизированный тестовый набор
 │   └── test_streamline.py
@@ -90,11 +112,11 @@ media_mcp/
 ## 🛠️ Справочник инструментов (MCP Tools & CLI)
 
 Все инструменты работают через единый диспетчер `src/core/tools.py`. Доступны через MCP (Stdio), SSE HTTP (`:7865`) и командную строку (`cmd\cli.cmd`).
-Все параметры строго валидируются по `schemas/mcp_*.json` перед выполнением.
+Все параметры строго валидируются по `schemas/requests/<tool>.json` перед выполнением.
 
 ### 1. Генерация медиа
-- **`image_generate`** (`schemas/mcp_image_generate.json`):
-  - Принимает спецификацию изображения (`image_spec.json`):
+- **`image_generate`** (`schemas/requests/image_generate.json`):
+  - Принимает параметры генерации изображения:
     - `prompt` *(string, обязателен)*: текстовый промпт.
     - `engine` *(`"sdxl"` | `"flux1"` | `"flux2"`, по умолчанию `"sdxl"`)*.
     - `model` *(string, опционально)*: имя файла модели/чекпоинта.
@@ -109,17 +131,17 @@ media_mcp/
     - `fit` *(`"crop"` | `"outpaint"`, опционально)*: стратегия подгонки при явном переопределении габаритов через `width` и `height` для существующего `image_path`. Режим `"crop"` пропорционально масштабирует и центрированно кадрирует исходник (и пользовательскую маску); режим `"outpaint"` пропорционально вписывает исходник в холст, дополняет недостающие поля краевым заполнением и автоматически формирует инпейнтинг-маску с плавным Gaussian-размытием границ (feathering radius=4).
     - `denoise` *(number, 0.05..1.0, по умолчанию 0.65, для outpaint 0.85)*: сила трансформации исходника в режиме img2img / inpaint.
   - Сохраняет разрешённую чистую спецификацию в `workflows/{run_prefix}-spec.json` и возвращает `run_prefix` и `spec_path`.
-- **`video_generate`** (`schemas/mcp_video_generate.json`):
+- **`video_generate`** (`schemas/requests/video_generate.json`):
   - Поддерживает `scenario_path` *(string)* и/или инлайн объект сценария (`scenes`).
   - При указании базового файла читает его с диска и применяет оверлей переданных полей (глубокий мердж для словарей `image`/`video`, атомарная замена для списков `scenes`/`blocks`).
   - Ключ `scenario_path` немедленно удаляется из результирующего словаря, предотвращая циклы.
   - Сохраняет чистый итоговый сценарий в `workflows/{run_prefix}-spec.json` и возвращает `run_prefix`, `spec_path`, `video_path`, `poster_path`.
   - Поддерживает `enable_hud` *(boolean, по умолчанию `false`)* для вывода диагностического оверлея.
-- **`video_validate`** (`schemas/mcp_video_validate.json`):
+- **`video_validate`** (`schemas/requests/video_validate.json`):
   - Dry-run валидация сценария по схеме и законам таймингов без запуска рендеринга на GPU. Поддерживает `scenario_path` и инлайн-структуры.
 
 ### 2. Инспекция и обнаружение моделей (Discovery)
-- **`media_get_models`** (`schemas/mcp_media_get_models.json`):
+- **`media_get_models`** (`schemas/requests/media_get_models.json`):
   - Опциональные фильтры: `type` (`"image"` | `"video"`), `engine` (`"sdxl"`, `"flux1"`, `"wan-fast"` и др.).
   - Всегда возвращает инвариантное дерево:
     ```json
@@ -136,11 +158,11 @@ media_mcp/
       }
     }
     ```
-- **`media_get_samplers`** (`schemas/mcp_media_get_samplers.json`):
+- **`media_get_samplers`** (`schemas/requests/media_get_samplers.json`):
   - Обязательные аргументы: `engine` *(string)* и `model` *(string)*.
   - Возвращает компактный список совместимых сэмплеров, где элемент с индексом `[0]` — рекомендуемый по умолчанию:
     `["Euler a", "Euler", "DPM++ 2M Karras", ...]`
-- **`media_get_loras`** (`schemas/mcp_media_get_loras.json`):
+- **`media_get_loras`** (`schemas/requests/media_get_loras.json`):
   - Обязательные аргументы: `engine` *(string)* и `model` *(string)*.
   - Возвращает список совместимых LoRA с извлечёнными триггерными словами:
     ```json
@@ -153,11 +175,11 @@ media_mcp/
     ```
 
 ### 3. Управление пайплайном и разработка
-- **`media_get_status`** (`schemas/mcp_empty.json`):
+- **`media_get_status`** (`schemas/requests/media_get_status.json`):
   - Возвращает статус очередей ComfyUI, Automatic1111 и текущую сцену/блок видеопайплайна.
-- **`media_interrupt`** (`schemas/mcp_empty.json`):
+- **`media_interrupt`** (`schemas/requests/media_interrupt.json`):
   - Немедленно прерывает генерацию во всех активных движках.
-- **`media_reload_modules`** (`schemas/mcp_empty.json`):
+- **`media_reload_modules`** (`schemas/requests/media_reload_modules.json`):
   - Инструмент разработчика: выполняет горячую перезагрузку всех модулей пакета `core` в памяти в обратном порядке зависимостей.
 
 ---

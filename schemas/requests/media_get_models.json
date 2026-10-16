@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "mcp_media_get_models.json",
+  "$id": "media_get_models.json",
   "title": "media_get_models",
   "description": "Inspect available checkpoint and UNET models across engines.",
   "type": "object",

@@ -1,9 +1,0 @@
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "mcp_empty.json",
-  "title": "MCP Tool Arguments: Empty Object",
-  "description": "Strict empty argument object for parameterless MCP tools.",
-  "type": "object",
-  "additionalProperties": false,
-  "properties": {}
-}

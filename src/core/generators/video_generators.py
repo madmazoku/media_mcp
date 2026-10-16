@@ -77,13 +77,13 @@ class BaseVideoGenerator(BaseGenerator):
             for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
                 for f in files:
                     if f.startswith(prefix_str) and not f.startswith(f"{prefix_str}-tail") and f.endswith(".mp4"):
-                        found_local_file = os.path.join(root, f)
+                        found_local_file = (Path(root) / f).as_posix()
                         break
                 if found_local_file:
                     break
 
-        out_file = os.path.join(TEMP_DIR, out_video_name)
-        if found_local_file and os.path.exists(found_local_file):
+        out_file = (Path(TEMP_DIR) / out_video_name).resolve().as_posix()
+        if found_local_file and Path(found_local_file).is_file():
             shutil.copy2(found_local_file, out_file)
         elif videos:
             fn = videos[0]["filename"]
@@ -103,21 +103,21 @@ class BaseVideoGenerator(BaseGenerator):
                 fn = saved_latents[0].get("filename")
                 sub = saved_latents[0].get("subfolder", "")
                 found = comfy_client.find_comfy_output_file(fn, sub)
-                if found and os.path.exists(found):
-                    out_tail_latent_path = os.path.join(TEMP_DIR, f"{prefix_str}-tail.latent")
+                if found and Path(found).is_file():
+                    out_tail_latent_path = (Path(TEMP_DIR) / f"{prefix_str}-tail.latent").resolve().as_posix()
                     shutil.copy2(found, out_tail_latent_path)
             if not out_tail_latent_path:
                 for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
                     for f in files:
                         if f.startswith(f"{prefix_str}-tail") and f.endswith(".latent"):
-                            cand = os.path.join(root, f)
-                            out_tail_latent_path = os.path.join(TEMP_DIR, f"{prefix_str}-tail.latent")
+                            cand = (Path(root) / f).as_posix()
+                            out_tail_latent_path = (Path(TEMP_DIR) / f"{prefix_str}-tail.latent").resolve().as_posix()
                             shutil.copy2(cand, out_tail_latent_path)
                             break
                     if out_tail_latent_path:
                         break
             if out_tail_latent_path:
-                log(f"Successfully captured tail latent: {os.path.basename(out_tail_latent_path)}")
+                log(f"Successfully captured tail latent: {Path(out_tail_latent_path).name}")
             else:
                 log(f"Warning: Tail latent output file not found for {prefix_str}")
 
@@ -136,15 +136,15 @@ class BaseVideoGenerator(BaseGenerator):
                 for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
                     for f in files:
                         if f.startswith(f"{prefix_str}-tail") and f.endswith(".png"):
-                            found_tail_img = os.path.join(root, f)
+                            found_tail_img = (Path(root) / f).as_posix()
                             break
                     if found_tail_img:
                         break
 
-            if found_tail_img and os.path.exists(found_tail_img):
-                out_tail_image_path = os.path.join(TEMP_DIR, f"{prefix_str}-tail.png")
+            if found_tail_img and Path(found_tail_img).is_file():
+                out_tail_image_path = (Path(TEMP_DIR) / f"{prefix_str}-tail.png").resolve().as_posix()
                 shutil.copy2(found_tail_img, out_tail_image_path)
-                log(f"Successfully captured pristine tail image from workflow: {os.path.basename(out_tail_image_path)}")
+                log(f"Successfully captured pristine tail image from workflow: {Path(out_tail_image_path).name}")
             else:
                 log(f"Warning: Tail image output file not found for {prefix_str}")
 
@@ -241,8 +241,8 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
         }
 
         # Conditioning Setup
-        if request.prefix_latent_path and os.path.exists(request.prefix_latent_path):
-            pref_filename = os.path.basename(request.prefix_latent_path)
+        if request.prefix_latent_path and Path(request.prefix_latent_path).is_file():
+            pref_filename = Path(request.prefix_latent_path).name
             prefix_fn = comfy_client.upload_file_to_comfy(
                 request.prefix_latent_path,
                 custom_filename=pref_filename
@@ -265,7 +265,7 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
                 },
                 "class_type": "WanLatentPrefixToVideo"
             }
-        elif request.image_path and os.path.exists(request.image_path):
+        elif request.image_path and Path(request.image_path).is_file():
             img_fn = comfy_client.upload_file_to_comfy(request.image_path)
             wf["start_image"] = {"inputs": {"image": img_fn, "upload": "image"}, "class_type": "LoadImage"}
             wf["wan_conditioning"] = {
@@ -292,7 +292,7 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
         model_low = ["sampling_low", 0]
         latent_for_decode = ["sampler_stage2", 0]
 
-        if request.prefix_latent_path and os.path.exists(request.prefix_latent_path):
+        if request.prefix_latent_path and Path(request.prefix_latent_path).is_file():
             ramp_l = getattr(request, "ramp_latents", 3)
             ramp_l = 3 if ramp_l is None else int(ramp_l)
             min_c = getattr(request, "min_cfg", 1.0)
@@ -469,7 +469,7 @@ class WanFastVideoGenerator(BaseWanVideoGenerator):
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             req_hash = uuid.uuid4().hex[:6]
             out_video_name = f"{timestamp}-{req_hash}-wan-fast.mp4"
-        clean_base = os.path.splitext(os.path.basename(out_video_name))[0]
+        clean_base = Path(out_video_name).stem
         if clean_base.endswith("-core"):
             clean_base = clean_base[:-5]
         prefix_str = clean_base
@@ -535,7 +535,7 @@ class WanFullVideoGenerator(BaseWanVideoGenerator):
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             req_hash = uuid.uuid4().hex[:6]
             out_video_name = f"{timestamp}-{req_hash}-wan-full.mp4"
-        clean_base = os.path.splitext(os.path.basename(out_video_name))[0]
+        clean_base = Path(out_video_name).stem
         if clean_base.endswith("-core"):
             clean_base = clean_base[:-5]
         prefix_str = clean_base
@@ -585,7 +585,7 @@ class LtxVideoGenerator(BaseVideoGenerator):
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             req_hash = uuid.uuid4().hex[:6]
             out_video_name = f"{timestamp}-{req_hash}-ltx.mp4"
-        clean_base = os.path.splitext(os.path.basename(out_video_name))[0]
+        clean_base = Path(out_video_name).stem
         if clean_base.endswith("-core"):
             clean_base = clean_base[:-5]
         prefix_str = clean_base
@@ -668,8 +668,8 @@ class LtxVideoGenerator(BaseVideoGenerator):
 
         # Start conditioning (Prefix latent or start image)
         start_image_node = None
-        if request.prefix_latent_path and os.path.exists(request.prefix_latent_path):
-            pref_filename = os.path.basename(request.prefix_latent_path)
+        if request.prefix_latent_path and Path(request.prefix_latent_path).is_file():
+            pref_filename = Path(request.prefix_latent_path).name
             prefix_fn = comfy_client.upload_file_to_comfy(
                 request.prefix_latent_path,
                 custom_filename=pref_filename
@@ -687,7 +687,7 @@ class LtxVideoGenerator(BaseVideoGenerator):
                 "class_type": "VAEDecode"
             }
             start_image_node = ["prefix_latent_decode", 0]
-        elif request.image_path and os.path.exists(str(request.image_path)):
+        elif request.image_path and Path(str(request.image_path)).is_file():
             img_fn = comfy_client.upload_file_to_comfy(str(request.image_path))
             wf["start_image"] = {"inputs": {"image": img_fn, "upload": "image"}, "class_type": "LoadImage"}
             start_image_node = ["start_image", 0]

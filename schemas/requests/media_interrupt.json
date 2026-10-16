@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "media_interrupt.json",
+  "title": "media_interrupt",
+  "description": "Send emergency interrupt signal to abort active generations. Takes no arguments.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

@@ -13,6 +13,8 @@ import sys
 import json
 import shutil
 import base64
+import uuid
+import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
 
@@ -33,12 +35,7 @@ def log(msg: str):
 
 def get_temp_dir() -> Path:
     """Returns configured TEMP_DIR if valid, or a standard safe system temporary directory."""
-    if config.TEMP_DIR and os.path.isdir(config.TEMP_DIR):
-        return Path(config.TEMP_DIR)
-    import tempfile
-    t = Path(tempfile.gettempdir()) / "media_mcp"
-    t.mkdir(parents=True, exist_ok=True)
-    return t
+    return config.get_temp_dir()
 
 
 def set_global_progress_callback(cb):
@@ -144,6 +141,20 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
     prepared_mask_path = None
     original_mask_path = None
 
+    custom_fn = params.get("custom_filename")
+    if custom_fn:
+        stem = Path(custom_fn).stem
+        for suffix in ("-final", "-poster", "-anchor"):
+            if stem.endswith(suffix):
+                stem = stem[:-len(suffix)]
+                break
+        clean_base = stem
+    else:
+        now_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        rand_h = uuid.uuid4().hex[:6]
+        clean_base = f"{now_ts}-{rand_h}"
+        custom_fn = f"{clean_base}-final.png"
+
     if params.get("image_path"):
         raw_src = params["image_path"]
         p = Path(raw_src)
@@ -221,17 +232,17 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
                     top = (new_h - height) // 2
                     cropped_im = scaled_im.crop((left, top, left + width, top + height))
 
-                    norm_path = temp_dir / f"crop_{Path(source_img_path).stem}_{width}x{height}.png"
+                    norm_path = temp_dir / f"{clean_base}-crop.png"
                     cropped_im.save(norm_path, format="PNG")
-                    source_img_path = str(norm_path.resolve())
+                    source_img_path = norm_path.resolve().as_posix()
                     log(f"Cropped img2img source with fit='crop' from {cur_w}x{cur_h} to {width}x{height}: {source_img_path}")
 
                     if user_mask_l is not None:
                         scaled_mask = user_mask_l.resize((new_w, new_h), Image.Resampling.BILINEAR)
                         cropped_mask = scaled_mask.crop((left, top, left + width, top + height))
-                        norm_mask_path = temp_dir / f"norm_mask_crop_{Path(original_mask_path).stem}_{width}x{height}.png"
+                        norm_mask_path = temp_dir / f"{clean_base}-crop-mask.png"
                         cropped_mask.save(norm_mask_path, format="PNG")
-                        prepared_mask_path = str(norm_mask_path.resolve())
+                        prepared_mask_path = norm_mask_path.resolve().as_posix()
                         log(f"Cropped inpainting mask with fit='crop' to {width}x{height}: {prepared_mask_path}")
 
                 elif fit_mode == "outpaint":
@@ -252,9 +263,9 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
 
                     padded_arr = np.pad(scaled_arr, ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)), mode="edge")
                     padded_im = Image.fromarray(padded_arr)
-                    norm_path = temp_dir / f"outpaint_{Path(source_img_path).stem}_{width}x{height}.png"
+                    norm_path = temp_dir / f"{clean_base}-outpaint.png"
                     padded_im.save(norm_path, format="PNG")
-                    source_img_path = str(norm_path.resolve())
+                    source_img_path = norm_path.resolve().as_posix()
                     log(f"Padded img2img source with fit='outpaint' from {cur_w}x{cur_h} to {width}x{height}: {source_img_path}")
 
                     # Outpaint mask: 255 (new content) in border areas, 0 (preserved) or user mask in center
@@ -269,9 +280,9 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
                     base_mask_img = Image.fromarray(base_mask_arr)
                     feathered_mask = base_mask_img.filter(ImageFilter.GaussianBlur(radius=4))
 
-                    norm_mask_path = temp_dir / f"norm_mask_outpaint_{Path(source_img_path).stem}_{width}x{height}.png"
+                    norm_mask_path = temp_dir / f"{clean_base}-outpaint-mask.png"
                     feathered_mask.save(norm_mask_path, format="PNG")
-                    prepared_mask_path = str(norm_mask_path.resolve())
+                    prepared_mask_path = norm_mask_path.resolve().as_posix()
                     log(f"Generated feathered outpaint mask at {width}x{height}: {prepared_mask_path}")
 
                 else:
@@ -283,16 +294,16 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
 
                     if cur_w != width or cur_h != height:
                         resized_im = src_im.convert("RGB").resize((width, height), Image.Resampling.LANCZOS)
-                        norm_path = temp_dir / f"norm_{Path(source_img_path).stem}_{width}x{height}.png"
+                        norm_path = temp_dir / f"{clean_base}-norm.png"
                         resized_im.save(norm_path, format="PNG")
-                        source_img_path = str(norm_path.resolve())
+                        source_img_path = norm_path.resolve().as_posix()
                         log(f"Resized img2img source image from {cur_w}x{cur_h} to native {width}x{height}: {source_img_path}")
 
                     if user_mask_l is not None:
                         resized_mask = user_mask_l.resize((width, height), Image.Resampling.BILINEAR)
-                        norm_mask_path = temp_dir / f"norm_mask_{Path(original_mask_path).stem}_{width}x{height}.png"
+                        norm_mask_path = temp_dir / f"{clean_base}-norm-mask.png"
                         resized_mask.save(norm_mask_path, format="PNG")
-                        prepared_mask_path = str(norm_mask_path.resolve())
+                        prepared_mask_path = norm_mask_path.resolve().as_posix()
                         log(f"Prepared normalized inpainting mask at native {width}x{height}: {prepared_mask_path}")
 
         except Exception as ex:
@@ -324,7 +335,8 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
         image_path=source_img_path,
         mask_path=prepared_mask_path,
         fit=fit_mode,
-        denoise=denoise_val
+        denoise=denoise_val,
+        custom_filename=custom_fn
     )
 
     res = generator.generate(req)
@@ -332,11 +344,12 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
         return False, None, None, {"error": res.error or f"{engine_name.upper()} generation failed"}
 
     # Extract run_prefix from image_path filename: {timestamp}-{hash}-final.png -> {timestamp}-{hash}
-    image_basename = os.path.basename(res.image_path)
+    p_img = Path(res.image_path)
+    image_basename = p_img.name
     if "-" in image_basename:
         run_prefix = image_basename.rsplit("-", 1)[0]
     else:
-        run_prefix = os.path.splitext(image_basename)[0]
+        run_prefix = p_img.stem
 
     actual_seed = res.metadata.get("seed", seed)
     actual_width = res.metadata.get("target_width", res.metadata.get("width", width))
@@ -359,8 +372,8 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
         resolved_spec["model"] = res.metadata["model"]
 
     spec_filename = f"{run_prefix}-spec.json"
-    spec_dir = config.WORKFLOWS_DIR if config.WORKFLOWS_DIR and os.path.isdir(config.WORKFLOWS_DIR) else os.path.dirname(res.image_path)
-    spec_path = os.path.join(spec_dir, spec_filename)
+    workflows_dir = Path(config.WORKFLOWS_DIR) if config.WORKFLOWS_DIR and Path(config.WORKFLOWS_DIR).is_dir() else p_img.parent
+    spec_path = (workflows_dir / spec_filename).resolve().as_posix()
     try:
         with open(spec_path, "w", encoding="utf-8") as f:
             json.dump(resolved_spec, f, indent=2, ensure_ascii=False)

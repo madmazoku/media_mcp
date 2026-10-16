@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "media_get_status.json",
+  "title": "Media Get Status Response Schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "pipeline",
+    "comfy_online",
+    "a1111_available",
+    "report"
+  ],
+  "properties": {
+    "pipeline": {
+      "type": "object",
+      "description": "Active video pipeline status"
+    },
+    "comfy_online": {
+      "type": "boolean",
+      "description": "ComfyUI backend online availability"
+    },
+    "comfyui_available": {
+      "type": "boolean",
+      "description": "Alias for ComfyUI backend online availability"
+    },
+    "a1111_available": {
+      "type": "boolean",
+      "description": "A1111 WebUI backend online availability"
+    },
+    "report": {
+      "type": "string",
+      "description": "Human-readable diagnostic report text"
+    }
+  }
+}

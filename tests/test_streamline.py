@@ -18,11 +18,30 @@ SRC_DIR = Path(__file__).resolve().parent.parent / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from core import discovery, schema_validator, video_pipeline
+import tempfile
+from core import discovery, schema_validator, video_pipeline, config, schema_formatter
 from mcp import media_mcp
 
 
 class TestStreamlineArchitecture(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp_dir = tempfile.TemporaryDirectory()
+        tmp_path = Path(cls._tmp_dir.name)
+        cls._test_config = {
+            "output_dir": str(tmp_path / "media_mcp"),
+            "comfy_dir": str(tmp_path / "ComfyUI"),
+            "comfy_url": "http://127.0.0.1:8188",
+            "sd_webui_url": "http://127.0.0.1:7860",
+            "media_mcp_port": 7865
+        }
+        config.load_config_dict(cls._test_config)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp_dir.cleanup()
+        config.cfg_json = {}
 
     def test_01_models_tree_invariant_shape(self):
         """Verify media_get_models returns invariant tree shape."""
@@ -968,7 +987,207 @@ class TestStreamlineArchitecture(unittest.TestCase):
             errors_bypassed = video_pipeline.collect_scenario_aspect_ratio_errors(scenes_with_fit, video_width=832, video_height=480)
             self.assertEqual(len(errors_bypassed), 0)
 
+    def test_19_strict_config_enforcement(self):
+        """Verify strict config check rejects operations when unconfigured."""
+        saved_cfg = dict(config.cfg_json)
+        try:
+            config.cfg_json = {}
+            self.assertFalse(config.is_configured())
+            with self.assertRaises(RuntimeError):
+                config.require_configured("Test operation")
+
+            from core.tools import execute_tool
+            res = execute_tool("video_validate", {"scenario_path": "examples/scenario.json"})
+            self.assertTrue(res.get("isError"))
+            self.assertIn("requires an environment configuration file", res.get("error", ""))
+        finally:
+            config.load_config_dict(saved_cfg)
+
+    def test_20_response_schema_validation(self):
+        """Verify response schemas validate valid payloads and reject invalid payloads."""
+        # 1. Valid image_generate response (flat)
+        valid_img_res = {
+            "run_prefix": "20261017_123456_abcdef",
+            "image_path": "G:/media_mcp/images/test.png",
+            "spec_path": "G:/media_mcp/workflows/test-spec.json",
+            "engine": "flux2",
+            "model": "flux2-klein-9b.safetensors",
+            "seed": 123456,
+            "width": 1024,
+            "height": 1024
+        }
+        schema_validator.validate_mcp_response("image_generate", valid_img_res)
+
+        # 2. Invalid image_generate response: missing required properties
+        invalid_img_res = {
+            "run_prefix": "20261017_123456_abcdef"
+        }
+        with self.assertRaises(schema_validator.SchemaValidationError):
+            schema_validator.validate_mcp_response("image_generate", invalid_img_res)
+
+        # 3. Invalid image_generate response: additional unexpected property
+        invalid_extra_prop = dict(valid_img_res)
+        invalid_extra_prop["unexpected_extra_field"] = "bad"
+        with self.assertRaises(schema_validator.SchemaValidationError):
+            schema_validator.validate_mcp_response("image_generate", invalid_extra_prop)
+
+        # 4. Valid video_generate response (flat, without hud)
+        valid_vid_res = {
+            "run_prefix": "20261017_123456_abcdef",
+            "video_path": "G:/media_mcp/videos/test.mp4",
+            "poster_path": "G:/media_mcp/images/test_poster.png",
+            "spec_path": "G:/media_mcp/workflows/test-spec.json",
+            "duration": 10.5,
+            "width": 832,
+            "height": 480,
+            "fps": 16,
+            "scenes_count": 1,
+            "blocks_count": 2,
+            "hud_video_path": None
+        }
+        schema_validator.validate_mcp_response("video_generate", valid_vid_res)
+
+        # 5. Valid video_generate response (flat, with hud string)
+        valid_vid_with_hud = dict(valid_vid_res)
+        valid_vid_with_hud["hud_video_path"] = "G:/media_mcp/videos/test_hud.mp4"
+        schema_validator.validate_mcp_response("video_generate", valid_vid_with_hud)
+
+        # 6. Invalid video_generate response: missing blocks_count
+        invalid_vid = dict(valid_vid_res)
+        del invalid_vid["blocks_count"]
+        with self.assertRaises(schema_validator.SchemaValidationError):
+            schema_validator.validate_mcp_response("video_generate", invalid_vid)
+
+    def test_21_schema_formatter_help(self):
+        """Verify schema_formatter outputs formatted terminal help."""
+        # 1. General help
+        gen_help = schema_formatter.format_general_help()
+        self.assertIn("media_mcp", gen_help)
+        self.assertIn("image_generate", gen_help)
+        self.assertIn("video_generate", gen_help)
+        self.assertIn("video_validate", gen_help)
+
+        # 2. Tool help
+        tool_help = schema_formatter.format_tool_help("image_generate")
+        self.assertIn("image_generate", tool_help)
+        self.assertIn("prompt", tool_help)
+        self.assertIn("engine", tool_help)
+        self.assertIn("sdxl", tool_help)
+        self.assertIn("INPUT PARAMETERS", tool_help)
+        self.assertIn("OUTPUT FORMAT", tool_help)
+
+    def test_22_cli_interface(self):
+        """Verify CLI entry point behavior and strict input resolution."""
+        import subprocess
+        # 1. Test cli --help
+        res_help = subprocess.run(
+            [sys.executable, str(SRC_DIR / "cli.py"), "--help"],
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(res_help.returncode, 0)
+        self.assertIn("AVAILABLE TOOLS:", res_help.stdout)
+
+        # 2. Test cli <tool> --help
+        res_tool_help = subprocess.run(
+            [sys.executable, str(SRC_DIR / "cli.py"), "video_validate", "--help"],
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(res_tool_help.returncode, 0)
+        self.assertIn("TOOL: video_validate", res_tool_help.stdout)
+
+        # 3. Test cli execution with raw inline JSON when configured (must fail fast)
+        res_raw_json = subprocess.run(
+            [sys.executable, str(SRC_DIR / "cli.py"), "--config", "examples/config.json", "video_validate", '{"scenario_path": "x"}'],
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(res_raw_json.returncode, 1)
+        self.assertIn("Direct inline JSON strings are not accepted", res_raw_json.stderr)
+
+    def test_23_request_and_response_schemas_symmetry(self):
+        """Verify strict 1-to-1 symmetry between requests/<tool>.json and responses/<tool>.json for all tools."""
+        from core.tools import CANONICAL_TOOLS
+        for tool in CANONICAL_TOOLS:
+            req_schema = schema_validator.get_mcp_tool_schema(tool)
+            self.assertIsInstance(req_schema, dict)
+            self.assertIn("type", req_schema)
+
+            resp_schema = schema_validator.get_mcp_response_schema(tool)
+            self.assertIsInstance(resp_schema, dict)
+            self.assertIn("type", resp_schema)
+
+    def test_24_video_pipeline_img2img_anchor_temp_dir(self):
+        """Verify video_pipeline handles img2img anchor without NameError on TEMP_DIR."""
+        from core import video_pipeline, config
+        from PIL import Image
+        from unittest.mock import patch
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_p = Path(tmp_dir)
+            out_vid = tmp_p / "videos"
+            out_img = tmp_p / "images"
+            out_wf = tmp_p / "workflows"
+            out_tmp = tmp_p / "temp"
+            for d in [out_vid, out_img, out_wf, out_tmp]:
+                d.mkdir(parents=True, exist_ok=True)
+
+            orig_vid = config.OUTPUT_VID_DIR
+            orig_img = config.OUTPUT_IMG_DIR
+            orig_wf = config.WORKFLOWS_DIR
+            orig_tmp = config.TEMP_DIR
+            config.OUTPUT_VID_DIR = out_vid.resolve().as_posix()
+            config.OUTPUT_IMG_DIR = out_img.resolve().as_posix()
+            config.WORKFLOWS_DIR = out_wf.resolve().as_posix()
+            config.TEMP_DIR = out_tmp.resolve().as_posix()
+
+            try:
+                src_img = tmp_p / "anchor_src.png"
+                Image.new("RGB", (832, 480), color=(10, 20, 30)).save(src_img)
+
+                scenario = {
+                    "name": "Test Img2Img Anchor Scenario",
+                    "video": {"engine": "wan-fast", "width": 832, "height": 480},
+                    "scenes": [
+                        {
+                            "name": "Scene 1",
+                            "anchor_image": {
+                                "image_path": str(src_img),
+                                "prompt": "refined anchor"
+                            },
+                            "blocks": [
+                                {"motion_prompt": "slow pan", "duration": 2.0}
+                            ]
+                        }
+                    ]
+                }
+
+                with patch("core.image_engine.generate_image") as mock_gen_img, \
+                     patch("core.video_pipeline.create_video_generator") as mock_vid_factory, \
+                     patch("core.ffmpeg_engine.concat_videos") as mock_concat, \
+                     patch("core.ffmpeg_engine.get_duration") as mock_dur:
+
+                    from core.generators.base import GenerationResult
+                    mock_gen_img.return_value = (True, str(src_img), "base64dummy", {"run_prefix": "dummy", "spec_path": "dummy.json"})
+                    mock_vg = mock_vid_factory.return_value
+                    mock_vg.name = "wan-fast"
+                    mock_vg.generate.return_value = GenerationResult(
+                        success=True,
+                        file_path=str(src_img)
+                    )
+                    mock_dur.return_value = 2.0
+
+                    res = video_pipeline.execute_scenario_pipeline(scenario)
+                    self.assertIn("video_path", res)
+                    self.assertIn("poster_path", res)
+            finally:
+                config.OUTPUT_VID_DIR = orig_vid
+                config.OUTPUT_IMG_DIR = orig_img
+                config.WORKFLOWS_DIR = orig_wf
+                config.TEMP_DIR = orig_tmp
+
 
 if __name__ == "__main__":
     unittest.main()
-
