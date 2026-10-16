@@ -2,7 +2,7 @@
 
 Универсальный фреймворк и сервер **Model Context Protocol (MCP)** для генерации изображений и последовательного многоблочного видео.
 
-Разработан для работы с **ComfyUI** (FLUX.1 Dev, FLUX.2 Klein, Wan 2.2 I2V) и **Automatic1111 WebUI** (SD 1.5, SDXL, Pony, Illustrious).
+Разработан для работы с **ComfyUI** (FLUX.1 Dev, FLUX.2 Klein, Wan 2.2 I2V, LTX-2.3 22B) и **Automatic1111 WebUI** (SD 1.5, SDXL, Pony, Illustrious).
 
 Поддерживает интеграцию с **Google Antigravity**, **Open-WebUI**, **Cursor**, **ChatGPT Agent**, **Claude Desktop** и **Grok**.
 
@@ -11,29 +11,20 @@
 ## 🌟 Ключевые возможности
 
 1. **Разделение ответственности (Separation of Concerns):**
-   - `src/mcp/image_mcp.py` — тонкий MCP-интерфейс для генерации и редактирования изображений (A1111 / FLUX).
+   - `src/mcp/image_mcp.py` — тонкий MCP-интерфейс для генерации изображений (A1111 / FLUX).
    - `src/mcp/video_mcp.py` — тонкий MCP-интерфейс для многосценарных видеороликов (Wan 2.2 / LTX-2.3 / FFmpeg).
-   - `src/core/` — общее ядро с переиспользуемыми клиентами и пайплайнами.
-2. **True Forced Prefix Conditioning:**
-   - Непрерывное сохранение динамики сцены без рывков, затуханий и деградации цветов: хвосты блоков передаются в следующий как многокадровый префикс (17 кадров при 16 fps = 1.0 сек) через нативный `WanImageToVideo` (`start_image`), маскирующий 100% префиксных кадров как conditioned (`mask = 0.0`). Никаких поломок масок, размазывания контуров и паразитных «червяков»!
+   - `src/core/` — общее ядро с переиспользуемыми клиентами, генераторами, валидатором JSON Schema и пайплайнами.
+   - `schemas/` — единый каталог строгих схем **JSON Schema (Draft 2020-12)** для `config.json`, сценариев и всех MCP-запросов с условной (`if/then`) проверкой параметров в зависимости от `engine`.
+2. **True Forced Prefix Conditioning (Latent-Chaining):**
+   - Непрерывное сохранение динамики сцены внутри монтажа: при `overlap > 0` хвост предыдущего блока (`-tail.latent`) отрезается через `LatentCut` и передаётся в следующий блок как префикс (`prefix_duration`). Следующий блок диффундирует окно `prefix_duration + clip_duration`, после чего `ImageFromBatch` отсекает префикс и сохраняет полную длительность `clip_duration` в `{block_prefix}-core.mp4`. При `overlap == 0.0` (дефолт) используется бесшовная 1-кадровая сцепка по последнему кадру (`-tail.png`).
 3. **Чистовая основа блоков и Stream Copy (-c copy):**
-   - Чистовая основа каждого блока (`block_core`) сохраняется напрямую в H.264. Финальная сборка сцен и фильма в FFmpeg происходит через мгновенный **Stream Copy (`-c copy`) за 0.05 сек без перекодирования**.
-4. **Двойной видеодвижок (Dual Engine):**
-   - Поддержка **Wan 2.2 (14B)** для кинематографичной плавности, аниме и лиц, и **LTX-2.3 (22B)** с CFG 3.0 и дистиллированной LoRA 1.1 для масштабной динамики и экшена.
-5. **Negative Prompt первого класса:**
-   - Полная поддержка `negative_prompt` на уровне сценария, сцены, блока и тулов. Полное удаление китайского хардкода.
-   - Отказ от искусственного Color-Lock: полная свобода для смены освещения, магии (*Lumos*) и ночных сцен.
-6. **Асинхронный Stdio MCP Server:**
-   - Вызовы генерации выполняются в фоновом worker-потоке: `media_get_status` и `media_interrupt` отвечают за < 50 мс без блокировки stdio.
-7. **Кинематографическая иерархия «Сцена (Scene) -> Блоки движения (Blocks)»:**
-   - Чёткое разделение промптов: **Appearance Prompt** (статичная эстетика опорного кадра для FLUX/SDXL) и **Motion Prompt** (векторы действий и движения камеры).
-8. **Гибридный опорный кадр (Hybrid Anchor):**
-   - Мгновенное оживление уже существующего файла (`image_path`), либо автоматическая фоновая генерация по промпту (`prompt`).
-9. **Автоматические постеры в чате (No Context Bloat):**
-   - Вместо перегрузки контекста десятками мегабайт base64-видео сервер возвращает легкий постер первого кадра через нативный тип MCP `image`, а под ним формирует кликабельную ссылку на воспроизведение.
-10. **Zero External Dependencies:**
-    - Написан исключительно на стандартной библиотеке Python 3.10+ (без внешних pip-пакетов, со встроенной поддержкой `safetensors`).
-
+   - Чистовая основа каждого блока (`-core.mp4`) сохраняется напрямую в H.264. Финальная сборка всех блоков в FFmpeg происходит через мгновенный **Stream Copy (`-c copy`) за 0.05 сек без перекодирования**.
+4. **Полиморфные генераторы (Strategy & Factory):**
+   - Видеодвижки: **`wan-fast`** (Wan 2.2 14B 4-step LoRA, дефолт), **`wan`** (Wan 2.2 14B Full 20-step), **`ltx`** (LTX-2.3 22B).
+   - Фотодвижки: **`sdxl`** (Automatic1111 SDXL/Pony, дефолт для опорных кадров), **`flux1`** (FLUX.1 Dev), **`flux2`** (FLUX.2 Klein).
+5. **Строгая валидация без легаси:**
+   - Каждый JSON (`config.json`, `scenario.json`, аргументы MCP-вызовов) проверяется через `jsonschema` (`additionalProperties: false`). Опечатки в именах полей и несовместимые с выбранным `engine` параметры отвергаются до обращения к GPU.
+   - Имена всех выходных файлов формируются исключительно сервером по дефисному шаблону `{timestamp}-{random}-...`.
 
 ---
 
@@ -41,29 +32,41 @@
 
 ```
 media_mcp/
+├── schemas/                    # Централизованные JSON Schema (Draft 2020-12)
+│   ├── config.json
+│   ├── scenario.json
+│   ├── mcp_video_run_scenario.json
+│   ├── mcp_video_validate_scenario.json
+│   ├── mcp_video_generate_block.json
+│   ├── mcp_comfy_flux_txt2img.json
+│   ├── mcp_sd_txt2img.json
+│   ├── mcp_sd_set_model.json
+│   └── mcp_empty.json
+│
 ├── src/
 │   ├── core/                   # Единое ядро генерации (Core Engine)
 │   │   ├── __init__.py
-│   │   ├── config.py           # Конфигурация, пути, переменные окружения
+│   │   ├── config.py           # Конфигурация + валидация config.json по схеме
+│   │   ├── schema_validator.py # Загрузчик, инлайнер $ref и валидатор JSON Schema
 │   │   ├── comfy_client.py     # HTTP-клиент ComfyUI (очередь, опрос, прерывание)
 │   │   ├── a1111_client.py     # HTTP-клиент Automatic1111 (модели, сэмплеры, LoRA)
-│   │   ├── ffmpeg_engine.py    # Монтаж, префиксная нарезка Wan 2.2, извлечение постеров
-│   │   ├── image_engine.py     # Генерация FLUX.1 / FLUX.2 / SDXL + авто-LoRA
-│   │   └── video_pipeline.py   # Иерархический пайплайн Wan 2.2 (Scene -> Blocks)
+│   │   ├── ffmpeg_engine.py    # Монтаж Stream Copy (-c copy), извлечение постеров и HUD
+│   │   ├── image_engine.py     # Генерация опорных кадров и изображений
+│   │   ├── video_pipeline.py   # Иерархический пайплайн видео (Scene -> Blocks)
+│   │   └── generators/         # Полиморфные стратегии генераторов (SDXL, FLUX, Wan, LTX)
 │   │
 │   └── mcp/                    # Тонкие MCP-врапперы (JSON-RPC 2.0)
 │       ├── __init__.py
-│       ├── image_mcp.py        # Сервер картинок (Stdio + SSE :7865 для Open-WebUI)
-│       └── video_mcp.py        # Сервер видео (Stdio + SSE :7866 для Open-WebUI)
+│       ├── image_mcp.py        # Сервер картинок (Stdio + SSE :7865)
+│       └── video_mcp.py        # Сервер видео (Stdio + SSE :7866)
 │
-├── workflows/                  # Библиотека сценариев (visual_novel_template.json)
 ├── .agents/skills/             # Скиллы для AI-агентов
 │   ├── add-to-master/          # Процесс публикации правок в master через PR
 │   ├── image-generation/       # Скилл генерации изображений
-│   └── video-scenario/         # Скилл генерации видео
+│   └── video-scenario/         # Скилл генерации видео по сценариям
 │
-├── .env.example                # Шаблон переменных окружения
-├── requirements.txt            # Описание зависимостей (чистый Python 3.10+)
+├── config.example.json         # Шаблон конфигурационного файла
+├── requirements.txt            # Зависимости (jsonschema>=4.20.0)
 └── README.md                   # Главная документация
 ```
 
@@ -72,8 +75,8 @@ media_mcp/
 ## ⚙️ Системные требования и зависимости
 
 ### 1. Системные компоненты
-- **Python:** `>= 3.10` (чистая стандартная библиотека Python, встроенный модуль `safetensors.torch`).
-- **FFmpeg:** доступен в системе через `PATH` или указан в `FFMPEG_BIN` (рекомендуется сборка с поддержкой `h264_nvenc`).
+- **Python:** `>= 3.10`, пакет `jsonschema>=4.20.0` (`pip install -r requirements.txt`).
+- **FFmpeg:** доступен в системе через `PATH` или указан в `ffmpeg_bin` (рекомендуется сборка с поддержкой `h264_nvenc`).
 - **ComfyUI:** запущен локально (по умолчанию `http://127.0.0.1:8188`).
 - **Automatic1111 WebUI (опционально):** запущен с флагом `--api` (по умолчанию `http://127.0.0.1:7860`).
 
@@ -81,202 +84,125 @@ media_mcp/
 
 ### 2. Необходимые ноды и пакеты ComfyUI
 
-Большинство нод входят в стандартную поставку современного ComfyUI (`comfy_extras`), но для работы требуются следующие группы:
-
 | Категория | Используемые ноды | Где находится / Пакет |
 | :--- | :--- | :--- |
-| **Базовые ноды** | `LoadImage`, `VAELoader`, `VAEDecode`, `CreateVideo`, `SaveVideo`, `CLIPTextEncode`, `UNETLoader`, `LoraLoaderModelOnly` | ComfyUI Core |
-| **Latent-Chaining** | `SaveLatent`, `LoadLatent` | ComfyUI Core |
-| **Wan 2.2** | `WanImageToVideo`, `WanFirstLastFrameToVideo`, `ModelSamplingSD3`, `CLIPLoader` (type: `"wan"`) | `comfy_extras/nodes_wanvideo.py` |
+| **Базовые ноды** | `LoadImage`, `SaveImage`, `ImageFromBatch`, `VAELoader`, `VAEDecode`, `CreateVideo`, `SaveVideo`, `CLIPTextEncode`, `UNETLoader`, `LoraLoaderModelOnly` | ComfyUI Core |
+| **Latent-Chaining** | `SaveLatent`, `LoadLatent`, `LatentCut` | ComfyUI Core |
+| **Wan 2.2** | `WanImageToVideo`, `WanLatentPrefixToVideo`, `WanLatentPrefixLock`, `WanLatentPrefixRestore`, `ModelSamplingSD3`, `CLIPLoader` (type: `"wan"`) | `comfy_extras/nodes_wanvideo.py` |
 | **LTX-2.3 (22B)** | `EmptyLTXVLatentVideo`, `LTXVImgToVideoInplace`, `LTXVConditioning`, `LTXVScheduler`, `DualCLIPLoader` (type: `"ltxv"`) | `comfy_extras/nodes_ltx.py` или `ComfyUI-LTXVideo` |
 | **Продвинутый сэмплинг** | `SamplerCustomAdvanced`, `KSamplerSelect`, `RandomNoise`, `CFGGuider`, `BasicGuider` | `comfy_extras/nodes_custom_sampler.py` |
 | **FLUX / FLUX.2** | `FluxGuidance`, `Flux2Scheduler`, `EmptySD3LatentImage`, `CLIPLoader` (type: `"flux2"`) | `comfy_extras/nodes_sd3.py`, `nodes_flux.py` |
-| **Legacy Video Prefix** | `VHS_LoadVideoPath` | Кастомный пакет `ComfyUI-VideoHelperSuite` |
 
 ---
 
-### 3. Комбинации моделей и пути размещения в ComfyUI
+## 🔧 Конфигурация (`config.json`)
 
-Для каждого из поддерживаемых движков требуется строго согласованная комбинация весов:
+Скопируйте `config.example.json` в `config.json` (валидируется по `schemas/config.json`):
 
-#### А. Видеодвижок Wan 2.2 (14B I2V — Двухстадийная дистилляция 4 шага)
-* **UNET (High Noise):** `wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors` $\rightarrow$ `ComfyUI/models/diffusion_models/` (или `unet/`)
-* **UNET (Low Noise):** `wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors` $\rightarrow$ `ComfyUI/models/diffusion_models/` (или `unet/`)
-* **LoRA (High Noise 4-step):** `wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors` $\rightarrow$ `ComfyUI/models/loras/`
-* **LoRA (Low Noise 4-step):** `wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors` $\rightarrow$ `ComfyUI/models/loras/`
-* **Text Encoder (CLIP):** `umt5_xxl_fp8_e4m3fn_scaled.safetensors` $\rightarrow$ `ComfyUI/models/text_encoders/` (или `clip/`)
-* **VAE:** `wan_2.1_vae.safetensors` $\rightarrow$ `ComfyUI/models/vae/`
-
-#### Б. Видеодвижок LTX-2.3 (22B — Базовый и Файн-тюны)
-* **UNET (Базовый дефолт):** `ltx-2.3-22b-dev-fp8.safetensors` $\rightarrow$ `ComfyUI/models/diffusion_models/` (или `unet/`)
-* **UNET (Файн-тюны / NSFW):** `sulphur_dev_bf16_model.safetensors` $\rightarrow$ `ComfyUI/models/diffusion_models/`
-  *(Примечание: для Sulphur используйте чистый BF16 вариант; версия fp8mixed с `comfy_quant` метаданными не поддерживается стандартным UNETLoader).*
-* **LoRA (Distilled 1.1):** `ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors` $\rightarrow$ `ComfyUI/models/loras/`
-  *(Поддерживается регулировка `lora_strength: 0.0` для полного отключения на кастомных файн-тюнах).*
-* **Text Encoder (DualCLIP):** `gemma_3_12B_it.safetensors` + `ltx-2-3-22b-text_encoder.safetensors` $\rightarrow$ `ComfyUI/models/text_encoders/` (или `clip/`)
-* **VAE:** `ltx-2-3-22b-VAE.safetensors` $\rightarrow$ `ComfyUI/models/vae/`
-* **Настройки:** `checkpoint`, `weight_dtype` (`default`, `fp8_e4m3fn`), `lora_strength`, `cfg`, `steps` на уровне сценария и блоков.
-* **Именование файлов:** строгий стандарт `{timestamp}-{random}-s{%03d}-b{%03d}-{type}.{ext}` (`-core.mp4`, `-tail.png`, `-tail.latent`, `-anchor.png`, `-final.mp4`).
-
-#### В. Генерация опорных кадров через FLUX.1 Dev
-* **UNET:** `persephoneFluxNSFWSFW_20FP16.safetensors` $\rightarrow$ `ComfyUI/models/unet/`
-* **CLIP:** `t5xxl_fp16.safetensors` + `clip_l.safetensors` $\rightarrow$ `ComfyUI/models/clip/`
-* **VAE:** `ae.safetensors` $\rightarrow$ `ComfyUI/models/vae/`
-* **LoRA (опционально):** `aidmaNSFWunlock-FLUX-V0.2.safetensors` $\rightarrow$ `ComfyUI/models/loras/`
-
-#### Г. Генерация опорных кадров через FLUX.2 Klein
-* **UNET:** `aishaNSFWFlux2Klein_betaV88.safetensors` $\rightarrow$ `ComfyUI/models/unet/`
-* **CLIP:** `qwen_3_8b_fp8mixed.safetensors` $\rightarrow$ `ComfyUI/models/clip/`
-* **VAE:** `flux2-vae.safetensors` $\rightarrow$ `ComfyUI/models/vae/`
-* *(Внимание: LoRA от FLUX.1 несовместимы с FLUX.2 Klein из-за несовпадения формы тензоров).*
-
-#### Д. Опорные кадры через Automatic1111 (SDXL / Pony / Illustrious)
-* **Чекпоинты:** `models/Stable-diffusion/`
-* **LoRA:** `models/Lora/`
-
----
-
-
-## 🔧 Конфигурация (`.env`)
-
-Скопируйте `.env.example` в `.env` при необходимости переопределить стандартные пути:
-
-```ini
-# Бэкенды генерации
-COMFY_URL=http://127.0.0.1:8188
-SD_WEBUI_URL=http://127.0.0.1:7860
-
-# Бинарники FFmpeg
-FFMPEG_BIN=E:/Git/ffmpeg/bin/ffmpeg.exe
-FFPROBE_BIN=E:/Git/ffmpeg/bin/ffprobe.exe
-
-# Папки вывода
-MEDIA_OUTPUT_DIR=G:/Git/Gemini/output
-MEDIA_TEMP_DIR=G:/Git/media_mcp/temp
-
-# Порты для режима SSE (Open-WebUI)
-IMAGE_MCP_PORT=7865
-VIDEO_MCP_PORT=7866
+```json
+{
+  "comfy_url": "http://127.0.0.1:8188",
+  "sd_webui_url": "http://127.0.0.1:7860",
+  "ffmpeg_bin": "ffmpeg",
+  "ffprobe_bin": "ffprobe",
+  "output_dir": "./output",
+  "output_img_dir": "./output/images",
+  "output_vid_dir": "./output/videos",
+  "temp_dir": "./output/temp",
+  "workflows_dir": "./workflows",
+  "comfy_input_dir": "",
+  "comfy_output_dir": "",
+  "image_mcp_port": 7865,
+  "video_mcp_port": 7866,
+  "max_video_duration": 10.0
+}
 ```
 
 ---
 
 ## 🛠️ Справочник инструментов (MCP Tools)
 
+Все инструменты загружают `inputSchema` из `schemas/mcp_*.json` и проходят строгую валидацию перед выполнением.
+
 ### 1. Сервер изображений (`src/mcp/image_mcp.py`)
 
-- **`comfy_flux_txt2img`**: Генерация через FLUX.1 Dev или FLUX.2 Klein в ComfyUI.
-  - `prompt` *(string, обязателен)*: Визуальное описание сцены.
-  - `model_type` *(string)*: `"flux1_dev"` (по умолчанию) или `"flux2"`.
-  - `width`, `height` *(int)*: Размеры в пикселях (автоматически округляются до кратности 16, по умолчанию `1024x1024`).
-  - `steps` *(int)*: Число шагов сэмплирования.
-  - `guidance` *(float)*: Guidance scale (по умолчанию `3.5`).
-  - `seed` *(int)*: Сид (-1 для случайного).
-  - `lora_name` *(string)*: Имя LoRA (автоматически отключает FLUX.1 LoRA при выборе модели FLUX.2 Klein во избежание конфликта тензоров).
-  - `lora_strength` *(float)*: Сила LoRA (по умолчанию `0.8`).
-- **`sd_txt2img`**: Генерация через Automatic1111 WebUI (SDXL, Pony, Illustrious, SD 1.5).
-  - `prompt`, `negative_prompt`, `steps`, `cfg_scale`, `width`, `height`, `seed`, `sampler_name`.
-- **`sd_get_models`**: Получение списка доступных моделей и активного чекпоинта A1111.
-- **`sd_set_model`**: Переключение чекпоинта в A1111.
-- **`sd_get_loras`**: Список зарегистрированных LoRA в A1111.
+- **`comfy_flux_txt2img`** (`schemas/mcp_comfy_flux_txt2img.json`):
+  - `prompt` *(string, обязателен)*
+  - `model_type` *(`"flux1_dev"` | `"flux2"`, по умолчанию `"flux1_dev"`)*
+  - `width`, `height` *(int, кратны 16, по умолчанию `1024`)*
+  - `steps` *(int)*, `guidance` *(number, по умолчанию `3.5`)*, `seed` *(int)*
+  - `lora_name` *(string, запрещён при `model_type: "flux2"`)*, `lora_strength` *(number)*
+- **`sd_txt2img`** (`schemas/mcp_sd_txt2img.json`):
+  - `prompt` *(string, обязателен)*, `negative_prompt`, `model_name`, `steps`, `cfg_scale`, `width`, `height`, `seed`, `sampler_name`.
+- **`sd_get_models`**, **`sd_set_model`**, **`sd_get_loras`**.
 
 ### 2. Сервер видео (`src/mcp/video_mcp.py`)
 
-- **`video_run_scenario`**: Запуск выполнения сценария видео.
-  - `scenario_path` *(string)*: Имя файла в папке `workflows/` или абсолютный путь.
-  - `scenario_data` *(array/object)*: Иерархическая структура сценария (альтернатива файлу, для генерации «на лету»).
-  - `video` *(object)*: Глобальная конфигурация (`engine`: `"wan-fast"` по умолчанию, `"wan"`, `"ltx"`).
-  - `start_image` *(string)*: Опциональный путь к стартовому изображению для Сцены 1.
-  - `output_name` *(string)*: Имя итогового MP4-файла в `output/video/`.
-  - `width`, `height` *(int)*: Разрешение (по умолчанию `832x480`).
-  - `fps` *(int)*: Частота кадров (по умолчанию `16` для Wan, `24` для LTX).
-  - `enable_hud` *(boolean)*: Если `true`, дополнительно создает отладочную версию видео `_hud.mp4` с динамическими таймерами обратного отсчета для каждого блока и нахлёста префикса.
-- **`video_validate_scenario`**: Предварительная валидация таймингов, перекрытий (`prefix_length + tail_length < duration`, по умолчанию `overlap: 0.0`) и путей к опорным кадрам перед запуском.
-- **`video_generate_block`**: Одиночная генерация блока (`engine`: `"wan-fast"` по умолчанию, `"wan"`, `"ltx"`) с поддержкой опорного кадра (`start_image`), граничного кадра (`end_image`) или префикса движения (`prefix_latent`).
-- **`media_get_status`**: Сквозной мониторинг статуса выполнения (активный сценарий/блок, очередь ComfyUI Wan/FLUX, прогресс сэмплера Automatic1111).
-- **`media_interrupt`**: Экстренная остановка активной генерации во всех компонентах (прерывает сценарий, ComfyUI Wan/FLUX и Automatic1111).
+- **`video_run_scenario`** (`schemas/mcp_video_run_scenario.json`):
+  - Требуется ровно один из параметров (`oneOf`): `scenario_path` *(string)* или `scenario_data` *(object по `scenario.json`)*.
+  - `image` *(object, опционально)*: глобальные настройки опорного кадра (`engine`: `"sdxl"` | `"flux1"` | `"flux2"`, `model`, `checkpoint`, `prompt`, `negative_prompt`, `width`, `height`, `steps`, `cfg`, `guidance`, `sampler`, `seed`, `lora`, `lora_strength`).
+  - `video` *(object, опционально)*: глобальные настройки видео (`engine`: `"wan-fast"` | `"wan"` | `"ltx"`, `model`, `checkpoint`, `checkpoint_low`, `prompt`, `negative_prompt`, `width`, `height`, `fps`, `max_duration`, `steps`, `cfg`, `seed`, `lora_name`, `lora_strength`, `weight_dtype`, `ramp_latents`, `min_cfg`).
+  - `enable_hud` *(boolean, по умолчанию `false`)*: дополнительно создаёт `{run_prefix}-hud.mp4`.
+- **`video_validate_scenario`** (`schemas/mcp_video_validate_scenario.json`):
+  - Проверяет соответствие `schemas/scenario.json`, наличие файлов `anchor_image.image_path` и динамические ограничения слияния блоков внутри монтажа:
+    1. `overlap_duration < clip_duration`
+    2. `prefix_duration + clip_duration < max_duration` (где `prefix_duration` — `overlap` предыдущего блока сцены, а `max_duration` по умолчанию `10.0` сек).
+- **`video_generate_block`** (`schemas/mcp_video_generate_block.json`):
+  - Одиночная генерация блока (`prompt`, `engine`: `"wan-fast"` | `"wan"` | `"ltx"`, `start_image` или `prefix_latent`, `duration`, `width`, `height`, `fps`, `steps`, `cfg`, `seed`).
+- **`media_get_status`**, **`media_interrupt`**.
 
 ---
 
-## 🎬 Кинематографический формат сценария (`workflows/*.json`)
-
-Сценарий строится по иерархическому принципу (`engine: "wan-fast"`, `overlap: 0.0` по умолчанию):
-
-```json
-[
-  {
-    "scene_name": "Сцена 1: Купе поезда",
-    "engine": "wan-fast",
-    "anchor_image": {
-      "prompt": "Cinematic visual novel CG, first-person POV shot from inside cozy vintage train compartment, golden afternoon sunlight. Hermione Granger unicorn mare standing in open doorway, looking inside inquisitively, foreground shows pony hooves holding glowing ancient spellbook. Makoto Shinkai lighting, clean detailed line art",
-      "model": "flux1_dev",
-      "image_path": null
-    },
-    "blocks": [
-      {
-        "name": "Блок 1: Поиск жабы",
-        "duration": 5.0,
-        "overlap": 0.0,
-        "motion_prompt": "Her horn sparkles with magic telekinesis aura, sliding the compartment door open smoothly, trotting forward slightly, looking around the floor and under seats searching for Neville's lost pet toad, cute expressive animated equine expressions"
-      },
-      {
-        "name": "Блок 2: Реакция на книгу",
-        "duration": 5.0,
-        "overlap": 0.0,
-        "motion_prompt": "Her eyes suddenly spot the glowing magical tome held in the viewer's hooves, her big cartoon eyes widening with intense scholarly curiosity and wonder, taking an eager little step forward, tilting her head with an excited friendly smile to inspect the glowing ancient runes on the open pages"
-      }
-    ]
-  }
-]
-```
-
-### Принцип разделения промптов:
-- **`anchor_image.prompt` (Appearance):** Описывает **КАК ЭТО ВЫГЛЯДИТ** (персонаж, свет, объектив, одежда, детализация). Не используйте длинные глаголы движения.
-- **`blocks[].motion_prompt` (Motion):** Описывает **ЧТО ПРОИСХОДИТ** (действия, жесты, поворот головы, траектория камеры). Не дублируйте описание внешности.
-- **`anchor_image.image_path`:** Если указан путь к существующему файлу, генерация пропускается, и видео сразу начинает строиться из этого кадра.
-
----
-
-## 🔌 Инструкция по подключению клиентов
-
-### Google Antigravity & Cursor (Stdio Transport)
-
-В конфигурационном файле `mcp_config.json`:
+## 🎬 Формат сценария (`schemas/scenario.json`)
 
 ```json
 {
-  "mcpServers": {
-    "media-image": {
-      "command": "python",
-      "args": ["G:/Git/media_mcp/src/mcp/image_mcp.py"],
-      "env": {
-        "PYTHONIOENCODING": "utf-8",
-        "PYTHONUNBUFFERED": "1"
-      }
-    },
-    "media-video": {
-      "command": "python",
-      "args": ["G:/Git/media_mcp/src/mcp/video_mcp.py"],
-      "env": {
-        "PYTHONIOENCODING": "utf-8",
-        "PYTHONUNBUFFERED": "1"
-      }
+  "name": "Hermione Train Compartment",
+  "image": {
+    "engine": "sdxl",
+    "cfg": 5.5,
+    "steps": 30
+  },
+  "video": {
+    "engine": "wan-fast",
+    "width": 832,
+    "height": 480,
+    "fps": 16,
+    "max_duration": 10.0,
+    "negative_prompt": "blurry, low quality, jitter, static, deformed, extra limbs, bad anatomy, text, watermark"
+  },
+  "scenes": [
+    {
+      "scene_name": "Scene 1: Train Compartment",
+      "anchor_image": {
+        "prompt": "score_9, score_8_up,score_7_up, 1girl, Hermione Granger, bushy brown hair, Hogwarts uniform, inside cozy vintage train compartment, golden afternoon sunlight"
+      },
+      "blocks": [
+        {
+          "name": "Block 1: Opening Door",
+          "duration": 5.0,
+          "overlap": 1.0,
+          "motion_prompt": "She gently slides the compartment door open with her hand and steps inside, looking around curiously"
+        },
+        {
+          "name": "Block 2: Greeting",
+          "duration": 5.0,
+          "overlap": 0.0,
+          "motion_prompt": "She notices the passenger across from her and smiles warmly while sitting down"
+        }
+      ]
     }
-  }
+  ]
 }
 ```
 
-### Open-WebUI (SSE HTTP Transport)
-
-1. Запустите серверы в фоновом режиме:
-   ```bash
-   python G:/Git/media_mcp/src/mcp/image_mcp.py --sse --port 7865
-   python G:/Git/media_mcp/src/mcp/video_mcp.py --sse --port 7866
-   ```
-2. В интерфейсе Open-WebUI (**Admin Panel -> Settings -> Tools / External Connections**):
-   - Добавьте Image Server: `http://host.docker.internal:7865/sse`
-   - Добавьте Video Server: `http://host.docker.internal:7866/sse`
-3. Сервер автоматически отдает сгенерированные видео через встроенный HTTP-стриминг: `http://host.docker.internal:7866/video/<filename>.mp4`.
+### Законы таймингов и слияния блоков внутри одной сцены (монтажа):
+В текущем пайплайне блок $i$ получает хвост предыдущего блока $\text{prefix\_duration} = \text{overlap}_{i-1}$ (для первого блока сцены $\text{prefix\_duration} = 0$), диффундирует суммарное окно $\text{prefix\_duration} + \text{clip\_duration}$, отсекает префикс через `ImageFromBatch` и отдаёт в финальную склейку ровно $\text{clip\_duration}$ чистого видео:
+1. **Хвост меньше самого клипа:**
+   $$\text{overlap\_duration} < \text{clip\_duration}$$
+2. **Суммарное окно генерации меньше лимита модели (`max_duration`, по умолчанию 10.0 сек):**
+   $$\text{prefix\_duration} + \text{clip\_duration} < \text{max\_duration}$$
+3. **Итоговая длительность сцены:** равна чистой сумме $\sum \text{clip\_duration}$ всех блоков сцены.
 
 ---
 
@@ -284,14 +210,9 @@ VIDEO_MCP_PORT=7866
 
 При работе с данным репозиторием AI-агенты **обязаны строго следовать скиллу [`.agents/skills/add-to-master/SKILL.md`](.agents/skills/add-to-master/SKILL.md)**:
 
-1. **Никаких прямых коммитов в `master`:**
-   - Все изменения оформляются через ветку `AI-<n>-<slug>`, созданную от актуального `master`.
-2. **Обязательная актуализация `README.md`:**
-   - Если добавлены, изменены или удалены инструменты, параметры конфига, форматы сценариев или зависимости, агент **обязан обновить `README.md`** до создания коммита. `README.md` должен оставаться единым и исчерпывающим источником правды.
-3. **Публикация и слияние:**
-   - Ветка пушится в `origin`, открывается Pull Request через `gh pr create`.
-   - Слияние производится строго через GitHub CLI: `gh pr merge <PR_NUMBER> --merge`.
-   - Локальный `master` синхронизируется через `git pull origin master`.
+1. **Никаких прямых коммитов в `master`:** все изменения оформляются через ветку `AI-<n>-<slug>`, созданную от актуального `master`.
+2. **Обязательная актуализация `README.md` и `schemas/`:** любые изменения контрактов обязаны быть отражены в `schemas/*.json` и `README.md` до создания коммита.
+3. **Публикация и слияние:** ветка пушится в `origin`, открывается Pull Request через `gh pr create`, слияние производится через `gh pr merge <PR_NUMBER> --merge`, локальный `master` синхронизируется через `git pull origin master`.
 
 ---
 

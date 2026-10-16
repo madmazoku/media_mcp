@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mcp_video_generate_block.json",
+  "title": "MCP Tool Arguments: video_generate_block",
+  "description": "Generate a single video segment using Wan 2.2 or LTX-2.3 (22B) with a start image or prefix latent.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["prompt"],
+  "anyOf": [
+    { "required": ["start_image"] },
+    { "required": ["prefix_latent"] }
+  ],
+  "properties": {
+    "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Motion and camera prompt"
+    },
+    "engine": {
+      "type": "string",
+      "enum": ["wan-fast", "wan", "ltx"],
+      "default": "wan-fast",
+      "description": "Video engine: 'wan-fast' (default), 'wan' (Full 20-step), or 'ltx' (LTX-2.3 22B)"
+    },
+    "negative_prompt": {
+      "type": "string",
+      "description": "Negative prompt"
+    },
+    "duration": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 10.0,
+      "default": 5.0,
+      "description": "Duration in seconds (default: 5.0, max: 10.0)"
+    },
+    "start_image": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Starting image file path"
+    },
+    "prefix_latent": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Prefix .latent safetensors file path for forced continuity"
+    },
+    "width": {
+      "type": "integer",
+      "minimum": 64,
+      "multipleOf": 16,
+      "default": 832,
+      "description": "Width (default: 832, multiple of 16 for Wan, 32 for LTX)"
+    },
+    "height": {
+      "type": "integer",
+      "minimum": 64,
+      "multipleOf": 16,
+      "default": 480,
+      "description": "Height (default: 480, multiple of 16 for Wan, 32 for LTX)"
+    },
+    "fps": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 120,
+      "description": "FPS (default: 16 for Wan, 24 for LTX)"
+    },
+    "steps": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "description": "Sampling steps override"
+    },
+    "cfg": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 30.0,
+      "description": "CFG scale override"
+    },
+    "seed": {
+      "type": "integer",
+      "minimum": -1,
+      "default": -1,
+      "description": "Random seed (-1 for random)"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "engine": { "const": "ltx" }
+        },
+        "required": ["engine"]
+      },
+      "then": {
+        "properties": {
+          "width": { "multipleOf": 32 },
+          "height": { "multipleOf": 32 }
+        }
+      }
+    }
+  ]
+}

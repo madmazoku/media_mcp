@@ -15,7 +15,7 @@ import urllib.parse
 import contextlib
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from typing import Dict, Any, Optional
+from typing import Optional
 
 # Ensure package import from src/
 SRC_DIR = Path(__file__).resolve().parent.parent
@@ -23,14 +23,15 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 import importlib
-from core import config, comfy_client, a1111_client, image_engine
+from core import config, comfy_client, a1111_client, image_engine, schema_validator
+
 
 def reload_core_modules():
     """
     Dynamically reloads all loaded modules in sys.modules under 'core' in reverse dependency order,
     ensuring all code changes take effect immediately without stale memory caches.
     """
-    global config, comfy_client, a1111_client, image_engine
+    global config, comfy_client, a1111_client, image_engine, schema_validator
     core_mods = [k for k in list(sys.modules.keys()) if k == "core" or k.startswith("core.")]
     core_mods.sort(key=lambda s: s.count("."), reverse=True)
     for mod_name in core_mods:
@@ -41,10 +42,11 @@ def reload_core_modules():
             except Exception as e:
                 log(f"Warning: Failed to reload {mod_name}: {e}")
     try:
-        from core import config as _c, comfy_client as _cm, a1111_client as _a, image_engine as _i
-        config, comfy_client, a1111_client, image_engine = _c, _cm, _a, _i
+        from core import config as _c, comfy_client as _cm, a1111_client as _a, image_engine as _i, schema_validator as _sv
+        config, comfy_client, a1111_client, image_engine, schema_validator = _c, _cm, _a, _i, _sv
     except Exception as e:
         log(f"Warning: Failed to re-bind core modules: {e}")
+
 
 if hasattr(sys.stdin, "reconfigure"):
     try:
@@ -58,17 +60,19 @@ _REAL_STDOUT = sys.stdout
 _SSE_CLIENTS = {}
 _CURRENT_PROGRESS_TOKEN = None
 
+
 def log(msg: str):
     sys.stderr.write(f"[image-mcp] {msg}\n")
     sys.stderr.flush()
+
 
 def send_response(resp: dict):
     line = json.dumps(resp, ensure_ascii=False)
     _REAL_STDOUT.write(line + "\n")
     _REAL_STDOUT.flush()
 
+
 def broadcast_mcp_progress(message: str, progress: Optional[float] = None, total: Optional[float] = None):
-    # 1. MCP standard logging notification
     log_notif = {
         "jsonrpc": "2.0",
         "method": "notifications/message",
@@ -80,7 +84,6 @@ def broadcast_mcp_progress(message: str, progress: Optional[float] = None, total
     }
     send_response(log_notif)
 
-    # 2. MCP progress notification if token is set
     if _CURRENT_PROGRESS_TOKEN is not None:
         p_params = {
             "progressToken": _CURRENT_PROGRESS_TOKEN,
@@ -95,7 +98,6 @@ def broadcast_mcp_progress(message: str, progress: Optional[float] = None, total
             "params": p_params
         })
 
-    # 3. Broadcast to SSE clients
     if _SSE_CLIENTS:
         for q in list(_SSE_CLIENTS.values()):
             try:
@@ -103,8 +105,10 @@ def broadcast_mcp_progress(message: str, progress: Optional[float] = None, total
             except Exception:
                 pass
 
+
 comfy_client.set_global_progress_callback(broadcast_mcp_progress)
 image_engine.set_global_progress_callback(broadcast_mcp_progress)
+
 
 @contextlib.contextmanager
 def redirect_stdout_to_stderr():
@@ -115,20 +119,18 @@ def redirect_stdout_to_stderr():
     finally:
         sys.stdout = old
 
+
 # ---------------------------------------------------------------------------
 # Tool Handlers
 # ---------------------------------------------------------------------------
 
 def tool_comfy_flux_txt2img(args: dict) -> dict:
     reload_core_modules()
-    prompt = args.get("prompt", "")
-    if not prompt:
-        return {"error": "Prompt is required"}
-
+    prompt = args["prompt"]
     model_type = args.get("model_type", "flux1_dev")
     width = int(args.get("width", 1024))
     height = int(args.get("height", 1024))
-    steps = int(args.get("steps")) if args.get("steps") else None
+    steps = int(args["steps"]) if args.get("steps") is not None else None
     guidance = float(args.get("guidance", 3.5))
     seed = int(args.get("seed", -1))
     lora_name = args.get("lora_name")
@@ -162,12 +164,10 @@ def tool_comfy_flux_txt2img(args: dict) -> dict:
 
     return {"content": content, "file_path": path}
 
+
 def tool_sd_txt2img(args: dict) -> dict:
     reload_core_modules()
-    prompt = args.get("prompt", "")
-    if not prompt:
-        return {"error": "Prompt is required"}
-
+    prompt = args["prompt"]
     negative_prompt = args.get("negative_prompt", "ugly, deformed, low quality, bad anatomy")
     steps = int(args.get("steps", 30))
     cfg_scale = float(args.get("cfg_scale", 7.0))
@@ -176,7 +176,6 @@ def tool_sd_txt2img(args: dict) -> dict:
     seed = int(args.get("seed", -1))
     sampler_name = args.get("sampler_name")
     model_name = args.get("model_name")
-    highres_fix = bool(args.get("highres_fix", True))
 
     ok, path, b64, meta = image_engine.generate_a1111_image(
         prompt=prompt,
@@ -187,8 +186,7 @@ def tool_sd_txt2img(args: dict) -> dict:
         width=width,
         height=height,
         seed=seed,
-        sampler_name=sampler_name,
-        highres_fix=highres_fix
+        sampler_name=sampler_name
     )
     if not ok:
         return {"error": meta.get("error", "A1111 generation failed")}
@@ -209,6 +207,7 @@ def tool_sd_txt2img(args: dict) -> dict:
 
     return {"content": content, "file_path": path}
 
+
 def tool_sd_get_models(args: dict) -> dict:
     try:
         models = a1111_client.get_models()
@@ -219,14 +218,14 @@ def tool_sd_get_models(args: dict) -> dict:
     except Exception as ex:
         return {"error": f"Failed to get models: {ex}"}
 
+
 def tool_sd_set_model(args: dict) -> dict:
-    model_name = args.get("model_name")
-    if not model_name:
-        return {"error": "model_name is required"}
+    model_name = args["model_name"]
     ok = a1111_client.set_model(model_name)
     if ok:
         return {"content": [{"type": "text", "text": f"Successfully set model to: {model_name}"}]}
     return {"error": f"Failed to set model to: {model_name}"}
+
 
 def tool_sd_get_loras(args: dict) -> dict:
     try:
@@ -236,64 +235,32 @@ def tool_sd_get_loras(args: dict) -> dict:
     except Exception as ex:
         return {"error": f"Failed to get LoRAs: {ex}"}
 
+
 TOOLS_SPEC = [
     {
         "name": "comfy_flux_txt2img",
         "description": "Generate high-quality images via FLUX.1 Dev or FLUX.2 Klein in ComfyUI.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "prompt": {"type": "string", "description": "Visual descriptive prompt for FLUX"},
-                "model_type": {"type": "string", "enum": ["flux1_dev", "flux2"], "description": "FLUX model version: 'flux1_dev' or 'flux2'"},
-                "width": {"type": "integer", "description": "Width (multiple of 16, default 1024)"},
-                "height": {"type": "integer", "description": "Height (multiple of 16, default 1024)"},
-                "steps": {"type": "integer", "description": "Steps (default: 28 for flux1, 30 for flux2)"},
-                "guidance": {"type": "number", "description": "Guidance scale (default: 3.5)"},
-                "seed": {"type": "integer", "description": "Seed (-1 for random)"},
-                "lora_name": {"type": "string", "description": "Compatible LoRA filename"},
-                "lora_strength": {"type": "number", "description": "LoRA strength (default: 0.8)"}
-            },
-            "required": ["prompt"]
-        }
+        "inputSchema": schema_validator.get_mcp_tool_schema("comfy_flux_txt2img")
     },
     {
         "name": "sd_txt2img",
         "description": "Generate images via Automatic1111 WebUI (SDXL, Pony, Illustrious, SD 1.5).",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "prompt": {"type": "string", "description": "Positive prompt"},
-                "negative_prompt": {"type": "string", "description": "Negative prompt"},
-                "steps": {"type": "integer", "description": "Sampling steps (default: 30)"},
-                "cfg_scale": {"type": "number", "description": "CFG Scale (default: 7.0)"},
-                "width": {"type": "integer", "description": "Width (default: 832)"},
-                "height": {"type": "integer", "description": "Height (default: 480)"},
-                "seed": {"type": "integer", "description": "Seed (-1 for random)"},
-                "sampler_name": {"type": "string", "description": "Sampler name"}
-            },
-            "required": ["prompt"]
-        }
+        "inputSchema": schema_validator.get_mcp_tool_schema("sd_txt2img")
     },
     {
         "name": "sd_get_models",
         "description": "List available checkpoint models in Automatic1111 WebUI.",
-        "inputSchema": {"type": "object", "properties": {}}
+        "inputSchema": schema_validator.get_mcp_tool_schema("sd_get_models")
     },
     {
         "name": "sd_set_model",
         "description": "Switch active checkpoint model in Automatic1111.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "model_name": {"type": "string", "description": "Model title/filename to activate"}
-            },
-            "required": ["model_name"]
-        }
+        "inputSchema": schema_validator.get_mcp_tool_schema("sd_set_model")
     },
     {
         "name": "sd_get_loras",
         "description": "List registered LoRAs in Automatic1111.",
-        "inputSchema": {"type": "object", "properties": {}}
+        "inputSchema": schema_validator.get_mcp_tool_schema("sd_get_loras")
     }
 ]
 
@@ -304,6 +271,7 @@ TOOL_HANDLERS = {
     "sd_set_model": tool_sd_set_model,
     "sd_get_loras": tool_sd_get_loras
 }
+
 
 def handle_jsonrpc(req: dict) -> Optional[dict]:
     global _CURRENT_PROGRESS_TOKEN
@@ -329,13 +297,14 @@ def handle_jsonrpc(req: dict) -> Optional[dict]:
         return {"jsonrpc": "2.0", "id": msg_id, "result": {"tools": TOOLS_SPEC}}
     elif method == "tools/call":
         tool_name = params.get("name")
-        tool_args = params.get("arguments", {})
+        tool_args = params.get("arguments") or {}
         _CURRENT_PROGRESS_TOKEN = params.get("_meta", {}).get("progressToken")
         handler = TOOL_HANDLERS.get(tool_name)
         if not handler:
             return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": f"Unknown tool: '{tool_name}'"}}
 
         try:
+            schema_validator.validate_mcp_args(tool_name, tool_args)
             with redirect_stdout_to_stderr():
                 res = handler(tool_args)
             if "error" in res and "content" not in res:
@@ -357,10 +326,12 @@ def handle_jsonrpc(req: dict) -> Optional[dict]:
             return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": f"Method '{method}' not implemented"}}
         return None
 
+
 # ---------------------------------------------------------------------------
 # SSE HTTP Server (Open-WebUI / Network clients)
 # ---------------------------------------------------------------------------
 _SSE_CLIENTS = {}
+
 
 class ImageSseHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -458,6 +429,7 @@ class ImageSseHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404, "Not Found")
 
+
 def run_sse_server(host: str = "0.0.0.0", port: int = 7865):
     server = ThreadingHTTPServer((host, port), ImageSseHandler)
     log(f"Image MCP SSE Server listening on http://{host}:{port}/sse")
@@ -467,6 +439,7 @@ def run_sse_server(host: str = "0.0.0.0", port: int = 7865):
         server.serve_forever()
     except KeyboardInterrupt:
         server.server_close()
+
 
 def run_stdio_server():
     log("Starting Image MCP Server over stdio...")
@@ -488,8 +461,9 @@ def run_stdio_server():
         if resp is not None:
             send_response(resp)
 
+
 def run_cli_test():
-    print(f"Testing Image MCP Server...")
+    print("Testing Image MCP Server...")
     print(f"ComfyUI URL: {config.COMFY_URL}")
     print(f"A1111 URL: {config.SD_WEBUI_URL}")
     try:
@@ -503,6 +477,7 @@ def run_cli_test():
     except Exception as e:
         print(f"[WARN] ComfyUI connection: {e}")
     print("\nImage MCP Server is ready.")
+
 
 if __name__ == "__main__":
     if "--test" in sys.argv:

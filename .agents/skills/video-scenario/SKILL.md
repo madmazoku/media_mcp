@@ -3,123 +3,85 @@ name: video-scenario
 description: >-
   Руководство и алгоритм создания многосценарных видеороликов через media_mcp (Wan 2.2 / LTX-2.3 22B / ComfyUI / FFmpeg).
   Поддерживает иерархическую структуру "Сцена -> Блоки", гибридный опорный кадр (готовый файл или промпт),
-  истинное латентное кондиционирование (Latent-Chaining), первоклассный negative_prompt и мгновенную сборку Stream Copy (-c copy).
+  истинное латентное кондиционирование (Latent-Chaining), строгую валидацию JSON Schema (schemas/*.json) и мгновенную сборку Stream Copy (-c copy).
 ---
 
-# Скилл генерации видео по сценариям (media_mcp 2.1)
+# Скилл генерации видео по сценариям (media_mcp)
 
 ## 1. Архитектура: Сцены, Блоки и Latent-Chaining
 
-Видео строится по кинематографической структуре **Монтажная сцена (Scene) -> Непрерывные блоки движения (Blocks)**:
+Видео строится по кинематографической структуре **Монтажная сцена (`scenes`) -> Непрерывные блоки движения (`blocks`)** и строго валидируется по [`G:/Git/media_mcp/schemas/scenario.json`](file:///G:/Git/media_mcp/schemas/scenario.json):
 
-- **Сцена (Scene):** непрерывный съёмочный план в одной локации/ракурсе.
+- **Сцена (`scene`):** непрерывный съёмочный план в одной локации/ракурсе.
   - Начинается с **Опорного кадра (`anchor_image`)**.
   - Опорный кадр задаёт визуальную эстетику, анатомию, одежду, свет и композицию сцены.
 - **Блоки сцены (`blocks`):**
   - Описывают динамику, физику и траекторию камеры (`motion_prompt`).
-  - **True Forced Prefix Conditioning:** хвост предыдущего блока передаётся в следующий как многокадровый префикс (17 кадров при 16 fps = 1.0 сек) через нативный `WanImageToVideo` (`start_image`), маскирующий 100% префиксных кадров как conditioned (`mask = 0.0`). Никаких поломок масок, размазывания контуров и паразитных «червяков»!
-  - **Чистовая основа (`block_core`):** для промежуточных блоков ComfyUI сразу сохраняет чистый кусок `[0 .. core_frames]` через нативную ноду `ImageFromBatch`. Никакого резания через FFmpeg!
-  - **Мгновенная сборка фильма:** все блоки и сцены соединяются через `ffmpeg -f concat -c copy` за 0.05 сек с **нулевым перекодированием (0% потерь качества)**.
-- **Смена сцены:**
-  - Переход к новой сцене создаёт классическую **монтажную склейку (Hard Cut)** с новым опорным кадром.
+  - **1-Frame I2V Chaining (`overlap: 0.0`, по умолчанию):** последний кадр предыдущего блока (`-tail.png`) передаётся стартовым кадром в следующий блок, а дублирующий первый кадр отрезается через `ImageFromBatch`.
+  - **True Latent-Chaining (`overlap > 0`):** хвост предыдущего блока (`-tail.latent`) длительностью `overlap` вырезается через `LatentCut` и передаётся в следующий блок как префикс (`prefix_duration`). Следующий блок диффундирует суммарное окно `prefix_duration + clip_duration`, после чего `ImageFromBatch` отсекает префикс и сохраняет полную длительность `clip_duration` в `{block_prefix}-core.mp4`.
+  - **Мгновенная сборка фильма:** все блоки всех сцен соединяются напрямую через `ffmpeg -f concat -c copy` с **нулевым перекодированием (0% потерь качества)**.
 
 ---
 
-## 2. Разделение движков: `video_engine` и `image_engine`
+## 2. Строгие идентификаторы движков (`engine`) и условная JSON Schema
 
-Движки разделены строго по назначению:
+Все схемы находятся в `G:/Git/media_mcp/schemas/` (`additionalProperties: false`). Любые легаси-алиасы (`image_engine`, `video_engine`, `cfg_scale`, `sampler_name`, `output_name`, `start_image` внутри `anchor_image`, `prompt` вместо `motion_prompt` внутри `block`) запрещены и отклоняются валидатором.
 
-### Видео-движок (`video_engine`):
-- **`wan-fast` (Wan 2.2 14B Fast, дефолт)** — скоростной режим генерации по умолчанию (4-step LoRA, CFG 1.0). Обеспечивает мгновенный сэмплинг, высокую отзывчивость и чистую динамику сцен.
-- **`wan` / `wan-full` (Wan 2.2 14B Full)** — для глубокого кинематографического сэмплинга, аниме, тонких деталей лица и волос (полный сэмплинг, 20 шагов, CFG 5.0, шаг VAE: 4 кадра, $4k+1$). Нативно удерживает персонажа и окружение даже при `overlap: 0.0`.
-- **`ltx` (LTX-2.3 22B)** — для масштабных динамичных действий, экшена и магии (шаг VAE: 8 кадров, $8k+1$):
-  - **Базовая модель (дефолт):** `ltx-2.3-22b-dev-fp8.safetensors` с официальной Distilled LoRA 1.1 (`lora_strength: 1.0`, CFG 3.0, 20 шагов). Идеально держит анатомию рук, лица и геометрию.
-  - **Файн-тюны / NSFW:** `sulphur_dev_bf16_model.safetensors`. При использовании файн-тюнов рекомендуется отключать distilled LoRA (`"lora_strength": 0.0`) и снижать CFG до 2.0-2.2, чтобы избежать пережога и деформации конечностей.
-  - **Правило Overlap для LTX:** при сохранении ракурса и линейном движении камеры подходит `overlap: 0.0` (1-frame chaining). При смене ракурса (облёт камеры вокруг персонажа, поворот на 90° в профиль или вид со спины) **обязательно использовать `overlap: 0.5 - 1.0`** (Latent-Chaining). Без латентного импульса LTX на одиночном 2D-кадре не может физически развернуть сцену из статики и через ~1 секунду срывается в жесткую монтажную склейку (hard cut).
+### Видео-движки (`video.engine`, `scenes[].engine`, `blocks[].engine`):
+- **`"wan-fast"` (Wan 2.2 14B Fast, дефолт)** — 4-step Lightx2v LoRA, CFG 1.0, шаг VAE: 4 кадра ($4k+1$).
+- **`"wan"` (Wan 2.2 14B Full)** — полный 20-шаговый сэмплинг UNet High/Low Noise, CFG 3.5–5.0, шаг VAE: 4 кадра ($4k+1$).
+  - *Условные ограничения схемы для `"wan-fast"` / `"wan"`:* запрещены LTX-специфичные поля `lora_name`, `lora_strength`, `weight_dtype`.
+- **`"ltx"` (LTX-2.3 22B)** — 20 шагов, CFG 3.0, Distilled LoRA 1.1, шаг VAE: 8 кадров ($8k+1$), `width` и `height` строго кратны **32**.
+  - *Условные ограничения схемы для `"ltx"`:* запрещены Wan-специфичные поля `checkpoint_low`, `ramp_latents`, `min_cfg`.
 
-### Графический движок опорного кадра (`image_engine`):
-- **`comfy_flux` (ComfyUI FLUX)** — FLUX 1 Dev / FLUX 2 Klein для кинематографического CG и аниме Visual Novel с тонким лайн-артом.
-- **`a1111` (Automatic1111 WebUI)** — единый транспорт для всех моделей SDXL / SD 1.5. Модели вроде Pony, Animagine, Juggernaut — это обычные чекпоинты SDXL, работающие через единый A1111 API без искусственного разделения архитектур.
-
----
-
-## 3. Negative Prompt первого класса
-
-- Параметр `"negative_prompt"` доступен на всех уровнях:
-  - В корне сценария (`"default_negative_prompt"`)
-  - В сцене (`"negative_prompt"`)
-  - В отдельном блоке (`"negative_prompt"`)
-  - В туле `video_generate_block`
-- Любой хардкод китайских строк затухания полностью удалён.
-- Искусственный Anchor Color-Lock отменён: свет и цвет свободно подчиняются промпту (каст заклинаний, *Lumos*, вспышки, закаты, вход в темные туннели).
+### Фото-движки опорного кадра (`image.engine`, `anchor_image.engine`):
+- **`"sdxl"` (Automatic1111 WebUI, дефолт)** — SDXL / Pony / Illustrious (`cfg`, `sampler`, `negative_prompt`).
+- **`"flux1"` (ComfyUI FLUX.1 Dev)** — поддерживает `guidance`, `lora`, `lora_strength`. Запрещены `negative_prompt`, `sampler`.
+- **`"flux2"` (ComfyUI FLUX.2 Klein)** — поддерживает `guidance`. Запрещены `lora` (несовместимость размерностей тензоров с FLUX.1), `negative_prompt`, `sampler`.
 
 ---
 
-## 4. Гибридный опорный кадр (`anchor_image`)
+## 3. Законы таймингов и слияния блоков внутри одной сцены (монтажа)
 
-Поддерживаются два режима:
+При слиянии блоков внутри одной сцены для каждого блока $i$ действуют два строгих математических условия:
+- Пусть $\text{clip\_duration} = \text{blocks}[i].\text{duration}$.
+- Пусть $\text{prefix\_duration} = \text{blocks}[i-1].\text{overlap}$ при $i > 0$ (и $0.0$ для первого блока сцены $i = 0$).
+- Пусть $\text{overlap\_duration} = \text{blocks}[i].\text{overlap}$ при $i < N - 1$ (и $0.0$ для последнего блока сцены).
+- Пусть $\text{max\_duration} = \text{video.max\_duration}$ (по умолчанию `10.0` сек из `config.json`).
 
-1. **Режим готового файла (Human-in-the-loop / Арт-директор):**
-   ```json
-   "anchor_image": {
-     "image_path": "G:/Git/Gemini/media_mcp/images/character_frame.png"
-   }
-   ```
-   Если вы или пользователь уже сгенерировали изображение через `image_mcp` (или загрузили файл), пайплайн сразу берёт его за основу.
+Обязательные условия валидации:
+1. **Хвост перекрытия строго меньше длительности клипа:**
+   $$\text{overlap\_duration} < \text{clip\_duration}$$
+2. **Суммарное окно диффузии блока строго меньше максимальной длительности (`max_duration`):**
+   $$\text{prefix\_duration} + \text{clip\_duration} < \text{max\_duration}$$
 
-2. **Режим автоматической генерации (Autonomous):**
-   ```json
-   "anchor_image": {
-     "prompt": "Cinematic visual novel CG, 1girl, young Hermione Granger, bushy wavy brown hair, warm brown eyes, Hogwarts school uniform with pleated skirt and Gryffindor tie, inside cozy vintage train compartment, soft golden afternoon sunlight streaming in, Makoto Shinkai and Kyoto Animation aesthetic",
-     "model": "flux1_dev",
-     "guidance": 3.5,
-     "steps": 28
-   }
-   ```
-   - **SDXL / Pony High-Res Fix:** Если опорный кадр генерируется через A1111, движок автоматически применяет High-Res Fix с качественным даунскейлом Lanczos.
-   - **FLUX 1 Dev / ComfyUI:** Обеспечивает эталонную аниме visual novel стилистику с чистым лайн-артом.
+Поскольку префикс $\text{prefix\_duration}$ добавляется к генерации и затем отсекается через `ImageFromBatch`, каждый блок отдаёт в итоговый монтаж полную длительность $\text{clip\_duration}$, а суммарная длительность сцены равна $\sum \text{clip\_duration}$.
 
 ---
 
-## 5. Режим склейки блоков и нахлёст (`overlap: 0.0` по умолчанию)
-
-- **По умолчанию `overlap: 0.0` (1-frame chaining по чистому последнему кадру/хвосту)**:
-  - Основной и рекомендуемый режим по умолчанию для всех блоков сцены.
-  - При `overlap: 0.0` нахлёст не расходует хронометраж видео, а переход между блоками происходит чисто и бесшовно через передачу последнего кадра в качестве опорного (нативно для Wan 2.2 и линейного LTX-2.3).
-- **Режим Latent-Chaining (`overlap > 0`, например 0.5–1.0 сек)**:
-  - Требуется при сложных поворотах камеры в LTX-2.3 (облёт персонажа на 90°–180°, переход от фронтального ракурса к виду со спины) для передачи угловой скорости и физического вектора движения.
-  - **Требование к непересекающимся нахлёстам ($2 \times \text{overlap} < \text{duration}$):**
-    Для любого промежуточного блока $k$, имеющего одновременно входящий стык от блока $k-1$ ($\text{overlap}_{in}$) и исходящий стык к блоку $k+1$ ($\text{overlap}_{out}$), строго обязательно:
-    $$\text{overlap}_{in} + \text{overlap}_{out} < \text{duration} \quad (\text{при равных нахлёстах: } 2 \times \text{overlap} < \text{duration})$$
-    - Если это условие нарушено, зоны переходов перекрывают друг друга, «съедая» уникальное тело блока и вызывая временные петли и скачки кадров.
-    - Валидатор `video_validate_scenario` и пайплайн автоматически блокируют запуск с ошибкой, если на промежуточном блоке $2 \times \text{overlap} \ge \text{duration}$.
-
----
-
-## 6. Разделение промптов: Внешность vs Движение
-
-- **В `anchor_image.prompt`** пишите, **КАК ЭТО ВЫГЛЯДИТ**:
-  - Стиль, внешность персонажа, одежда, черты лица, освещение, объектив, окружение.
-  - Избегайте глаголов длинного движения.
-- **В `blocks[].motion_prompt`** пишите, **ЧТО ПРОИСХОДИТ**:
-  - Глаголы действий, жесты, поворот головы, эмоции, траектория камеры (pan, orbit, zoom in).
-  - Не повторяйте описание внешности, модель уже видит её в опорном кадре.
-
----
-
-## 7. Пример структуры сценария
+## 4. Пример валидного сценария (`scenario.json`)
 
 ```json
 {
-  "engine": "wan-fast",
-  "default_negative_prompt": "blurry, low quality, jitter, static, deformed, extra limbs, bad anatomy, text, watermark",
+  "name": "Hermione Train Compartment",
+  "image": {
+    "engine": "sdxl",
+    "cfg": 5.5,
+    "steps": 30
+  },
+  "video": {
+    "engine": "wan-fast",
+    "width": 832,
+    "height": 480,
+    "fps": 16,
+    "max_duration": 10.0,
+    "negative_prompt": "blurry, low quality, jitter, static, deformed, extra limbs, bad anatomy, text, watermark"
+  },
   "scenes": [
     {
       "scene_name": "Сцена 1: Купе поезда",
       "anchor_image": {
-        "prompt": "Cinematic visual novel CG, 1girl, young Hermione Granger, bushy wavy brown hair, warm brown eyes, Hogwarts school uniform with pleated skirt and Gryffindor tie, inside cozy vintage train compartment, soft golden afternoon sunlight streaming in, Makoto Shinkai and Kyoto Animation aesthetic",
-        "guidance": 3.5,
-        "steps": 28
+        "prompt": "score_9, score_8_up, score_7_up, 1girl, young Hermione Granger, bushy wavy brown hair, warm brown eyes, Hogwarts school uniform, inside cozy vintage train compartment, soft golden afternoon sunlight"
       },
       "blocks": [
         {
@@ -142,111 +104,64 @@ description: >-
 
 ---
 
-## 8. Спецификация MCP-инструментов (API Reference)
+## 5. Спецификация MCP-инструментов (API Reference)
 
-Агент обязан использовать данное описание как **единственный источник правды** для вызова MCP-инструментов. Категорически запрещено читать исходный код сервера для выяснения аргументов или схем.
+Все MCP-запросы валидируются по схемам в `G:/Git/media_mcp/schemas/mcp_*.json`.
 
-### `video_run_scenario`
-Запуск генерации видео по сценарию (JSON-файлу или объекту данных) с поддержкой True Latent-Chaining и сборки Stream Copy.
-
-| Аргумент | Тип | По умолчанию | Описание |
-|---|---|---|---|
-| `scenario_path` | `string` | `null` | Путь к JSON-файлу сценария (ищется в `workflows/`, `temp/` или по абсолютному пути). |
-| `scenario_data` / `scenes` | `array` \| `object` | `null` | Данные сценария напрямую в вызове (массив сцен). |
-| `video_engine` | `string` (`"wan-fast"`, `"wan"`, `"ltx"`) | `"wan-fast"` | Видео-движок: `"wan-fast"` (Wan 2.2 14B 4-step LoRA, дефолт), `"wan"` (Wan 2.2 14B Full 20-step) или `"ltx"` (LTX-2.3 22B). |
-| `image_engine` | `string` (`"sdxl"`, `"flux1"`, `"flux2"`, `"comfy_flux"`, `"a1111"`) | `"auto"` | Графический движок опорного кадра: `"sdxl"` (Automatic1111 SDXL/Pony), `"flux1"` (ComfyUI FLUX 1 Dev), `"flux2"` (ComfyUI FLUX 2 Klein). |
-| `image_model` | `string` | `null` | Опциональное переопределение конкретного чекпоинта (например, если в A1111 нужен специфический `.safetensors`). При обычном использовании не требуется — `image_engine` автоматически выбирает активную/дефолтную модель. |
-| `negative_prompt` | `string` | `null` | Глобальный дефолтный негативный промпт для всех блоков сценария. |
-| `start_image` | `string` | `null` | Опциональный путь к готовому опорному кадру для первой сцены. |
-| `output_name` | `string` | `null` | Имя итогового видео (например, `"hermione_clip"` -> `{timestamp}_{hash}_hermione_clip.mp4`). Если указано, суффикс `_final` НЕ добавляется! |
-| `width` | `integer` | `832` | Ширина видео (кратно 16 для Wan, 32 для LTX). |
-| `height` | `integer` | `480` | Высота видео. |
-| `fps` | `integer` | `16` (wan) / `24` (ltx) | Частота кадров. |
-| `enable_hud` | `boolean` | `false` | Сгенерировать отладочную версию видео с HUD-таймлайном блоков. |
-
-**Результат вызова:**
-* Текстовая сводка: путь к итоговому файлу (`{timestamp}_{hash}_{output_name}.mp4`), хронометраж, разрешение.
-* MCP Image: постер первого кадра в base64 (автоматически кэшируется клиентом).
-
----
-
-### `video_validate_scenario`
-Валидация сценария перед запуском. Проверяет корректность структуры, наличие опорных кадров, промптов и строгое соблюдение условия `prefix_length + tail_length < clip_duration`.
+### `video_run_scenario` (`mcp_video_run_scenario.json`)
+Запуск генерации видео по сценарию. Требуется ровно один из параметров: `scenario_path` или `scenario_data`.
 
 | Аргумент | Тип | По умолчанию | Описание |
 |---|---|---|---|
-| `scenario_path` | `string` | `null` | Путь к JSON-файлу сценария. |
-| `scenario_data` | `array` \| `object` | `null` | Данные сценария напрямую. |
+| `scenario_path` | `string` | — | Путь к JSON-файлу сценария (взаимоисключающий с `scenario_data`). |
+| `scenario_data` | `object` | — | Объект сценария по `scenario.json` (взаимоисключающий с `scenario_path`). |
+| `image` | `object` | — | Глобальные переопределения секции `image` (`engine`, `model`, `checkpoint`, `prompt`, `negative_prompt`, `width`, `height`, `steps`, `cfg`, `guidance`, `sampler`, `seed`, `lora`, `lora_strength`). |
+| `video` | `object` | — | Глобальные переопределения секции `video` (`engine`, `model`, `checkpoint`, `checkpoint_low`, `prompt`, `negative_prompt`, `width`, `height`, `fps`, `max_duration`, `steps`, `cfg`, `seed`, `lora_name`, `lora_strength`, `weight_dtype`, `ramp_latents`, `min_cfg`). |
+| `enable_hud` | `boolean` | `false` | Сгенерировать отладочное видео `{run_prefix}-hud.mp4` с таймлайном блоков. |
 
-**Результат вызова:**
-Отчёт о валидации со статусом `VALID [OK]` или `INVALID [ERROR]`, расчётом суммарной длительности и списком сцен.
+### `video_validate_scenario` (`mcp_video_validate_scenario.json`)
+Предварительная валидация сценария по `scenario.json`, проверка существования файлов `anchor_image.image_path` и проверка условий `overlap_duration < clip_duration` и `prefix_duration + clip_duration < max_duration`.
 
----
+| Аргумент | Тип | Описание |
+|---|---|---|
+| `scenario_path` | `string` | Путь к JSON-файлу сценария. |
+| `scenario_data` | `object` | Объект сценария по `scenario.json`. |
 
-### `video_generate_block`
-Генерация одиночного блока движения (одного видеосегмента).
+### `video_generate_block` (`mcp_video_generate_block.json`)
+Генерация одиночного видеосегмента. Обязательны `prompt` и хотя бы один из `start_image` / `prefix_latent`.
 
 | Аргумент | Тип | Обязательный | Описание |
 |---|---|---|---|
 | `prompt` | `string` | **Да** | Промпт движения и камеры. |
-| `engine` | `string` (`"wan-fast"`, `"wan"`, `"ltx"`) | Нет (`"wan-fast"`) | Движок видео: `"wan-fast"` (по умолчанию), `"wan"`, `"ltx"`. |
+| `engine` | `"wan-fast"` \| `"wan"` \| `"ltx"` | Нет (`"wan-fast"`) | Видео-движок. |
+| `start_image` | `string` | Да (или `prefix_latent`) | Путь к стартовому изображению. |
+| `prefix_latent` | `string` | Да (или `start_image`) | Путь к `.latent` safetensors файлу. |
 | `negative_prompt` | `string` | Нет | Негативный промпт. |
-| `duration` | `number` | Нет (`5.0`) | Длительность блока в секундах. |
-| `start_image` | `string` | Нет | Путь к начальному кадру (изображению). |
-| `end_image` | `string` | Нет | Путь к конечному кадру (только для Wan 2.2). |
-| `prefix_latent` | `string` | Нет | Путь к `.latent` safetensors для True Latent-Chaining. |
-| `width` | `integer` | Нет (`832`) | Ширина. |
-| `height` | `integer` | Нет (`480`) | Высота. |
-| `fps` | `integer` | Нет (`16`/`24`) | FPS. |
-| `output_name` | `string` | Нет | Имя выходного файла. |
+| `duration` | `number` | Нет (`5.0`) | Длительность блока в секундах (`0 < duration <= 10.0`). |
+| `width` | `integer` | Нет (`832`) | Ширина (кратно 16 для Wan, кратно 32 для LTX). |
+| `height` | `integer` | Нет (`480`) | Высота (кратно 16 для Wan, кратно 32 для LTX). |
+| `fps` | `integer` | Нет (`16` / `24`) | Частота кадров. |
+| `steps` | `integer` | Нет | Число шагов сэмплирования. |
+| `cfg` | `number` | Нет | CFG scale. |
+| `seed` | `integer` | Нет (`-1`) | Сид генерации. |
+
+### `media_get_status` и `media_interrupt` (`mcp_empty.json`)
+Не принимают аргументов (`{}`).
 
 ---
 
-### `media_get_status`
-Опрос текущего статуса пайплайна в реальном времени. Не требует аргументов (`{}`).
-Возвращает:
-* Статус Video Pipeline: активная сцена, блок, фаза генерации, время выполнения.
-* Статус ComfyUI: очередь задач, выполняемый prompt_id и node_id.
-* Статус Automatic1111: прогресс генерации в %, текущий шаг сэмплинга.
+## 6. Правила именования файлов и вывода в чат
 
----
-
-### `media_interrupt`
-Аварийная остановка текущей генерации. Не требует аргументов (`{}`).
-Прерывает выполнение пайплайна, шлёт сигналы отмены в ComfyUI и Automatic1111.
-
----
-
-## 9. Вывод результатов в чат (Постер + Ссылка)
-
-При вызове `video_run_scenario`:
-1. Сервер стримит heartbeat-уведомления каждые 5 секунд (`notifications/message` и `notifications/progress`).
-2. По завершении возвращает постер первого кадра в формате MCP `{"type": "image", "data": "..."}`.
-3. Antigravity автоматически кэширует его в локальный offload (`media_0.png`).
-4. **Всегда оформлять результат в чате как кликабельный постер:**
+1. **Строгий серверный шаблон имён файлов (без пользовательских имён):**
+   - Опорный кадр сцены: `{run_prefix}-s{scene_idx:03d}-anchor.png`
+   - Блок видео: `{run_prefix}-s{scene_idx:03d}-b{block_idx:03d}-core.mp4`
+   - Хвост блока: `-tail.latent` (при `overlap > 0`) или `-tail.png` (при `overlap == 0`)
+   - Финальное видео сценария: `{run_prefix}-final.mp4`, постер: `{run_prefix}-final.png`, HUD: `{run_prefix}-hud.mp4`
+   - Одиночный блок (`video_generate_block`): `{run_prefix}-{engine}.mp4`, постер: `{run_prefix}-{engine}.png`
+2. **Оформление в чате:**
    ```markdown
    [![Нажмите для просмотра](file:///C:/Users/.../media_0.png)](file:///G:/Git/Gemini/media_mcp/videos/filename.mp4)
 
    🎬 **[Смотреть видеоролик](file:///G:/Git/Gemini/media_mcp/videos/filename.mp4)**
    ```
-5. Если создавалась HUD-версия с таймерами (`enable_hud: true`), также указать ссылку на `_hud.mp4`.
-
----
-
-## 10. Правила для агентов (Обязательно к исполнению)
-
-1. **Запрет на самопроверку медиа:**
-   - Категорически запрещено вызывать `view_file` или любые средства анализа сгенерированных изображений или видео для самопроверки без явного запроса пользователя. Сразу отдавать результат в чат.
-2. **Строгий контракт сохранения файлов артефактов:**
-   - Шаблон имени файлов строго дефисный: `{timestamp}-{random}-s{%03d}-b{%03d}-{type}.{ext}`.
-   - В ходе генерации блоков сохраняются: `{block_prefix}-core.mp4`, а также `{block_prefix}-tail.latent` (при `overlap > 0`) или `{block_prefix}-tail.png` (при `overlap == 0` для 1-frame цепочки).
-   - Опорный кадр сцены сохраняется как `{run_prefix}-s{scene_idx:03d}-anchor.png`.
-   - Для последнего блока хвост не сохраняется.
-   - Все блоки всех сцен склеиваются напрямую в финальное видео в один шаг Stream Copy (`-c copy`) без промежуточных монтажей сцен.
-   - Имя итогового видео: `{run_prefix}-final.mp4` (или `{timestamp}-{random}-{output_name}.mp4`, если передан кастомный `output_name`). Постер: `{run_prefix}-final.png`.
-3. **Условие перекрытия:**
-   - Строго соблюдать условие `prefix_length + tail_length < clip_duration`.
-4. **Бесшовный монтаж:**
-   - Все блоки внутри сцены и между сценами склеиваются мгновенно через FFmpeg Stream Copy (`-c copy`) без перекодирования.
-5. **Дефолтные параметры генерации:**
-   - По умолчанию всегда использовать `"engine": "wan-fast"` и `"overlap": 0.0` для блоков, если сценарий явно не требует 20-шагового сэмплинга (`"wan"`) или сложного облёта камеры в LTX-2.3 (`"overlap": 0.5-1.0`).
+3. **Запрет на самопроверку медиа:** категорически запрещено вызывать `view_file` на сгенерированных изображениях или видео без явного запроса пользователя.

@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "config.json",
+  "title": "Media MCP Server Configuration",
+  "description": "Strict configuration schema for media_mcp (config.json).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "comfy_url": {
+      "type": "string",
+      "minLength": 1,
+      "description": "ComfyUI HTTP base URL (e.g. 'http://127.0.0.1:8188')"
+    },
+    "sd_webui_url": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Automatic1111 WebUI HTTP base URL (e.g. 'http://127.0.0.1:7860')"
+    },
+    "ffmpeg_bin": {
+      "type": "string",
+      "minLength": 1,
+      "description": "FFmpeg executable path or binary name"
+    },
+    "ffprobe_bin": {
+      "type": "string",
+      "minLength": 1,
+      "description": "FFprobe executable path or binary name"
+    },
+    "output_dir": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Root directory for generated media outputs"
+    },
+    "output_img_dir": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Directory for generated images and posters"
+    },
+    "output_vid_dir": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Directory for generated final videos"
+    },
+    "temp_dir": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Directory for intermediate block artifacts"
+    },
+    "workflows_dir": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Directory for scenario JSON files"
+    },
+    "comfy_input_dir": {
+      "type": "string",
+      "description": "Local filesystem path to ComfyUI/input directory"
+    },
+    "comfy_output_dir": {
+      "type": "string",
+      "description": "Local filesystem path to ComfyUI/output directory"
+    },
+    "image_mcp_port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "default": 7865,
+      "description": "SSE HTTP port for image_mcp server"
+    },
+    "video_mcp_port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "default": 7866,
+      "description": "SSE HTTP port for video_mcp server"
+    },
+    "max_video_duration": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "default": 10.0,
+      "description": "Maximum single-pass block diffusion duration (prefix_duration + clip_duration) in seconds"
+    }
+  }
+}
