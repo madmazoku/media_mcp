@@ -106,12 +106,26 @@
           }
         }
       }
+    },
+    "fit": {
+      "type": "string",
+      "enum": ["crop", "outpaint"],
+      "description": "Fitting strategy when overriding dimensions for an existing image_path: 'crop' center-crops to target dimensions, 'outpaint' pads canvas and inpaints new borders. Allowed only with image_path, width, and height."
     }
   },
   "allOf": [
     {
       "if": {
-        "required": ["image_path"]
+        "required": ["fit"]
+      },
+      "then": {
+        "required": ["image_path", "width", "height"]
+      }
+    },
+    {
+      "if": {
+        "required": ["image_path"],
+        "not": { "required": ["fit"] }
       },
       "then": {
         "not": {

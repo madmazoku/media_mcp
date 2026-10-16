@@ -217,6 +217,8 @@ class SdxlImageGenerator(BaseImageGenerator):
                 meta["denoise"] = float(request.denoise)
             if request.is_inpaint:
                 meta["mask_path"] = request.mask_path
+            if request.fit:
+                meta["fit"] = request.fit
 
             return GenerationResult(success=True, image_path=final_path, file_path=final_path, base64_data=raw_b64, metadata=meta)
         except Exception as ex:
@@ -365,6 +367,8 @@ class Flux1ImageGenerator(BaseImageGenerator):
             meta["denoise"] = float(request.denoise)
         if request.is_inpaint:
             meta["mask_path"] = request.mask_path
+        if request.fit:
+            meta["fit"] = request.fit
 
         return GenerationResult(success=True, image_path=final_path, file_path=final_path, base64_data=b64_data, metadata=meta)
 
@@ -505,5 +509,7 @@ class Flux2ImageGenerator(BaseImageGenerator):
             meta["denoise"] = float(request.denoise)
         if request.is_inpaint:
             meta["mask_path"] = request.mask_path
+        if request.fit:
+            meta["fit"] = request.fit
 
         return GenerationResult(success=True, image_path=final_path, file_path=final_path, base64_data=b64_data, metadata=meta)

@@ -839,6 +839,135 @@ class TestStreamlineArchitecture(unittest.TestCase):
                 self.assertEqual(graph2["1013"]["inputs"]["mask"], ["1012", 0])
                 self.assertEqual(graph2["1021"]["inputs"]["latent_image"], ["1013", 0])
 
+    def test_18_fit_crop_and_outpaint_modes(self):
+        """Verify fit modes ('crop', 'outpaint'), dimension rules, feathered masks, and AR bypass."""
+        from core import schema_validator, image_engine, video_pipeline
+        from PIL import Image
+        import numpy as np
+        import tempfile
+        from unittest.mock import patch
+
+        # 1. Schema validation rules for fit
+        # Fit requires image_path, width, height
+        spec_fit_no_img = {"prompt": "test", "fit": "crop", "width": 1024, "height": 1024}
+        with self.assertRaises(schema_validator.SchemaValidationError):
+            schema_validator.validate_image_spec(spec_fit_no_img)
+
+        # Fit requires width and height
+        spec_fit_no_dims = {"prompt": "test", "image_path": "a.png", "fit": "crop"}
+        with self.assertRaises(schema_validator.SchemaValidationError):
+            schema_validator.validate_image_spec(spec_fit_no_dims)
+
+        # Image_path without fit bans width/height
+        spec_img_manual_dims = {"prompt": "test", "image_path": "a.png", "width": 1024, "height": 1024}
+        with self.assertRaises(schema_validator.SchemaValidationError):
+            schema_validator.validate_image_spec(spec_img_manual_dims)
+
+        # Valid crop spec
+        spec_valid_crop = {"prompt": "test", "image_path": "a.png", "fit": "crop", "width": 1024, "height": 1024}
+        schema_validator.validate_image_spec(spec_valid_crop)
+
+        # Valid outpaint spec
+        spec_valid_outpaint = {"prompt": "test", "image_path": "a.png", "fit": "outpaint", "width": 1360, "height": 768}
+        schema_validator.validate_image_spec(spec_valid_outpaint)
+
+        # 2. fit='crop' execution
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src_16_9 = Path(tmp_dir) / "source_16_9.png"
+            Image.new("RGB", (1920, 1080), color=(120, 130, 140)).save(src_16_9)
+
+            with patch("core.image_engine.create_image_generator") as mock_gen_factory:
+                from core.generators.base import GenerationResult
+                mock_gen = mock_gen_factory.return_value
+                mock_gen.generate.return_value = GenerationResult(
+                    success=True,
+                    image_path=str(src_16_9),
+                    metadata={"width": 1024, "height": 1024}
+                )
+
+                ok, out_p, _, meta = image_engine.generate_image({
+                    "prompt": "crop test",
+                    "image_path": str(src_16_9),
+                    "fit": "crop",
+                    "width": 1024,
+                    "height": 1024
+                })
+                self.assertTrue(ok)
+                passed_req = mock_gen.generate.call_args[0][0]
+                self.assertEqual(passed_req.width, 1024)
+                self.assertEqual(passed_req.height, 1024)
+                self.assertEqual(passed_req.fit, "crop")
+                # Source image must be cropped to 1024x1024
+                with Image.open(passed_req.image_path) as c_im:
+                    self.assertEqual(c_im.size, (1024, 1024))
+
+        # 3. fit='outpaint' execution with auto-generated feathered mask
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src_square = Path(tmp_dir) / "source_1_1.png"
+            Image.new("RGB", (1000, 1000), color=(80, 90, 100)).save(src_square)
+
+            with patch("core.image_engine.create_image_generator") as mock_gen_factory:
+                mock_gen = mock_gen_factory.return_value
+                mock_gen.generate.return_value = GenerationResult(
+                    success=True,
+                    image_path=str(src_square),
+                    metadata={"width": 1360, "height": 768}
+                )
+
+                ok, _, _, meta = image_engine.generate_image({
+                    "prompt": "outpaint test",
+                    "image_path": str(src_square),
+                    "fit": "outpaint",
+                    "width": 1360,
+                    "height": 768
+                })
+                self.assertTrue(ok)
+                passed_req = mock_gen.generate.call_args[0][0]
+                self.assertEqual(passed_req.width, 1360)
+                self.assertEqual(passed_req.height, 768)
+                self.assertEqual(passed_req.fit, "outpaint")
+                self.assertTrue(passed_req.is_inpaint)
+                self.assertIsNotNone(passed_req.mask_path)
+
+                # Check padded image dimensions
+                with Image.open(passed_req.image_path) as p_im:
+                    self.assertEqual(p_im.size, (1360, 768))
+
+                # Check outpaint mask: dimensions, padding (255), center (0), and feathering
+                with Image.open(passed_req.mask_path) as m_im:
+                    self.assertEqual(m_im.size, (1360, 768))
+                    m_arr = np.array(m_im)
+                    # Outer left/right border must be 255 (new content)
+                    self.assertEqual(m_arr[384, 0], 255)
+                    self.assertEqual(m_arr[384, -1], 255)
+                    # Inner center must be 0 (preserved content)
+                    self.assertEqual(m_arr[384, 680], 0)
+                    # Transition values must exist due to Gaussian feathering
+                    unique_vals = set(m_arr.flatten())
+                    intermediate = [v for v in unique_vals if 20 < v < 235]
+                    self.assertTrue(len(intermediate) > 0, "Outpaint mask must have smooth feathered transitions")
+
+        # 4. Aspect ratio validation bypass when fit is specified
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src_mismatch = Path(tmp_dir) / "src_mismatch.png"
+            Image.new("RGB", (1000, 1000), color=(100, 100, 100)).save(src_mismatch)
+
+            # Scene without fit (1000x1000 vs 832x480) -> must report AR error
+            scenes_no_fit = [{
+                "scene_name": "Scene 1",
+                "anchor_image": {"image_path": str(src_mismatch)}
+            }]
+            errors = video_pipeline.collect_scenario_aspect_ratio_errors(scenes_no_fit, video_width=832, video_height=480)
+            self.assertEqual(len(errors), 1)
+
+            # Scene with fit='outpaint' -> must bypass AR error
+            scenes_with_fit = [{
+                "scene_name": "Scene 1",
+                "anchor_image": {"image_path": str(src_mismatch), "fit": "outpaint"}
+            }]
+            errors_bypassed = video_pipeline.collect_scenario_aspect_ratio_errors(scenes_with_fit, video_width=832, video_height=480)
+            self.assertEqual(len(errors_bypassed), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

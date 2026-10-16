@@ -96,6 +96,11 @@
           "type": "integer",
           "minimum": -1
         },
+        "fit": {
+          "type": "string",
+          "enum": ["crop", "outpaint"],
+          "description": "Fitting strategy when adapting anchor image_path to target scenario resolution ('crop' or 'outpaint')"
+        },
         "loras": {
           "type": "array",
           "items": {
@@ -226,6 +231,11 @@
               "type": "integer",
               "minimum": -1,
               "description": "Optional scene-specific random seed (-1 for randomized)"
+            },
+            "fit": {
+              "type": "string",
+              "enum": ["crop", "outpaint"],
+              "description": "Fitting strategy when adapting anchor image_path to target scenario resolution ('crop' or 'outpaint')"
             },
             "loras": {
               "type": "array",

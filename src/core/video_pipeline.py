@@ -220,7 +220,7 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
         else:
             anchor = dict(raw_anchor)
             anchor["engine"] = root_image_engine
-            for k in ("model", "width", "height", "steps", "cfg", "guidance", "sampler"):
+            for k in ("model", "width", "height", "steps", "cfg", "guidance", "sampler", "fit"):
                 if k in image_cfg:
                     anchor[k] = image_cfg[k]
             if "model" not in anchor and "checkpoint" in image_cfg:
@@ -348,6 +348,9 @@ def collect_scenario_aspect_ratio_errors(
     for s_idx, sc in enumerate(scenes):
         sc_name = sc.get("scene_name") or sc.get("name", f"Scene #{s_idx + 1}")
         anchor = sc.get("anchor_image", {})
+        # If fit is specified (e.g. crop or outpaint), image_engine adapts the aspect ratio automatically
+        if anchor.get("fit"):
+            continue
 
         # 1. Ready keyframe or img2img source image check
         img_ref = anchor.get("keyframe_path") or anchor.get("image_path")
