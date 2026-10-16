@@ -117,10 +117,10 @@ def wait_for_prompt(
             if prompt_id in history:
                 prompt_hist = history[prompt_id]
                 status = prompt_hist.get("status", {})
-                if status.get("completed", False) or "outputs" in prompt_hist:
-                    return True, prompt_hist
                 if status.get("status_str") == "error":
                     return False, {"error": status.get("messages", "ComfyUI reported execution error")}
+                if status.get("completed", False) or (prompt_hist.get("outputs") and len(prompt_hist["outputs"]) > 0):
+                    return True, prompt_hist
         except Exception:
             pass
         time.sleep(poll_interval)

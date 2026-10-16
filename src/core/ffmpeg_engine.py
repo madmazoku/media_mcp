@@ -7,6 +7,7 @@ FFmpeg processing engine for cutting, seamless concat, poster extraction, and HU
 import os
 import sys
 import time
+import shutil
 import base64
 import subprocess
 from typing import List, Tuple, Optional
@@ -51,28 +52,59 @@ def extract_tail_clip(video_path: str, tail_duration: float, out_clip_path: str)
         out_clip_path
     ]
     subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-    return out_clip_path
-
-def cut_duration(video_path: str, duration: float, out_path: str) -> str:
+def extract_last_frame(video_path: str, out_image_path: str) -> str:
+    """Extracts final frame of video as a pristine image file."""
     cmd = [
         FFMPEG_BIN,
         "-y",
-        "-t", str(duration),
+        "-sseof", "-0.1",
         "-i", video_path,
-        "-c:v", "h264_nvenc",
-        "-preset", "p7",
-        "-cq", "12",
-        "-pix_fmt", "yuv420p",
-        "-color_range", "tv",
-        "-colorspace", "bt709",
-        "-color_primaries", "bt709",
-        "-color_trc", "bt709",
-        out_path
+        "-update", "1",
+        "-frames:v", "1",
+        "-q:v", "2",
+        out_image_path
     ]
+    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    return out_image_path
+
+def cut_duration(video_path: str, duration: float, out_path: str, stream_copy: bool = True) -> str:
+    if stream_copy:
+        cmd = [
+            FFMPEG_BIN,
+            "-y",
+            "-ss", "0",
+            "-t", str(duration),
+            "-i", video_path,
+            "-c", "copy",
+            out_path
+        ]
+    else:
+        cmd = [
+            FFMPEG_BIN,
+            "-y",
+            "-t", str(duration),
+            "-i", video_path,
+            "-c:v", "h264_nvenc",
+            "-preset", "p7",
+            "-cq", "12",
+            "-pix_fmt", "yuv420p",
+            "-color_range", "tv",
+            "-colorspace", "bt709",
+            "-color_primaries", "bt709",
+            "-color_trc", "bt709",
+            out_path
+        ]
     subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
     return out_path
 
+
 def concat_videos(video_list: List[str], out_path: str, smooth_transitions: bool = False) -> str:
+    if not video_list:
+        return out_path
+    if len(video_list) == 1:
+        shutil.copy2(video_list[0], out_path)
+        return out_path
+
     concat_txt = os.path.join(TEMP_DIR, f"concat_{int(time.time()*1000)}.txt")
     with open(concat_txt, "w", encoding="utf-8") as f:
         for v in video_list:
@@ -80,7 +112,7 @@ def concat_videos(video_list: List[str], out_path: str, smooth_transitions: bool
 
     vf_filters = []
     if smooth_transitions and len(video_list) > 1:
-        # Stabilize luminance (Y) and temporal chroma (U/V) across prefix stitch points
+        # Stabilize luminance (Y) and temporal chroma (U/V) across stitch points if explicitly requested
         vf_filters.append("deflicker=mode=pm:size=7")
         vf_filters.append("tmidequalizer=radius=5:sigma=0.3")
 
@@ -92,15 +124,21 @@ def concat_videos(video_list: List[str], out_path: str, smooth_transitions: bool
         "-i", concat_txt
     ]
     if vf_filters:
-        cmd.extend(["-vf", ",".join(vf_filters)])
+        cmd.extend([
+            "-vf", ",".join(vf_filters),
+            "-c:v", "h264_nvenc",
+            "-preset", "p6",
+            "-cq", "18",
+            "-pix_fmt", "yuv420p",
+            out_path
+        ])
+    else:
+        # Lossless Stream Copy: zero re-encoding, 0% quality loss, instantaneous concat
+        cmd.extend([
+            "-c", "copy",
+            out_path
+        ])
 
-    cmd.extend([
-        "-c:v", "h264_nvenc",
-        "-preset", "p6",
-        "-cq", "18",
-        "-pix_fmt", "yuv420p",
-        out_path
-    ])
     subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
     try:
         os.remove(concat_txt)
@@ -178,3 +216,32 @@ def generate_hud_overlay(video_path: str, generated_blocks: List[Tuple[str, floa
     ]
     subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
     return out_hud_path
+
+def create_mask_video(
+    out_path: str,
+    total_frames: int,
+    locked_frames: int,
+    fps: int = 16,
+    width: int = 16,
+    height: int = 16
+) -> str:
+    """
+    Creates an exact total_frames mask video:
+    - First locked_frames are pure black (0.0).
+    - Remaining (total_frames - locked_frames) are pure white (1.0).
+    Fast generation via lavfi.
+    """
+    free_frames = max(0, total_frames - locked_frames)
+    cmd = [
+        FFMPEG_BIN, "-y",
+        "-f", "lavfi", "-i", f"color=black:s={width}x{height}:r={fps}",
+        "-f", "lavfi", "-i", f"color=white:s={width}x{height}:r={fps}",
+        "-filter_complex", f"[0:v]trim=start_frame=0:end_frame={locked_frames},setpts=PTS-STARTPTS[v0];[1:v]trim=start_frame=0:end_frame={free_frames},setpts=PTS-STARTPTS[v1];[v0][v1]concat=n=2:v=1[v]",
+        "-map", "[v]",
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        out_path
+    ]
+    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    return out_path
+

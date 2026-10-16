@@ -22,7 +22,29 @@ SRC_DIR = Path(__file__).resolve().parent.parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+import importlib
 from core import config, comfy_client, a1111_client, image_engine
+
+def reload_core_modules():
+    """
+    Dynamically reloads all loaded modules in sys.modules under 'core' in reverse dependency order,
+    ensuring all code changes take effect immediately without stale memory caches.
+    """
+    global config, comfy_client, a1111_client, image_engine
+    core_mods = [k for k in list(sys.modules.keys()) if k == "core" or k.startswith("core.")]
+    core_mods.sort(key=lambda s: s.count("."), reverse=True)
+    for mod_name in core_mods:
+        m = sys.modules.get(mod_name)
+        if m and hasattr(m, "__file__") and m.__file__:
+            try:
+                importlib.reload(m)
+            except Exception as e:
+                log(f"Warning: Failed to reload {mod_name}: {e}")
+    try:
+        from core import config as _c, comfy_client as _cm, a1111_client as _a, image_engine as _i
+        config, comfy_client, a1111_client, image_engine = _c, _cm, _a, _i
+    except Exception as e:
+        log(f"Warning: Failed to re-bind core modules: {e}")
 
 if hasattr(sys.stdin, "reconfigure"):
     try:
@@ -98,6 +120,7 @@ def redirect_stdout_to_stderr():
 # ---------------------------------------------------------------------------
 
 def tool_comfy_flux_txt2img(args: dict) -> dict:
+    reload_core_modules()
     prompt = args.get("prompt", "")
     if not prompt:
         return {"error": "Prompt is required"}
@@ -140,6 +163,7 @@ def tool_comfy_flux_txt2img(args: dict) -> dict:
     return {"content": content, "file_path": path}
 
 def tool_sd_txt2img(args: dict) -> dict:
+    reload_core_modules()
     prompt = args.get("prompt", "")
     if not prompt:
         return {"error": "Prompt is required"}
