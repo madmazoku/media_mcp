@@ -30,6 +30,16 @@ def log(msg: str):
     sys.stderr.flush()
 
 
+def get_temp_dir() -> Path:
+    """Returns configured TEMP_DIR if valid, or a standard safe system temporary directory."""
+    if config.TEMP_DIR and os.path.isdir(config.TEMP_DIR):
+        return Path(config.TEMP_DIR)
+    import tempfile
+    t = Path(tempfile.gettempdir()) / "media_mcp"
+    t.mkdir(parents=True, exist_ok=True)
+    return t
+
+
 def set_global_progress_callback(cb):
     set_image_progress_callback(cb)
 
@@ -139,8 +149,7 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
                 cur_w, cur_h = src_im.size
                 if cur_w != width or cur_h != height:
                     resized_im = src_im.convert("RGB").resize((width, height), Image.Resampling.LANCZOS)
-                    temp_dir = Path(config.TEMP_DIR)
-                    temp_dir.mkdir(parents=True, exist_ok=True)
+                    temp_dir = get_temp_dir()
                     norm_path = temp_dir / f"norm_{Path(source_img_path).stem}_{width}x{height}.png"
                     resized_im.save(norm_path, format="PNG")
                     source_img_path = str(norm_path.resolve())
@@ -150,6 +159,66 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
     elif denoise_val != 1.0:
         log(f"Notice: Normalizing denoise from {denoise_val} to 1.0 for pure txt2img generation.")
         denoise_val = 1.0
+
+    # inpainting mask resolution and preparation
+    prepared_mask_path = None
+    original_mask_path = None
+    if params.get("mask_path"):
+        if not source_img_path:
+            return False, None, None, {"error": "Parameter 'mask_path' requires 'image_path' to be provided."}
+        raw_mask = params["mask_path"]
+        p_mask = Path(raw_mask)
+        if not p_mask.is_file():
+            found_m = False
+            for parent_cand in [Path.cwd(), Path(config.OUTPUT_IMG_DIR), Path(config.WORKFLOWS_DIR), Path(config.REPO_DIR)]:
+                cand_m = parent_cand / raw_mask
+                if cand_m.is_file():
+                    p_mask = cand_m
+                    found_m = True
+                    break
+            if not found_m:
+                return False, None, None, {"error": f"Inpainting mask file not found on disk: {raw_mask}"}
+        original_mask_path = str(p_mask.resolve())
+
+        # Validate aspect ratio: |AR_mask - AR_src| / AR_src <= 0.01
+        try:
+            from PIL import Image
+            with Image.open(original_source_path) as s_im, Image.open(original_mask_path) as m_im:
+                s_w, s_h = s_im.size
+                m_w, m_h = m_im.size
+                ar_src = s_w / max(1, s_h)
+                ar_mask = m_w / max(1, m_h)
+                diff_pct = abs(ar_mask - ar_src) / ar_src
+                if diff_pct > 0.01:
+                    return False, None, None, {
+                        "error": (
+                            f"Aspect ratio mismatch between source image ({s_w}x{s_h}, AR {ar_src:.2f}) "
+                            f"and inpainting mask ({m_w}x{m_h}, AR {ar_mask:.2f}, difference {diff_pct * 100:.1f}% > 1.0%). "
+                            f"Mask aspect ratio must match source image aspect ratio."
+                        )
+                    }
+
+                # Synchronously scale and prepare mask to (width, height)
+                # Handle alpha channel if present
+                if m_im.mode in ("RGBA", "LA"):
+                    alpha = m_im.split()[-1]
+                    extrema = alpha.getextrema()
+                    if extrema[0] != extrema[1]:
+                        mask_l = alpha
+                    else:
+                        mask_l = m_im.convert("L")
+                else:
+                    mask_l = m_im.convert("L")
+
+                # Resize to (width, height) with Bilinear filtering, preserving continuous gradients (no hard binarization)
+                resized_mask = mask_l.resize((width, height), Image.Resampling.BILINEAR)
+                temp_dir = get_temp_dir()
+                norm_mask_path = temp_dir / f"norm_mask_{Path(original_mask_path).stem}_{width}x{height}.png"
+                resized_mask.save(norm_mask_path, format="PNG")
+                prepared_mask_path = str(norm_mask_path.resolve())
+                log(f"Prepared normalized inpainting mask at native {width}x{height}: {prepared_mask_path}")
+        except Exception as ex:
+            return False, None, None, {"error": f"Failed to prepare inpainting mask: {ex}"}
 
     try:
         generator = create_image_generator(engine_name, settings=params)
@@ -169,6 +238,7 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
         seed=seed,
         loras=loras,
         image_path=source_img_path,
+        mask_path=prepared_mask_path,
         denoise=denoise_val
     )
 
@@ -194,6 +264,8 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
     if original_source_path or source_img_path:
         resolved_spec["image_path"] = original_source_path or source_img_path
         resolved_spec["denoise"] = denoise_val
+    if original_mask_path:
+        resolved_spec["mask_path"] = original_mask_path
     if res.metadata.get("model") and "model" not in resolved_spec:
         resolved_spec["model"] = res.metadata["model"]
 

@@ -211,6 +211,11 @@
               "minLength": 1,
               "description": "Source image on disk for img2img refinement"
             },
+            "mask_path": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Optional path to inpainting mask on disk for selective anchor frame refinement (allowed with image_path)"
+            },
             "denoise": {
               "type": "number",
               "minimum": 0.05,

@@ -21,6 +21,11 @@
       "minLength": 1,
       "description": "Optional path to an existing image on disk for img2img refinement"
     },
+    "mask_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional path to an inpainting mask image on disk (grayscale: white=regenerate, black=keep). Allowed only with image_path."
+    },
     "denoise": {
       "type": "number",
       "minimum": 0.05,
@@ -120,6 +125,14 @@
     {
       "if": {
         "required": ["denoise"]
+      },
+      "then": {
+        "required": ["image_path"]
+      }
+    },
+    {
+      "if": {
+        "required": ["mask_path"]
       },
       "then": {
         "required": ["image_path"]

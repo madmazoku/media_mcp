@@ -643,6 +643,202 @@ class TestStreamlineArchitecture(unittest.TestCase):
             )
             self.assertEqual(len(ar_errors_ok), 0)
 
+    def test_17_inpainting_schema_validation_and_generator_dispatch(self):
+        """Verify inpainting schema, AR validation, continuous gradient mask preservation, and generator dispatch."""
+        from core import image_engine, schema_validator
+        from core.generators import create_image_generator, ImageRequest
+        from unittest.mock import patch
+        from PIL import Image
+        import tempfile
+        import os
+
+        # 1. Schema validation
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src_p = Path(tmp_dir) / "source.png"
+            mask_p = Path(tmp_dir) / "mask.png"
+            Image.new("RGB", (1280, 720), color=(100, 100, 100)).save(src_p)
+            Image.new("L", (1280, 720), color=128).save(mask_p)
+
+            valid_inpaint = {
+                "prompt": "change jacket to blue silk",
+                "image_path": str(src_p),
+                "mask_path": str(mask_p),
+                "denoise": 0.8
+            }
+            schema_validator.validate_image_spec(valid_inpaint)
+
+            # mask_path without image_path must fail schema
+            invalid_mask_only = {
+                "prompt": "change jacket to blue silk",
+                "mask_path": str(mask_p)
+            }
+            with self.assertRaises(schema_validator.SchemaValidationError):
+                schema_validator.validate_image_spec(invalid_mask_only)
+
+            # mask_path with manual width/height must fail schema
+            invalid_mask_with_dim = dict(valid_inpaint)
+            invalid_mask_with_dim["width"] = 1024
+            with self.assertRaises(schema_validator.SchemaValidationError):
+                schema_validator.validate_image_spec(invalid_mask_with_dim)
+
+        # 2. Aspect ratio mismatch detection in image_engine.generate_image
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src_16_9 = Path(tmp_dir) / "src_16_9.png"
+            mask_1_1 = Path(tmp_dir) / "mask_1_1.png"
+            Image.new("RGB", (1920, 1080), color=(100, 100, 100)).save(src_16_9)
+            Image.new("L", (1000, 1000), color=255).save(mask_1_1)
+
+            ok, out_p, _, meta = image_engine.generate_image({
+                "prompt": "test",
+                "image_path": str(src_16_9),
+                "mask_path": str(mask_1_1)
+            })
+            self.assertFalse(ok)
+            self.assertIn("Aspect ratio mismatch", meta.get("error", ""))
+
+        # 3. Continuous gradient preservation (no binarization!)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src_ok = Path(tmp_dir) / "src.png"
+            mask_gradient = Path(tmp_dir) / "gradient_mask.png"
+            Image.new("RGB", (1280, 720), color=(100, 100, 100)).save(src_ok)
+            # Create a 4-band gradient mask: 0 (black), 64 (dark gray), 128 (mid gray), 255 (white)
+            m_img = Image.new("L", (1280, 720), color=0)
+            for x in range(320, 640):
+                for y in range(720):
+                    m_img.putpixel((x, y), 64)
+            for x in range(640, 960):
+                for y in range(720):
+                    m_img.putpixel((x, y), 128)
+            for x in range(960, 1280):
+                for y in range(720):
+                    m_img.putpixel((x, y), 255)
+            m_img.save(mask_gradient)
+
+            with patch("core.image_engine.create_image_generator") as mock_create_gen:
+                from core.generators.base import GenerationResult
+                mock_gen_instance = mock_create_gen.return_value
+                mock_gen_instance.generate.return_value = GenerationResult(
+                    success=True,
+                    image_path=str(src_ok),
+                    metadata={"target_width": 1360, "target_height": 768}
+                )
+                ok, _, _, _ = image_engine.generate_image({
+                    "prompt": "inpaint test",
+                    "image_path": str(src_ok),
+                    "mask_path": str(mask_gradient)
+                })
+                self.assertTrue(ok)
+                # Check req passed to generator
+                passed_req: ImageRequest = mock_gen_instance.generate.call_args[0][0]
+                self.assertTrue(passed_req.is_inpaint)
+                self.assertIsNotNone(passed_req.mask_path)
+                # Verify that the prepared mask still contains intermediate gradient values (not binarized to 0/255)
+                with Image.open(passed_req.mask_path) as prepared_m:
+                    pixels = set(prepared_m.convert("L").getdata())
+                    # Ensure intermediate values between 1 and 254 exist
+                    intermediate = [v for v in pixels if 20 < v < 235]
+                    self.assertTrue(len(intermediate) > 0, "Mask should preserve continuous gradients and not be binarized!")
+
+        # 4. SdxlImageGenerator payload inpaint verification
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src_f = Path(tmp_dir) / "s.png"
+            mask_f = Path(tmp_dir) / "m.png"
+            src_f.write_bytes(b"\x89PNG\r\n\x1a\nfakeimage")
+            mask_f.write_bytes(b"\x89PNG\r\n\x1a\nfakemask")
+            inpaint_req = ImageRequest(
+                prompt="inpaint prompt",
+                image_path=str(src_f),
+                mask_path=str(mask_f),
+                denoise=0.75
+            )
+            self.assertTrue(inpaint_req.is_inpaint)
+
+            sdxl_gen = create_image_generator("sdxl", settings={})
+            with patch("core.generators.image_generators.OUTPUT_IMG_DIR", tmp_dir), \
+                 patch("core.a1111_client.img2img") as mock_img2img:
+                mock_img2img.return_value = {"images": ["data:image/png;base64,ZmFrZQ=="]}
+                res = sdxl_gen.generate(inpaint_req)
+                self.assertTrue(res.success)
+                self.assertEqual(res.metadata.get("mode"), "inpaint")
+                payload = mock_img2img.call_args[0][0]
+                self.assertIn("mask", payload)
+                self.assertIn("init_images", payload)
+                self.assertEqual(payload["denoising_strength"], 0.75)
+                self.assertFalse(payload["inpaint_full_res"])
+                self.assertFalse(payload["mask_round"])
+                self.assertFalse(payload["override_settings"]["overlay_inpaint"])
+
+        # 5. Flux1ImageGenerator ComfyUI graph inpaint verification
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src_f = Path(tmp_dir) / "s.png"
+            mask_f = Path(tmp_dir) / "m.png"
+            src_f.write_bytes(b"\x89PNG\r\n\x1a\nfakeimage")
+            mask_f.write_bytes(b"\x89PNG\r\n\x1a\nfakemask")
+            inpaint_req = ImageRequest(
+                prompt="flux inpaint",
+                image_path=str(src_f),
+                mask_path=str(mask_f),
+                denoise=0.75
+            )
+
+            flux_gen = create_image_generator("flux1", settings={})
+            with patch("core.generators.image_generators.OUTPUT_IMG_DIR", tmp_dir), \
+                 patch("core.comfy_client.copy_to_comfy_input", side_effect=lambda p: os.path.basename(p)), \
+                 patch("core.comfy_client.queue_prompt") as mock_queue, \
+                 patch("core.comfy_client.wait_for_prompt") as mock_wait, \
+                 patch("core.comfy_client.download_output_file", return_value=b"fakeout"):
+                mock_queue.return_value = (True, "prompt_flux_inpaint")
+                mock_wait.return_value = (True, {"outputs": {"9": {"images": [{"filename": "out.png"}]}}})
+
+                res_flux = flux_gen.generate(inpaint_req)
+                self.assertTrue(res_flux.success)
+                self.assertEqual(res_flux.metadata.get("mode"), "inpaint")
+                graph = mock_queue.call_args[0][0]
+                # Node 12 must be LoadImageMask for mask
+                self.assertEqual(graph["12"]["class_type"], "LoadImageMask")
+                self.assertEqual(graph["12"]["inputs"]["channel"], "red")
+                # Node 13 must be SetLatentNoiseMask
+                self.assertEqual(graph["13"]["class_type"], "SetLatentNoiseMask")
+                self.assertEqual(graph["13"]["inputs"]["mask"], ["12", 0])
+                # Node 7 (KSampler) must consume Node 13 output
+                self.assertEqual(graph["7"]["inputs"]["latent_image"], ["13", 0])
+
+        # 6. Flux2ImageGenerator ComfyUI graph inpaint and SplitSigmasDenoise verification
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src_f = Path(tmp_dir) / "s.png"
+            mask_f = Path(tmp_dir) / "m.png"
+            src_f.write_bytes(b"\x89PNG\r\n\x1a\nfakeimage")
+            mask_f.write_bytes(b"\x89PNG\r\n\x1a\nfakemask")
+            inpaint_req2 = ImageRequest(
+                prompt="flux2 inpaint",
+                image_path=str(src_f),
+                mask_path=str(mask_f),
+                denoise=0.8
+            )
+
+            flux2_gen = create_image_generator("flux2", settings={})
+            with patch("core.generators.image_generators.OUTPUT_IMG_DIR", tmp_dir), \
+                 patch("core.comfy_client.copy_to_comfy_input", side_effect=lambda p: os.path.basename(p)), \
+                 patch("core.comfy_client.queue_prompt") as mock_queue2, \
+                 patch("core.comfy_client.wait_for_prompt") as mock_wait2, \
+                 patch("core.comfy_client.download_output_file", return_value=b"fakeout"):
+                mock_queue2.return_value = (True, "prompt_flux2_inpaint")
+                mock_wait2.return_value = (True, {"outputs": {"1011": {"images": [{"filename": "out2.png"}]}}})
+
+                res_flux2 = flux2_gen.generate(inpaint_req2)
+                self.assertTrue(res_flux2.success)
+                self.assertEqual(res_flux2.metadata.get("mode"), "inpaint")
+                graph2 = mock_queue2.call_args[0][0]
+                # SplitSigmasDenoise must be present
+                self.assertEqual(graph2["1026"]["class_type"], "SplitSigmasDenoise")
+                self.assertEqual(graph2["1026"]["inputs"]["denoise"], 0.8)
+                self.assertEqual(graph2["1021"]["inputs"]["sigmas"], ["1026", 1])
+                # LoadImageMask must be present
+                self.assertEqual(graph2["1012"]["class_type"], "LoadImageMask")
+                self.assertEqual(graph2["1012"]["inputs"]["channel"], "red")
+                self.assertEqual(graph2["1013"]["inputs"]["mask"], ["1012", 0])
+                self.assertEqual(graph2["1021"]["inputs"]["latent_image"], ["1013", 0])
+
 
 if __name__ == "__main__":
     unittest.main()
