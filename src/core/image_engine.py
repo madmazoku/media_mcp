@@ -34,6 +34,40 @@ def set_global_progress_callback(cb):
     set_image_progress_callback(cb)
 
 
+def calculate_native_dimensions(
+    image_input: Any,
+    target_area: int = 1024 * 1024,
+    multiple_of: int = 16,
+    min_dim: int = 512,
+    max_dim: int = 1536
+) -> Tuple[int, int]:
+    """
+    Calculates target (width, height) preserving the source image aspect ratio,
+    targeting native model capacity (~1.0 MP for SDXL/FLUX), rounded to multiples of 16.
+    Clamps dimensions to [min_dim, max_dim] to prevent degenerate diffusion geometries.
+    """
+    from PIL import Image
+    import math
+
+    if isinstance(image_input, (str, Path)):
+        with Image.open(image_input) as img:
+            src_w, src_h = img.size
+    else:
+        src_w, src_h = image_input.size
+
+    if src_w <= 0 or src_h <= 0:
+        return (1024, 1024)
+
+    ar = src_w / src_h
+    ideal_h = math.sqrt(target_area / ar)
+    ideal_w = ideal_h * ar
+
+    target_w = max(min_dim, min(max_dim, int(round(ideal_w / multiple_of) * multiple_of)))
+    target_h = max(min_dim, min(max_dim, int(round(ideal_h / multiple_of) * multiple_of)))
+
+    return target_w, target_h
+
+
 def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optional[str], Dict[str, Any]]:
     """
     Unified entry point for image generation across all engines (SDXL, Pony, FLUX.1, FLUX.2).
@@ -74,6 +108,7 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
 
     # img2img source path and denoise resolution
     source_img_path = None
+    original_source_path = None
     denoise_val = float(params.get("denoise", 0.65))
     if params.get("image_path"):
         raw_src = params["image_path"]
@@ -88,7 +123,30 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
                     break
             if not found:
                 return False, None, None, {"error": f"Source image for img2img not found on disk: {raw_src}"}
-        source_img_path = str(p.resolve())
+        original_source_path = str(p.resolve())
+        source_img_path = original_source_path
+
+        # Automatically calculate native target resolution preserving source aspect ratio
+        auto_w, auto_h = calculate_native_dimensions(source_img_path)
+        width = auto_w
+        height = auto_h
+        log(f"Auto-calculated native resolution for img2img: {width}x{height} (source: {source_img_path})")
+
+        # Synchronously pre-scale source image to native (width, height) for optimal VRAM and model fidelity
+        try:
+            from PIL import Image
+            with Image.open(source_img_path) as src_im:
+                cur_w, cur_h = src_im.size
+                if cur_w != width or cur_h != height:
+                    resized_im = src_im.convert("RGB").resize((width, height), Image.Resampling.LANCZOS)
+                    temp_dir = Path(config.TEMP_DIR)
+                    temp_dir.mkdir(parents=True, exist_ok=True)
+                    norm_path = temp_dir / f"norm_{Path(source_img_path).stem}_{width}x{height}.png"
+                    resized_im.save(norm_path, format="PNG")
+                    source_img_path = str(norm_path.resolve())
+                    log(f"Resized img2img source image from {cur_w}x{cur_h} to native {width}x{height}: {source_img_path}")
+        except Exception as ex:
+            log(f"Warning: Failed to pre-scale source image: {ex}")
     elif denoise_val != 1.0:
         log(f"Notice: Normalizing denoise from {denoise_val} to 1.0 for pure txt2img generation.")
         denoise_val = 1.0
@@ -133,8 +191,8 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
     resolved_spec["seed"] = actual_seed
     resolved_spec["width"] = actual_width
     resolved_spec["height"] = actual_height
-    if source_img_path:
-        resolved_spec["image_path"] = source_img_path
+    if original_source_path or source_img_path:
+        resolved_spec["image_path"] = original_source_path or source_img_path
         resolved_spec["denoise"] = denoise_val
     if res.metadata.get("model") and "model" not in resolved_spec:
         resolved_spec["model"] = res.metadata["model"]

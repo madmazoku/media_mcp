@@ -549,6 +549,100 @@ class TestStreamlineArchitecture(unittest.TestCase):
             self.assertEqual(resolved_path, str(test_frame.resolve()))
             self.assertIsNotNone(b64)
 
+    def test_16_auto_resolution_and_aspect_ratio_validation(self):
+        """Verify automatic native resolution calculation, schema rules, and aspect ratio validation."""
+        from core import image_engine, schema_validator, video_pipeline
+        from PIL import Image
+        import tempfile
+
+        # 1. calculate_native_dimensions verification
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # 16:9 source (1920x1080)
+            p16_9 = Path(tmp_dir) / "src_16_9.png"
+            Image.new("RGB", (1920, 1080), color=(100, 100, 100)).save(p16_9)
+            w16_9, h16_9 = image_engine.calculate_native_dimensions(p16_9)
+            self.assertEqual(w16_9 % 16, 0)
+            self.assertEqual(h16_9 % 16, 0)
+            self.assertAlmostEqual(w16_9 / h16_9, 16 / 9, delta=0.02)
+            self.assertTrue(900_000 <= w16_9 * h16_9 <= 1_150_000)
+
+            # 9:16 source (1080x1920)
+            p9_16 = Path(tmp_dir) / "src_9_16.png"
+            Image.new("RGB", (1080, 1920), color=(100, 100, 100)).save(p9_16)
+            w9_16, h9_16 = image_engine.calculate_native_dimensions(p9_16)
+            self.assertEqual(w9_16 % 16, 0)
+            self.assertEqual(h9_16 % 16, 0)
+            self.assertAlmostEqual(w9_16 / h9_16, 9 / 16, delta=0.02)
+
+            # 1:1 source (800x800)
+            p1_1 = Path(tmp_dir) / "src_1_1.png"
+            Image.new("RGB", (800, 800), color=(100, 100, 100)).save(p1_1)
+            w1_1, h1_1 = image_engine.calculate_native_dimensions(p1_1)
+            self.assertEqual((w1_1, h1_1), (1024, 1024))
+
+        # 2. Schema validation: width/height forbidden when image_path is present
+        valid_img2img = {
+            "prompt": "portrait",
+            "image_path": "path/to/img.png",
+            "denoise": 0.6
+        }
+        schema_validator.validate_image_spec(valid_img2img)
+
+        invalid_with_width = dict(valid_img2img)
+        invalid_with_width["width"] = 1024
+        with self.assertRaises(schema_validator.SchemaValidationError):
+            schema_validator.validate_image_spec(invalid_with_width)
+
+        invalid_with_height = dict(valid_img2img)
+        invalid_with_height["height"] = 1024
+        with self.assertRaises(schema_validator.SchemaValidationError):
+            schema_validator.validate_image_spec(invalid_with_height)
+
+        invalid_denoise_no_image = {
+            "prompt": "txt2img with denoise",
+            "denoise": 0.5
+        }
+        with self.assertRaises(schema_validator.SchemaValidationError):
+            schema_validator.validate_image_spec(invalid_denoise_no_image)
+
+        # 3. Video Pipeline Aspect Ratio Validation
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # 1:1 square frame
+            sq_path = Path(tmp_dir) / "square.png"
+            Image.new("RGB", (1024, 1024), color=(50, 50, 50)).save(sq_path)
+
+            # 16:9 landscape frame
+            ls_path = Path(tmp_dir) / "landscape.png"
+            Image.new("RGB", (1280, 720), color=(50, 50, 50)).save(ls_path)
+
+            # Mismatched scenario: 1:1 frame inside 832x480 (16:9) video
+            scenes_mismatch = [
+                {
+                    "name": "Scene Mismatch",
+                    "anchor_image": {"keyframe_path": str(sq_path)},
+                    "blocks": [{"motion_prompt": "run"}]
+                }
+            ]
+            ar_errors = video_pipeline.collect_scenario_aspect_ratio_errors(
+                scenes_mismatch, video_width=832, video_height=480
+            )
+            self.assertEqual(len(ar_errors), 1)
+            self.assertIn("Aspect ratio mismatch", ar_errors[0])
+            self.assertIn("1024x1024", ar_errors[0])
+
+            # Matched scenario: 16:9 frame inside 832x480 (16:9) video
+            scenes_matched = [
+                {
+                    "name": "Scene Matched",
+                    "anchor_image": {"keyframe_path": str(ls_path)},
+                    "blocks": [{"motion_prompt": "run"}]
+                }
+            ]
+            ar_errors_ok = video_pipeline.collect_scenario_aspect_ratio_errors(
+                scenes_matched, video_width=832, video_height=480
+            )
+            self.assertEqual(len(ar_errors_ok), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

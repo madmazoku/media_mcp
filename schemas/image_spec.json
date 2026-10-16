@@ -106,6 +106,27 @@
   "allOf": [
     {
       "if": {
+        "required": ["image_path"]
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            { "required": ["width"] },
+            { "required": ["height"] }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["denoise"]
+      },
+      "then": {
+        "required": ["image_path"]
+      }
+    },
+    {
+      "if": {
         "properties": {
           "engine": { "enum": ["flux1", "flux2"] }
         },

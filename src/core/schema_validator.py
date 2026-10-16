@@ -191,6 +191,11 @@ def validate_scenario(scenario_data: Any) -> None:
     validate_against_schema("scenario.json", scenario_data, "scenario")
 
 
+def validate_image_spec(image_spec_data: Any) -> None:
+    """Validate image specification dictionary against schemas/image_spec.json."""
+    validate_against_schema("image_spec.json", image_spec_data, "image_spec")
+
+
 def validate_mcp_args(tool_name: str, tool_args: Any) -> None:
     """Validate MCP tool call arguments against the tool's schema."""
     if tool_name not in MCP_TOOL_SCHEMA_MAP:
