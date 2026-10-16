@@ -42,10 +42,18 @@ description: >-
 - **`"wan-full"` (Wan 2.2 14B Full)** — полный 20-шаговый сэмплинг UNet High/Low Noise, CFG 3.5–5.0, шаг VAE: 4 кадра ($4k+1$).
 - **`"ltx"` (LTX-2.3 22B)** — 20 шагов, CFG 3.0, Distilled LoRA 1.1, шаг VAE: 8 кадров ($8k+1$), `width` и `height` строго кратны **32**.
 
-### Фото-движки опорного кадра (`image.engine`, `anchor_image.engine`):
+### Фото-движки опорного кадра (`image.engine`):
+Параметры среды рендеринга (`engine`, `model`, `width`, `height`, `steps`, `cfg`, `guidance`, `sampler`, `denoise`) задаются глобально в секции `image` для всего фильма:
 - **`"sdxl"` (Automatic1111 WebUI, дефолт)** — SDXL / Pony / Illustrious (`cfg`, `sampler`, `negative_prompt`, `loras`).
 - **`"flux1"` (ComfyUI FLUX.1 Dev)** — поддерживает `guidance`, `loras`. Запрещены `negative_prompt`, `cfg`.
 - **`"flux2"` (ComfyUI FLUX.2 Klein)** — поддерживает `guidance`. Запрещены `loras` (несовместимость размерностей тензоров с FLUX.1), `negative_prompt`, `cfg`.
+
+### Логика опорного кадра сцены (`scenes[].anchor_image`):
+Опорный кадр задаёт только визуальную специфику конкретного плана и поддерживает 3 режима:
+1. **Готовый кадр (Ready keyframe):** `{"image_path": "path/to/frame.png"}` (без `prompt`) — моментально берётся с диска.
+2. **img2img перерисовка / адаптация кадра:** `{"image_path": "path/to/source.png", "prompt": "...", "denoise": 0.55}` — трансформирует исходный кадр через img2img (сохраняет анатомию/лицо персонажа, адаптируя ракурс, одежду или окружение под новую сцену).
+3. **txt2img генерация:** `{"prompt": "..."}` (без `image_path`) — диффузия опорного кадра с нуля.
+- **Объединение LoRA:** массив `scenes[].anchor_image.loras` конкатенируется с глобальным `image.loras` (локальный `strength` имеет приоритет при совпадении имён).
 
 ---
 

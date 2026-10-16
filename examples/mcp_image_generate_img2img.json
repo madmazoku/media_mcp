@@ -1,0 +1,9 @@
+{
+  "engine": "sdxl",
+  "prompt": "score_9, score_8_up, score_7_up, 1girl, young Hermione Granger, bushy wavy brown hair, smiling warmly, close-up portrait, soft golden afternoon sunlight",
+  "image_path": "media_mcp/images/example_anchor.png",
+  "denoise": 0.55,
+  "steps": 30,
+  "cfg": 5.5,
+  "sampler": "Euler a"
+}

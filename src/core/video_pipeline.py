@@ -214,19 +214,35 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
         sc_name = sc.get("name") or sc.get("scene_name", f"Scene #{s_idx + 1}")
 
         anchor = dict(sc["anchor_image"])
-        anchor["engine"] = anchor.get("engine") or root_image_engine
-        for k in (
-            "model", "width", "height", "steps", "cfg",
-            "guidance", "sampler", "seed", "loras"
-        ):
-            if k in image_cfg and k not in anchor:
+        anchor["engine"] = root_image_engine
+        for k in ("model", "width", "height", "steps", "cfg", "guidance", "sampler"):
+            if k in image_cfg:
                 anchor[k] = image_cfg[k]
-        if "checkpoint" in anchor and "model" not in anchor:
-            anchor["model"] = anchor["checkpoint"]
-        if "lora" in anchor and "loras" not in anchor:
-            anchor["loras"] = [{"name": str(anchor["lora"]), "strength": float(anchor.get("lora_strength", 0.8))}]
-        elif "loras" not in anchor and "loras" in image_cfg:
-            anchor["loras"] = image_cfg["loras"]
+        if "model" not in anchor and "checkpoint" in image_cfg:
+            anchor["model"] = image_cfg["checkpoint"]
+
+        # Seed: scene-specific seed has priority, otherwise global seed
+        if "seed" not in anchor and "seed" in image_cfg:
+            anchor["seed"] = image_cfg["seed"]
+
+        # Denoise: scene-specific denoise has priority, otherwise global denoise, default 0.65
+        if "denoise" not in anchor and "denoise" in image_cfg:
+            anchor["denoise"] = image_cfg["denoise"]
+        elif "denoise" not in anchor:
+            anchor["denoise"] = 0.65
+
+        # LoRAs: merge global image.loras with scene-specific anchor.loras
+        merged_loras = {}
+        for l in image_cfg.get("loras", []):
+            if isinstance(l, dict) and l.get("name"):
+                merged_loras[l["name"]] = float(l.get("strength", 0.8))
+        for l in anchor.get("loras", []):
+            if isinstance(l, dict) and l.get("name"):
+                merged_loras[l["name"]] = float(l.get("strength", 0.8))
+        if merged_loras:
+            anchor["loras"] = [{"name": k, "strength": v} for k, v in merged_loras.items()]
+        else:
+            anchor["loras"] = []
 
         if anchor.get("prompt") or root_image_prompt:
             anchor["prompt"] = combine_prompts(root_image_prompt, anchor.get("prompt"))
@@ -411,8 +427,8 @@ def execute_scenario_pipeline(
             if s_idx == 0:
                 first_poster_b64 = anchor_b64
                 first_poster_path = anchor_img_path
-                if resolved_scenario_dict.get("scenes") and len(resolved_scenario_dict["scenes"]) > 0:
-                    resolved_scenario_dict["scenes"][0]["anchor_image"]["image_path"] = anchor_img_path
+                if resolved_scenario_dict.get("scenes") and len(resolved_scenario_dict["scenes"]) > s_idx:
+                    resolved_scenario_dict["scenes"][s_idx]["anchor_image"]["image_path"] = anchor_img_path
 
             next_tail_latent = None
             next_tail_latent_count = 0

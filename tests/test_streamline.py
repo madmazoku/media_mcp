@@ -312,6 +312,156 @@ class TestStreamlineArchitecture(unittest.TestCase):
             self.assertTrue(res_invalid.get("isError", False))
             self.assertIn("Invalid regex pattern", res_invalid.get("error", ""))
 
+    def test_13_img2img_spec_schema_and_generator_dispatch(self):
+        """Verify image_spec schema and generator behavior for img2img."""
+        import os
+        from unittest.mock import patch
+        from core import schema_validator
+        from core.generators.base import ImageRequest
+        from core.generators import create_image_generator
+        import tempfile
+
+        # 1. Valid img2img spec
+        valid_img2img = {
+            "prompt": "Hermione smiling portrait",
+            "image_path": "path/to/test.png",
+            "denoise": 0.6,
+            "engine": "sdxl"
+        }
+        schema_validator.validate_mcp_args("image_generate", valid_img2img)
+
+        # 2. Invalid denoise (out of bounds > 1.0)
+        invalid_denoise = {
+            "prompt": "test",
+            "image_path": "test.png",
+            "denoise": 1.5
+        }
+        with self.assertRaises(schema_validator.SchemaValidationError):
+            schema_validator.validate_mcp_args("image_generate", invalid_denoise)
+
+        # 3. SdxlImageGenerator img2img payload verification
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = os.path.join(tmp_dir, "source.png")
+            with open(tmp_path, "wb") as f:
+                f.write(b"\x89PNG\r\n\x1a\nfakeimagebytes")
+
+            req = ImageRequest(
+                prompt="test prompt",
+                image_path=tmp_path,
+                denoise=0.55
+            )
+            self.assertTrue(req.is_img2img)
+            self.assertEqual(req.denoise, 0.55)
+
+            sdxl_gen = create_image_generator("sdxl", settings={})
+            with patch("core.generators.image_generators.OUTPUT_IMG_DIR", tmp_dir), \
+                 patch("core.a1111_client.img2img") as mock_img2img:
+                mock_img2img.return_value = {"images": ["data:image/png;base64,ZmFrZWltYWdl"]}
+                res = sdxl_gen.generate(req)
+                self.assertTrue(res.success, res.error)
+                self.assertEqual(res.metadata.get("mode"), "img2img")
+                self.assertEqual(res.metadata.get("denoise"), 0.55)
+                # Verify payload sent to /sdapi/v1/img2img
+                call_payload = mock_img2img.call_args[0][0]
+                self.assertIn("init_images", call_payload)
+                self.assertEqual(call_payload["denoising_strength"], 0.55)
+
+            # 4. Flux1ImageGenerator img2img graph verification
+            flux_gen = create_image_generator("flux1", settings={})
+            with patch("core.generators.image_generators.OUTPUT_IMG_DIR", tmp_dir), \
+                 patch("core.comfy_client.copy_to_comfy_input", return_value="comfy_input_test.png"), \
+                 patch("core.comfy_client.queue_prompt") as mock_queue, \
+                 patch("core.comfy_client.wait_for_prompt") as mock_wait, \
+                 patch("core.comfy_client.download_output_file", return_value=b"fakeout"):
+                mock_queue.return_value = (True, "prompt_123")
+                mock_wait.return_value = (True, {"outputs": {"9": {"images": [{"filename": "out.png"}]}}})
+
+                res_flux = flux_gen.generate(req)
+                self.assertTrue(res_flux.success, res_flux.error)
+                self.assertEqual(res_flux.metadata.get("mode"), "img2img")
+                self.assertEqual(res_flux.metadata.get("denoise"), 0.55)
+                # Verify graph queued to ComfyUI has LoadImage and VAEEncode
+                graph = mock_queue.call_args[0][0]
+                self.assertEqual(graph["6"]["class_type"], "LoadImage")
+                self.assertEqual(graph["6"]["inputs"]["image"], "comfy_input_test.png")
+                self.assertEqual(graph["10"]["class_type"], "VAEEncode")
+                self.assertEqual(graph["7"]["inputs"]["denoise"], 0.55)
+
+    def test_14_scenario_anchor_img2img_and_loras_merge(self):
+        """Verify scenario anchor_image schema, img2img refinement, and LoRA list merging."""
+        from core import video_pipeline, schema_validator
+
+        scenario_raw = {
+            "name": "LoRA and img2img Test Scenario",
+            "image": {
+                "engine": "sdxl",
+                "denoise": 0.65,
+                "loras": [
+                    {"name": "hermione_v2", "strength": 0.8},
+                    {"name": "cinematic_light", "strength": 0.4}
+                ]
+            },
+            "video": {
+                "engine": "wan-fast",
+                "width": 832,
+                "height": 480
+            },
+            "scenes": [
+                {
+                    "name": "Scene 1",
+                    "anchor_image": {
+                        "prompt": "reading book in cozy chair",
+                        "image_path": "path/to/character_base.png",
+                        "denoise": 0.45,  # Scene override
+                        "loras": [
+                            {"name": "hermione_v2", "strength": 0.95},  # Override strength
+                            {"name": "vintage_library", "strength": 0.7}  # Add scene-specific LoRA
+                        ]
+                    },
+                    "blocks": [
+                        {
+                            "name": "Block 1",
+                            "duration": 4.0,
+                            "motion_prompt": "turning pages"
+                        }
+                    ]
+                }
+            ]
+        }
+
+        # 1. Schema validation
+        schema_validator.validate_scenario(scenario_raw)
+
+        # 2. Normalization and LoRA merge check
+        scenes = video_pipeline.normalize_scenario_structure(scenario_raw)
+        self.assertEqual(len(scenes), 1)
+        anchor = scenes[0]["anchor_image"]
+
+        # Check denoise inheritance
+        self.assertEqual(anchor["denoise"], 0.45)
+
+        # Check LoRA merging
+        lora_dict = {l["name"]: l["strength"] for l in anchor["loras"]}
+        self.assertEqual(len(lora_dict), 3)
+        self.assertEqual(lora_dict["hermione_v2"], 0.95)      # Updated from scene
+        self.assertEqual(lora_dict["cinematic_light"], 0.4)    # Kept from global image
+        self.assertEqual(lora_dict["vintage_library"], 0.7)    # Added from scene
+
+        # 3. Schema rejection of engine/width/height in anchor_image
+        invalid_scene_anchor = dict(scenario_raw)
+        invalid_scene_anchor["scenes"] = [
+            {
+                "name": "Scene with invalid anchor props",
+                "anchor_image": {
+                    "prompt": "test",
+                    "width": 1024  # Not allowed in anchor_image!
+                },
+                "blocks": [{"duration": 4.0, "motion_prompt": "motion"}]
+            }
+        ]
+        with self.assertRaises(schema_validator.SchemaValidationError):
+            schema_validator.validate_scenario(invalid_scene_anchor)
+
 
 if __name__ == "__main__":
     unittest.main()

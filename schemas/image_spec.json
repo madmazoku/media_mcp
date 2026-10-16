@@ -16,6 +16,18 @@
       "type": "string",
       "description": "Negative prompt (SDXL / Pony only)"
     },
+    "image_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional path to an existing image on disk for img2img refinement"
+    },
+    "denoise": {
+      "type": "number",
+      "minimum": 0.05,
+      "maximum": 1.0,
+      "default": 0.65,
+      "description": "Denoising strength for img2img (0.05 = subtle change, 1.0 = complete redraw)"
+    },
     "engine": {
       "type": "string",
       "enum": ["sdxl", "flux1", "flux2"],
