@@ -17,6 +17,7 @@ import base64
 import random
 import datetime
 import uuid
+import re
 from typing import List, Dict, Any, Optional, Tuple, Union
 
 from .config import OUTPUT_VID_DIR, OUTPUT_IMG_DIR, TEMP_DIR
@@ -811,14 +812,21 @@ def execute_scenario_pipeline(
         )
 
         # Final movie assembly across all blocks in a single lossless Stream Copy (-c copy) pass
-        final_name = f"{run_prefix}-final.mp4"
+        if output_name:
+            clean_out = os.path.splitext(os.path.basename(output_name))[0]
+            if re.match(r"^\d{8}_\d{6}-[a-f0-9]{6}-", clean_out):
+                final_name = f"{clean_out}.mp4"
+            else:
+                final_name = f"{run_prefix}-{clean_out}.mp4"
+        else:
+            final_name = f"{run_prefix}-final.mp4"
 
         final_path = os.path.join(OUTPUT_VID_DIR, final_name)
         ffmpeg_engine.concat_videos(all_block_cores, final_path, smooth_transitions=False)
         total_duration = ffmpeg_engine.get_duration(final_path)
 
         # Poster handling: prioritize pristine anchor keyframe from Scene 1
-        poster_filename = f"{run_prefix}-final.png"
+        poster_filename = f"{os.path.splitext(final_name)[0]}.png"
         poster_path = os.path.join(OUTPUT_IMG_DIR, poster_filename)
         if first_poster_path and os.path.exists(first_poster_path):
             try:
@@ -838,7 +846,7 @@ def execute_scenario_pipeline(
         # Optional HUD generation
         hud_path = None
         if enable_hud and generated_block_metadata:
-            hud_name = f"{run_prefix}-hud.mp4"
+            hud_name = f"{os.path.splitext(final_name)[0]}-hud.mp4"
             hud_final = os.path.join(OUTPUT_VID_DIR, hud_name)
             try:
                 ffmpeg_engine.generate_hud_overlay(final_path, generated_block_metadata, hud_final)

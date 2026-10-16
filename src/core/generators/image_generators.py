@@ -14,6 +14,7 @@ import random
 import base64
 import datetime
 import threading
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -151,11 +152,15 @@ class SdxlImageGenerator(BaseImageGenerator):
             raw_b64 = images[0].split(",", 1)[-1]
             raw_bytes = base64.b64decode(raw_b64)
 
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            req_hash = uuid.uuid4().hex[:6]
             if request.custom_filename:
-                save_filename = request.custom_filename if request.custom_filename.endswith(".png") else f"{request.custom_filename}.png"
+                clean_name = os.path.splitext(os.path.basename(request.custom_filename))[0]
+                if re.match(r"^\d{8}_\d{6}-[a-f0-9]{6}-", clean_name):
+                    save_filename = f"{clean_name}.png"
+                else:
+                    save_filename = f"{timestamp}-{req_hash}-{clean_name}.png"
             else:
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                req_hash = uuid.uuid4().hex[:6]
                 save_filename = f"{timestamp}-{req_hash}-sdxl.png"
             final_path = os.path.join(OUTPUT_IMG_DIR, save_filename)
 
@@ -260,11 +265,15 @@ class Flux1ImageGenerator(BaseImageGenerator):
             file_type=first_img.get("type", "output")
         )
 
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        req_hash = uuid.uuid4().hex[:6]
         if request.custom_filename:
-            save_filename = request.custom_filename if request.custom_filename.endswith(".png") else f"{request.custom_filename}.png"
+            clean_name = os.path.splitext(os.path.basename(request.custom_filename))[0]
+            if re.match(r"^\d{8}_\d{6}-[a-f0-9]{6}-", clean_name):
+                save_filename = f"{clean_name}.png"
+            else:
+                save_filename = f"{timestamp}-{req_hash}-{clean_name}.png"
         else:
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            req_hash = uuid.uuid4().hex[:6]
             save_filename = f"{timestamp}-{req_hash}-flux1.png"
         final_path = os.path.join(OUTPUT_IMG_DIR, save_filename)
 
@@ -350,11 +359,15 @@ class Flux2ImageGenerator(BaseImageGenerator):
             file_type=first_img.get("type", "output")
         )
 
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        req_hash = uuid.uuid4().hex[:6]
         if request.custom_filename:
-            save_filename = request.custom_filename if request.custom_filename.endswith(".png") else f"{request.custom_filename}.png"
+            clean_name = os.path.splitext(os.path.basename(request.custom_filename))[0]
+            if re.match(r"^\d{8}_\d{6}-[a-f0-9]{6}-", clean_name):
+                save_filename = f"{clean_name}.png"
+            else:
+                save_filename = f"{timestamp}-{req_hash}-{clean_name}.png"
         else:
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            req_hash = uuid.uuid4().hex[:6]
             save_filename = f"{timestamp}-{req_hash}-flux2.png"
         final_path = os.path.join(OUTPUT_IMG_DIR, save_filename)
 

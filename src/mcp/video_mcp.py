@@ -17,6 +17,8 @@ import shutil
 import base64
 import urllib.parse
 import contextlib
+import re
+import datetime
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, Optional, List
@@ -373,6 +375,7 @@ def tool_video_validate_scenario(args: dict) -> dict:
     }
 
 def tool_video_generate_block(args: dict) -> dict:
+    reload_core_modules()
     prompt = args.get("prompt")
     if not prompt:
         return {"error": "Prompt is required."}
@@ -387,7 +390,20 @@ def tool_video_generate_block(args: dict) -> dict:
     width = int(args.get("width", 832))
     height = int(args.get("height", 480))
     fps = int(args.get("fps", 24 if engine == "ltx" else 16))
-    out_name = args.get("output_name") or f"single_{int(time.time()*1000)}.mp4"
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    req_hash = uuid.uuid4().hex[:6]
+    run_prefix = f"{timestamp}-{req_hash}"
+
+    raw_out = args.get("output_name")
+    if raw_out:
+        clean_out = os.path.splitext(os.path.basename(raw_out))[0]
+        if re.match(r"^\d{8}_\d{6}-[a-f0-9]{6}-", clean_out):
+            out_name = f"{clean_out}.mp4"
+        else:
+            out_name = f"{run_prefix}-{clean_out}.mp4"
+    else:
+        out_name = f"{run_prefix}-{engine}.mp4"
 
     stride = 8 if engine == "ltx" else 4
     raw_frames = int(round(duration * fps))
@@ -428,7 +444,8 @@ def tool_video_generate_block(args: dict) -> dict:
     ffmpeg_engine.cut_duration(raw_path, duration=duration, out_path=final_path, stream_copy=True)
     actual_dur = ffmpeg_engine.get_duration(final_path)
 
-    poster_path = os.path.join(config.OUTPUT_IMG_DIR, f"{os.path.splitext(out_name)[0]}_poster.png")
+    poster_filename = f"{os.path.splitext(out_name)[0]}.png"
+    poster_path = os.path.join(config.OUTPUT_IMG_DIR, poster_filename)
     if start_image and os.path.exists(start_image):
         try:
             shutil.copy2(start_image, poster_path)

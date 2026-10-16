@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 import sys
 import time
+import uuid
+import datetime
 import shutil
 import random
 from pathlib import Path
@@ -576,7 +578,12 @@ class WanFastVideoGenerator(BaseWanVideoGenerator):
         actual_cfg = float(request.cfg if request.cfg is not None else self.settings.get("cfg", 1.0))
         split_step = max(1, actual_steps // 2)
 
-        out_video_name = request.out_video_name or f"wan_fast_{int(time.time()*1000)}.mp4"
+        if request.out_video_name:
+            out_video_name = request.out_video_name
+        else:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            req_hash = uuid.uuid4().hex[:6]
+            out_video_name = f"{timestamp}-{req_hash}-wan-fast.mp4"
         clean_base = os.path.splitext(os.path.basename(out_video_name))[0]
         if clean_base.endswith("_core"):
             clean_base = clean_base[:-5]
@@ -639,7 +646,12 @@ class WanFullVideoGenerator(BaseWanVideoGenerator):
         actual_cfg = float(request.cfg if request.cfg is not None else self.settings.get("cfg", 3.5))
         split_step = max(1, int(round(actual_steps * 0.5)))
 
-        out_video_name = request.out_video_name or f"wan_full_{int(time.time()*1000)}.mp4"
+        if request.out_video_name:
+            out_video_name = request.out_video_name
+        else:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            req_hash = uuid.uuid4().hex[:6]
+            out_video_name = f"{timestamp}-{req_hash}-wan-full.mp4"
         clean_base = os.path.splitext(os.path.basename(out_video_name))[0]
         if clean_base.endswith("_core"):
             clean_base = clean_base[:-5]
@@ -686,7 +698,12 @@ class LtxVideoGenerator(BaseVideoGenerator):
         steps = int(request.steps or self.settings.get("steps", 20))
         num_frames = request.num_frames
 
-        out_video_name = request.out_video_name or f"ltx_{int(time.time()*1000)}.mp4"
+        if request.out_video_name:
+            out_video_name = request.out_video_name
+        else:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            req_hash = uuid.uuid4().hex[:6]
+            out_video_name = f"{timestamp}-{req_hash}-ltx.mp4"
         clean_base = os.path.splitext(os.path.basename(out_video_name))[0]
         if clean_base.endswith("_core"):
             clean_base = clean_base[:-5]
@@ -796,7 +813,7 @@ class LtxVideoGenerator(BaseVideoGenerator):
         elif request.prefix_video_path and os.path.exists(request.prefix_video_path):
             prefix_fn = comfy_client.upload_file_to_comfy(
                 request.prefix_video_path,
-                custom_filename=f"ltx_prefix_{int(time.time()*1000)}.mp4"
+                custom_filename=f"ltx-prefix-{int(time.time()*1000)}.mp4"
             )
             abs_prefix_in_comfy = os.path.join(comfy_client.COMFY_INPUT_DIR, prefix_fn)
             log(f"LTX multi-frame prefix from video: {abs_prefix_in_comfy}")
