@@ -15,8 +15,10 @@ import shutil
 import base64
 import datetime
 import uuid
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 
+from . import config
 from .config import OUTPUT_VID_DIR, OUTPUT_IMG_DIR, MAX_VIDEO_DURATION
 from .schema_validator import validate_scenario
 from . import ffmpeg_engine
@@ -136,27 +138,65 @@ def combine_negative_prompts(base: Optional[str], local: Optional[str]) -> str:
 # Hierarchical Scene Normalizer & Timing Validator
 # ---------------------------------------------------------------------------
 
-def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+def resolve_scenario_dict(raw_data: Any, request_overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
-    Validates scenario against schemas/scenario.json and normalizes it into a list of Scene objects.
-    Supports top-level 'image' and 'video' sections, prompt inheritance, and deep merge.
+    Resolves base scenario loading via 'scenario_path', deep merges overrides,
+    and returns a pure scenario dictionary matching schemas/scenario.json.
+    Consumes 'scenario_path' immediately to prevent reference leaks and recursion.
     """
-    if not isinstance(raw_data, dict):
-        raise ValueError("Scenario must be a JSON object matching schemas/scenario.json")
+    import json
+    scenario_dict = {}
+    base_file_path = None
 
-    scenario_dict = dict(raw_data)
+    if isinstance(raw_data, str):
+        base_file_path = raw_data
+    elif isinstance(raw_data, dict):
+        scenario_dict = dict(raw_data)
+        base_file_path = scenario_dict.pop("scenario_path", None)
+
+    if base_file_path:
+        p = Path(base_file_path)
+        if not p.is_file():
+            found = False
+            for parent_cand in [Path(config.WORKFLOWS_DIR), Path(config.REPO_DIR)]:
+                cand = parent_cand / base_file_path
+                if cand.is_file():
+                    p = cand
+                    found = True
+                    break
+            if not found:
+                raise FileNotFoundError(f"Scenario file not found on disk: {base_file_path}")
+        with open(p, "r", encoding="utf-8") as f:
+            base_dict = json.load(f)
+        base_dict.pop("scenario_path", None)
+        scenario_dict = deep_merge(base_dict, scenario_dict)
+
     if request_overrides:
-        scenario_dict = deep_merge(scenario_dict, request_overrides)
+        clean_overrides = dict(request_overrides)
+        clean_overrides.pop("scenario_path", None)
+        scenario_dict = deep_merge(scenario_dict, clean_overrides)
+
+    if not isinstance(scenario_dict, dict) or "scenes" not in scenario_dict:
+        raise ValueError("Scenario must be a JSON object matching schemas/scenario.json containing 'scenes' list")
 
     # Validate merged scenario against centralized JSON Schema
     validate_scenario(scenario_dict)
+    return scenario_dict
+
+
+def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """
+    Validates scenario against schemas/scenario.json and normalizes it into a list of Scene objects.
+    Supports base loading via 'scenario_path', top-level 'image' and 'video' sections,
+    prompt inheritance, and deep merge.
+    """
+    scenario_dict = resolve_scenario_dict(raw_data, request_overrides)
 
     image_cfg = scenario_dict.get("image", {})
     video_cfg = scenario_dict.get("video", {})
 
     root_video_engine = video_cfg.get("engine", "wan-fast")
-    root_video_model = video_cfg.get("model")
-    root_video_checkpoint = video_cfg.get("checkpoint")
+    root_video_model = video_cfg.get("model") or video_cfg.get("checkpoint")
     root_video_negative = video_cfg.get("negative_prompt", "")
     root_video_prompt = video_cfg.get("prompt", "")
 
@@ -170,19 +210,23 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
     for s_idx, sc in enumerate(raw_scenes):
         sc_engine = sc.get("engine") or root_video_engine
         sc_negative = combine_negative_prompts(root_video_negative, sc.get("negative_prompt"))
-        sc_model = sc.get("model") or root_video_model
-        sc_checkpoint = sc.get("checkpoint") or root_video_checkpoint
-        sc_name = sc.get("scene_name", f"Scene #{s_idx + 1}")
+        sc_model = sc.get("model") or sc.get("checkpoint") or root_video_model
+        sc_name = sc.get("name") or sc.get("scene_name", f"Scene #{s_idx + 1}")
 
         anchor = dict(sc["anchor_image"])
         anchor["engine"] = anchor.get("engine") or root_image_engine
         for k in (
-            "model", "checkpoint", "width", "height", "steps", "cfg",
-            "guidance", "sampler", "seed", "lora",
-            "lora_strength"
+            "model", "width", "height", "steps", "cfg",
+            "guidance", "sampler", "seed", "loras"
         ):
             if k in image_cfg and k not in anchor:
                 anchor[k] = image_cfg[k]
+        if "checkpoint" in anchor and "model" not in anchor:
+            anchor["model"] = anchor["checkpoint"]
+        if "lora" in anchor and "loras" not in anchor:
+            anchor["loras"] = [{"name": str(anchor["lora"]), "strength": float(anchor.get("lora_strength", 0.8))}]
+        elif "loras" not in anchor and "loras" in image_cfg:
+            anchor["loras"] = image_cfg["loras"]
 
         if anchor.get("prompt") or root_image_prompt:
             anchor["prompt"] = combine_prompts(root_image_prompt, anchor.get("prompt"))
@@ -195,6 +239,8 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
             b_engine = blk.get("engine") or sc_engine
             b_prompt = combine_prompts(root_video_prompt, blk["motion_prompt"])
             b_neg = combine_negative_prompts(sc_negative, blk.get("negative_prompt"))
+            b_model = blk.get("model") or blk.get("checkpoint") or sc_model
+            b_loras = blk.get("loras") or sc.get("loras") or video_cfg.get("loras")
 
             norm_blocks.append({
                 "name": blk.get("name", f"Block #{b_idx + 1}"),
@@ -203,18 +249,18 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
                 "motion_prompt": b_prompt,
                 "negative_prompt": b_neg,
                 "engine": b_engine,
-                "model": blk.get("model") or sc_model,
-                "checkpoint": blk.get("checkpoint") or sc_checkpoint,
+                "model": b_model,
                 "steps": blk.get("steps"),
                 "cfg": blk.get("cfg"),
                 "seed": blk.get("seed"),
-                "lora_strength": blk.get("lora_strength"),
+                "loras": b_loras,
                 "weight_dtype": blk.get("weight_dtype"),
                 "ramp_latents": blk.get("ramp_latents"),
                 "min_cfg": blk.get("min_cfg"),
             })
 
         normalized_scenes.append({
+            "name": sc_name,
             "scene_name": sc_name,
             "engine": sc_engine,
             "negative_prompt": sc_negative,
@@ -262,28 +308,37 @@ def collect_scenario_timing_errors(scenes: List[Dict[str, Any]], max_duration: f
 # ---------------------------------------------------------------------------
 
 def execute_scenario_pipeline(
-    scenario_input: Any,
+    scenario_input: Any = None,
+    scenario_path: Optional[str] = None,
     enable_hud: bool = False,
     progress_callback: Optional[Any] = None,
     image: Optional[Dict[str, Any]] = None,
     video: Optional[Dict[str, Any]] = None,
     request_overrides: Optional[Dict[str, Any]] = None,
+    **extra_kwargs
 ) -> Dict[str, Any]:
     """
     Executes a multi-scene video scenario using polymorphic generator dispatch and Latent-Chaining.
-    Supports top-level 'image' and 'video' structured parameters and Deep Merge.
+    Supports base loading via scenario_path, top-level 'image' and 'video' structured parameters and Deep Merge.
     Returns structured results including video paths, duration, and poster base64.
     """
+    if scenario_input is None and scenario_path:
+        scenario_input = {"scenario_path": scenario_path}
+    elif isinstance(scenario_input, dict) and scenario_path and "scenario_path" not in scenario_input:
+        scenario_input["scenario_path"] = scenario_path
+
     req_ov = dict(request_overrides or {})
+    if scenario_path:
+        req_ov["scenario_path"] = scenario_path
     if image:
         req_ov["image"] = deep_merge(req_ov.get("image", {}), image)
     if video:
         req_ov["video"] = deep_merge(req_ov.get("video", {}), video)
 
-    scenes = normalize_scenario_structure(scenario_input, request_overrides=req_ov)
+    resolved_scenario_dict = resolve_scenario_dict(scenario_input, request_overrides=req_ov)
+    scenes = normalize_scenario_structure(resolved_scenario_dict)
 
-    scenario_dict = scenario_input if isinstance(scenario_input, dict) else {}
-    effective_vid = deep_merge(scenario_dict.get("video", {}), req_ov.get("video", {}))
+    effective_vid = resolved_scenario_dict.get("video", {})
     v_engine = effective_vid.get("engine", "wan-fast").lower()
     width = int(effective_vid.get("width", 832))
     height = int(effective_vid.get("height", 480))
@@ -313,7 +368,7 @@ def execute_scenario_pipeline(
     comfy_client.reset_interrupt()
 
     _PIPELINE_STATUS["is_running"] = True
-    _PIPELINE_STATUS["scenario_name"] = scenario_dict.get("name") or f"{run_prefix}-final"
+    _PIPELINE_STATUS["scenario_name"] = resolved_scenario_dict.get("name") or f"{run_prefix}-final"
     _PIPELINE_STATUS["total_scenes"] = total_scenes
     _PIPELINE_STATUS["total_blocks"] = total_blocks
     _PIPELINE_STATUS["processed_blocks"] = 0
@@ -345,19 +400,19 @@ def execute_scenario_pipeline(
                 cb=progress_callback
             )
 
-            anchor_filename = f"{run_prefix}-s{scene_idx:03d}-anchor.png"
             ok, anchor_img_path, anchor_b64 = img_engine_mod.generate_anchor_frame(
                 anchor_meta=anchor_meta,
                 width=width,
-                height=height,
-                custom_filename=anchor_filename
+                height=height
             )
             if not ok:
                 raise RuntimeError(f"Failed to obtain anchor keyframe for {scene_name}: {anchor_img_path}")
 
-            if s_idx == 0 and anchor_b64:
+            if s_idx == 0:
                 first_poster_b64 = anchor_b64
                 first_poster_path = anchor_img_path
+                if resolved_scenario_dict.get("scenes") and len(resolved_scenario_dict["scenes"]) > 0:
+                    resolved_scenario_dict["scenes"][0]["anchor_image"]["image_path"] = anchor_img_path
 
             next_tail_latent = None
             next_tail_latent_count = 0
@@ -676,16 +731,29 @@ def execute_scenario_pipeline(
             except Exception as ex:
                 log(f"Warning: HUD generation failed: {ex}")
 
+        # Save resolved scenario spec artifact for replay/audit
+        spec_filename = f"{run_prefix}-spec.json"
+        spec_dir = config.WORKFLOWS_DIR if config.WORKFLOWS_DIR and os.path.isdir(config.WORKFLOWS_DIR) else OUTPUT_VID_DIR
+        spec_path = os.path.join(spec_dir, spec_filename)
+        try:
+            with open(spec_path, "w", encoding="utf-8") as f:
+                json.dump(resolved_scenario_dict, f, indent=2, ensure_ascii=False)
+            log(f"Saved resolved scenario specification: {spec_path}")
+        except Exception as ex:
+            log(f"Warning: Failed to save resolved scenario spec to {spec_path}: {ex}")
+
         return {
+            "run_prefix": run_prefix,
             "video_path": final_path,
-            "hud_video_path": hud_path,
+            "spec_path": spec_path,
             "poster_path": poster_path,
             "poster_base64": poster_b64,
             "duration": total_duration,
             "width": width,
             "height": height,
             "fps": fps,
-            "scenes_count": len(scenes)
+            "scenes_count": len(scenes),
+            "hud_video_path": hud_path
         }
     finally:
         _PIPELINE_STATUS["is_running"] = False

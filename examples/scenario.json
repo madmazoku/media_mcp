@@ -1,0 +1,38 @@
+{
+  "name": "Hermione Vintage Train Journey",
+  "image": {
+    "engine": "sdxl",
+    "cfg": 5.5,
+    "steps": 30
+  },
+  "video": {
+    "engine": "wan-fast",
+    "width": 832,
+    "height": 480,
+    "fps": 16,
+    "max_duration": 10.0,
+    "negative_prompt": "blurry, low quality, jitter, static, deformed, extra limbs, bad anatomy, text, watermark"
+  },
+  "scenes": [
+    {
+      "name": "Scene 1: Train Compartment",
+      "anchor_image": {
+        "prompt": "score_9, score_8_up, score_7_up, 1girl, young Hermione Granger, bushy wavy brown hair, warm brown eyes, Hogwarts school uniform, inside cozy vintage train compartment, soft golden afternoon sunlight"
+      },
+      "blocks": [
+        {
+          "name": "Block 1: Entering Compartment",
+          "duration": 4.5,
+          "overlap": 1.0,
+          "motion_prompt": "She gently slides the compartment door open with her hand, stepping inside gracefully, looking around with a polite, curious expression"
+        },
+        {
+          "name": "Block 2: Sitting Down",
+          "duration": 4.5,
+          "overlap": 0.0,
+          "motion_prompt": "She moves toward the window seat and sits down gracefully, smoothing her pleated skirt with her hand, soft sunlight illuminating her face"
+        }
+      ]
+    }
+  ]
+}

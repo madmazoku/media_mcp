@@ -15,16 +15,15 @@ from jsonschema import Draft202012Validator
 SCHEMAS_DIR = Path(__file__).resolve().parent.parent.parent / "schemas"
 
 MCP_TOOL_SCHEMA_MAP: Dict[str, str] = {
-    "video_run_scenario": "mcp_video_run_scenario.json",
-    "video_validate_scenario": "mcp_video_validate_scenario.json",
-    "video_generate_block": "mcp_video_generate_block.json",
-    "comfy_flux_txt2img": "mcp_comfy_flux_txt2img.json",
-    "sd_txt2img": "mcp_sd_txt2img.json",
-    "sd_set_model": "mcp_sd_set_model.json",
-    "sd_get_models": "mcp_empty.json",
-    "sd_get_loras": "mcp_empty.json",
+    "image_generate": "mcp_image_generate.json",
+    "video_generate": "mcp_video_generate.json",
+    "video_validate": "mcp_video_validate.json",
+    "media_get_models": "mcp_media_get_models.json",
+    "media_get_samplers": "mcp_media_get_samplers.json",
+    "media_get_loras": "mcp_media_get_loras.json",
     "media_get_status": "mcp_empty.json",
     "media_interrupt": "mcp_empty.json",
+    "media_reload_modules": "mcp_empty.json",
 }
 
 _RAW_SCHEMA_CACHE: Dict[str, Dict[str, Any]] = {}

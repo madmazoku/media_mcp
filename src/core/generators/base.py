@@ -7,7 +7,7 @@ Base abstractions, request contracts, and result models for media generators.
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 def snap_to_16(dim: int, default: int = 1024) -> int:
@@ -30,7 +30,6 @@ def snap_to_32(dim: int, default: int = 832) -> int:
 class GenerationRequest:
     prompt: str
     seed: int = -1
-    custom_filename: Optional[str] = None
 
 
 @dataclass
@@ -39,12 +38,37 @@ class ImageRequest(GenerationRequest):
     width: int = 1024
     height: int = 1024
     steps: Optional[int] = None
-    cfg_scale: float = 7.0
+    cfg: float = 7.0
     guidance: float = 3.5
-    sampler_name: Optional[str] = None
-    lora_name: Optional[str] = None
-    lora_strength: float = 0.8
-    model_name: Optional[str] = None
+    sampler: Optional[str] = None
+    loras: Optional[List[Dict[str, Any]]] = None
+    model: Optional[str] = None
+    custom_filename: Optional[str] = None
+
+    # Compatibility aliases
+    @property
+    def cfg_scale(self) -> float:
+        return self.cfg
+
+    @cfg_scale.setter
+    def cfg_scale(self, val: float):
+        self.cfg = val
+
+    @property
+    def sampler_name(self) -> Optional[str]:
+        return self.sampler
+
+    @sampler_name.setter
+    def sampler_name(self, val: Optional[str]):
+        self.sampler = val
+
+    @property
+    def model_name(self) -> Optional[str]:
+        return self.model
+
+    @model_name.setter
+    def model_name(self, val: Optional[str]):
+        self.model = val
 
 
 @dataclass
@@ -65,6 +89,8 @@ class VideoRequest(GenerationRequest):
     cfg: Optional[float] = None
     ramp_latents: int = 3
     min_cfg: float = 1.0
+    model: Optional[str] = None
+    loras: Optional[List[Dict[str, Any]]] = None
     out_video_name: Optional[str] = None
     progress_callback: Optional[Any] = None
 
@@ -72,12 +98,27 @@ class VideoRequest(GenerationRequest):
 @dataclass
 class GenerationResult:
     success: bool
+    image_path: Optional[str] = None
+    video_path: Optional[str] = None
     file_path: Optional[str] = None
     base64_data: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     tail_latent_path: Optional[str] = None
     tail_image_path: Optional[str] = None
     error: Optional[str] = None
+
+    def __post_init__(self):
+        # Synchronize file_path with image_path or video_path
+        if self.file_path and not self.image_path and not self.video_path:
+            lower = self.file_path.lower()
+            if any(lower.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".webp")):
+                self.image_path = self.file_path
+            elif any(lower.endswith(ext) for ext in (".mp4", ".mov", ".mkv", ".webm")):
+                self.video_path = self.file_path
+        elif self.image_path and not self.file_path:
+            self.file_path = self.image_path
+        elif self.video_path and not self.file_path:
+            self.file_path = self.video_path
 
 
 class BaseGenerator(ABC):

@@ -1,0 +1,4 @@
+{
+  "engine": "sdxl",
+  "model": "ponyDiffusionV6XL_v6StartWithThis.safetensors"
+}

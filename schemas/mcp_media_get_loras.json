@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mcp_media_get_loras.json",
+  "title": "media_get_loras",
+  "description": "Inspect compatible LoRAs and their activation triggers for a specific engine and model.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["engine", "model"],
+  "properties": {
+    "engine": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Engine name (e.g. 'sdxl', 'flux1', 'wan-fast')"
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Model filename or identifier"
+    },
+    "pattern": {
+      "type": "string",
+      "description": "Optional case-insensitive regular expression (Python regex) to filter LoRAs by name or triggers (e.g. 'hermione|emma', 'cyber.*', 'v[0-9]+')"
+    }
+  }
+}

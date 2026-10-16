@@ -36,11 +36,7 @@ temp/
 !workflows/*.png
 !assets/*
 
-# Environment & IDE
-/config.json
-*.local.json
-.env
-.env.local
+# IDE & Editors
 .vscode/
 .idea/
 *.swp

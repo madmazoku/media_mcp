@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "image_spec.json",
+  "title": "Media MCP Image Specification",
+  "description": "Unified parameter specification for image generation (SDXL, Pony, FLUX.1, FLUX.2).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["prompt"],
+  "properties": {
+    "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Visual prompt text describing the scene"
+    },
+    "negative_prompt": {
+      "type": "string",
+      "description": "Negative prompt (SDXL / Pony only)"
+    },
+    "engine": {
+      "type": "string",
+      "enum": ["sdxl", "flux1", "flux2"],
+      "default": "sdxl",
+      "description": "Image generation engine"
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Model filename or identifier"
+    },
+    "width": {
+      "type": "integer",
+      "minimum": 64,
+      "multipleOf": 16,
+      "description": "Output width in pixels (multiple of 16)"
+    },
+    "height": {
+      "type": "integer",
+      "minimum": 64,
+      "multipleOf": 16,
+      "description": "Output height in pixels (multiple of 16)"
+    },
+    "steps": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 150,
+      "description": "Sampling steps"
+    },
+    "cfg": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 30.0,
+      "description": "Classifier-Free Guidance scale (SDXL)"
+    },
+    "guidance": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 30.0,
+      "description": "Flux guidance scale (FLUX.1 / FLUX.2)"
+    },
+    "sampler": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Sampler name"
+    },
+    "seed": {
+      "type": "integer",
+      "minimum": -1,
+      "description": "Random seed (-1 for randomized)"
+    },
+    "loras": {
+      "type": "array",
+      "description": "Optional list of LoRAs to apply in order",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "LoRA model name or filename"
+          },
+          "strength": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 2.0,
+            "default": 0.8,
+            "description": "LoRA weight strength"
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "engine": { "enum": ["flux1", "flux2"] }
+        },
+        "required": ["engine"]
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            { "required": ["negative_prompt"] },
+            { "required": ["cfg"] }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "engine": { "const": "flux2" }
+        },
+        "required": ["engine"]
+      },
+      "then": {
+        "not": {
+          "required": ["loras"]
+        }
+      }
+    }
+  ]
+}

@@ -59,12 +59,19 @@
       "type": "string",
       "description": "Local filesystem path to ComfyUI/output directory"
     },
+    "media_mcp_port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "default": 7865,
+      "description": "SSE HTTP port for unified media_mcp server"
+    },
     "image_mcp_port": {
       "type": "integer",
       "minimum": 1,
       "maximum": 65535,
       "default": 7865,
-      "description": "SSE HTTP port for image_mcp server"
+      "description": "SSE HTTP port for image_mcp server (legacy compatibility)"
     },
     "video_mcp_port": {
       "type": "integer",

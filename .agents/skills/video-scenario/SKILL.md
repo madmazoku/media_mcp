@@ -1,7 +1,7 @@
 ---
 name: video-scenario
 description: >-
-  Руководство и алгоритм создания многосценарных видеороликов через media_mcp (Wan 2.2 / LTX-2.3 22B / ComfyUI / FFmpeg).
+  Руководство и алгоритм создания видеороликов через единый media_mcp (Wan 2.2 / LTX-2.3 22B / ComfyUI / FFmpeg).
   Поддерживает иерархическую структуру "Сцена -> Блоки", гибридный опорный кадр (готовый файл или промпт),
   истинное латентное кондиционирование (Latent-Chaining), строгую валидацию JSON Schema (schemas/*.json) и мгновенную сборку Stream Copy (-c copy).
 ---
@@ -10,34 +10,42 @@ description: >-
 
 ## 1. Архитектура: Сцены, Блоки и Latent-Chaining
 
-Видео строится по кинематографической структуре **Монтажная сцена (`scenes`) -> Непрерывные блоки движения (`blocks`)** и строго валидируется по [`G:/Git/media_mcp/schemas/scenario.json`](file:///G:/Git/media_mcp/schemas/scenario.json):
+Видео строится по кинематографической структуре **Монтажная сцена (`scenes`) -> Непрерывные блоки движения (`blocks`)** и строго валидируется по [`schemas/scenario.json`](file:///schemas/scenario.json):
 
 - **Сцена (`scene`):** непрерывный съёмочный план в одной локации/ракурсе.
   - Начинается с **Опорного кадра (`anchor_image`)**.
   - Опорный кадр задаёт визуальную эстетику, анатомию, одежду, свет и композицию сцены.
+  - **Правило разрешения опорного кадра:** генерация опорника всегда должна выполняться в **нативном разрешении фото-модели (~1.0 MP)** с **тем же аспектным соотношением**, что и целевое видео. Генерация опорного кадра напрямую в низком разрешении видео (например, 832x480) категорически запрещена, так как вызывает голодание механизма внимания (Attention Starvation) фото-модели и деформацию лиц/анатомии, которые видео-модель затем неизбежно анимирует:
+    - Видео **16:9** (`832x480`) $\longrightarrow$ Опорный кадр **16:9** (`1280x720` в `image`/`anchor_image`)
+    - Видео **9:16** (`480x832`) $\longrightarrow$ Опорный кадр **9:16** (`720x1280` в `image`/`anchor_image`)
+    - Видео **1:1** (`640x640`) $\longrightarrow$ Опорный кадр **1:1** (`1024x1024` в `image`/`anchor_image`)
+    - Видео **4:3** (`832x624`) $\longrightarrow$ Опорный кадр **4:3** (`1152x864` в `image`/`anchor_image`)
+    - Видео **21:9** (`832x352`) $\longrightarrow$ Опорный кадр **21:9** (`1536x640` в `image`/`anchor_image`)
 - **Блоки сцены (`blocks`):**
   - Описывают динамику, физику и траекторию камеры (`motion_prompt`).
   - **1-Frame I2V Chaining (`overlap: 0.0`, по умолчанию):** последний кадр предыдущего блока (`-tail.png`) передаётся стартовым кадром в следующий блок, а дублирующий первый кадр отрезается через `ImageFromBatch`.
   - **True Latent-Chaining (`overlap > 0`):** хвост предыдущего блока (`-tail.latent`) длительностью `overlap` вырезается через `LatentCut` и передаётся в следующий блок как префикс (`prefix_duration`). Следующий блок диффундирует суммарное окно `prefix_duration + clip_duration`, после чего `ImageFromBatch` отсекает префикс и сохраняет полную длительность `clip_duration` в `{block_prefix}-core.mp4`.
   - **Мгновенная сборка фильма:** все блоки всех сцен соединяются напрямую через `ffmpeg -f concat -c copy` с **нулевым перекодированием (0% потерь качества)**.
+  - Одиночный ролик — это просто сцена из одного блока.
 
 ---
 
-## 2. Строгие идентификаторы движков (`engine`) и условная JSON Schema
+## 2. Строгие идентификаторы движков (`engine`) и имена параметров
 
-Все схемы находятся в `G:/Git/media_mcp/schemas/` (`additionalProperties: false`). Любые легаси-алиасы (`image_engine`, `video_engine`, `cfg_scale`, `sampler_name`, `output_name`, `start_image` внутри `anchor_image`, `prompt` вместо `motion_prompt` внутри `block`) запрещены и отклоняются валидатором.
+Все схемы находятся в `schemas/` (`additionalProperties: false`).
+Все файлы: строго `<entity>_path` (`scenario_path`, `image_path`, `video_path`, `poster_path`).
+Модели: строго `model`.
+Имена уровней: строго `name` (на уровне сценария, сцены и блока).
 
 ### Видео-движки (`video.engine`, `scenes[].engine`, `blocks[].engine`):
 - **`"wan-fast"` (Wan 2.2 14B Fast, дефолт)** — 4-step Lightx2v LoRA, CFG 1.0, шаг VAE: 4 кадра ($4k+1$).
-- **`"wan"` (Wan 2.2 14B Full)** — полный 20-шаговый сэмплинг UNet High/Low Noise, CFG 3.5–5.0, шаг VAE: 4 кадра ($4k+1$).
-  - *Условные ограничения схемы для `"wan-fast"` / `"wan"`:* запрещены LTX-специфичные поля `lora_name`, `lora_strength`, `weight_dtype`.
+- **`"wan-full"` (Wan 2.2 14B Full)** — полный 20-шаговый сэмплинг UNet High/Low Noise, CFG 3.5–5.0, шаг VAE: 4 кадра ($4k+1$).
 - **`"ltx"` (LTX-2.3 22B)** — 20 шагов, CFG 3.0, Distilled LoRA 1.1, шаг VAE: 8 кадров ($8k+1$), `width` и `height` строго кратны **32**.
-  - *Условные ограничения схемы для `"ltx"`:* запрещены Wan-специфичные поля `checkpoint_low`, `ramp_latents`, `min_cfg`.
 
 ### Фото-движки опорного кадра (`image.engine`, `anchor_image.engine`):
-- **`"sdxl"` (Automatic1111 WebUI, дефолт)** — SDXL / Pony / Illustrious (`cfg`, `sampler`, `negative_prompt`).
-- **`"flux1"` (ComfyUI FLUX.1 Dev)** — поддерживает `guidance`, `lora`, `lora_strength`. Запрещены `negative_prompt`, `sampler`.
-- **`"flux2"` (ComfyUI FLUX.2 Klein)** — поддерживает `guidance`. Запрещены `lora` (несовместимость размерностей тензоров с FLUX.1), `negative_prompt`, `sampler`.
+- **`"sdxl"` (Automatic1111 WebUI, дефолт)** — SDXL / Pony / Illustrious (`cfg`, `sampler`, `negative_prompt`, `loras`).
+- **`"flux1"` (ComfyUI FLUX.1 Dev)** — поддерживает `guidance`, `loras`. Запрещены `negative_prompt`, `cfg`.
+- **`"flux2"` (ComfyUI FLUX.2 Klein)** — поддерживает `guidance`. Запрещены `loras` (несовместимость размерностей тензоров с FLUX.1), `negative_prompt`, `cfg`.
 
 ---
 
@@ -59,109 +67,58 @@ description: >-
 
 ---
 
-## 4. Пример валидного сценария (`scenario.json`)
+## 4. Спецификация MCP-инструментов (API Reference)
 
-```json
-{
-  "name": "Hermione Train Compartment",
-  "image": {
-    "engine": "sdxl",
-    "cfg": 5.5,
-    "steps": 30
-  },
-  "video": {
-    "engine": "wan-fast",
-    "width": 832,
-    "height": 480,
-    "fps": 16,
-    "max_duration": 10.0,
-    "negative_prompt": "blurry, low quality, jitter, static, deformed, extra limbs, bad anatomy, text, watermark"
-  },
-  "scenes": [
-    {
-      "scene_name": "Сцена 1: Купе поезда",
-      "anchor_image": {
-        "prompt": "score_9, score_8_up, score_7_up, 1girl, young Hermione Granger, bushy wavy brown hair, warm brown eyes, Hogwarts school uniform, inside cozy vintage train compartment, soft golden afternoon sunlight"
-      },
-      "blocks": [
-        {
-          "name": "Блок 1: Открытие двери",
-          "duration": 4.5,
-          "overlap": 0.0,
-          "motion_prompt": "She gently slides the compartment door open with her hand, stepping inside gracefully, looking around with a polite, curious expression"
-        },
-        {
-          "name": "Блок 2: Осмотр купе",
-          "duration": 4.5,
-          "overlap": 0.0,
-          "motion_prompt": "Looking curiously at the passenger across from her, tilting her head with an inquisitive polite smile, soft breeze moving strands of her hair"
-        }
-      ]
-    }
-  ]
-}
-```
+Все MCP-запросы валидируются по схемам в `schemas/mcp_*.json`.
 
----
-
-## 5. Спецификация MCP-инструментов (API Reference)
-
-Все MCP-запросы валидируются по схемам в `G:/Git/media_mcp/schemas/mcp_*.json`.
-
-### `video_run_scenario` (`mcp_video_run_scenario.json`)
-Запуск генерации видео по сценарию. Требуется ровно один из параметров: `scenario_path` или `scenario_data`.
+### `video_generate` (`mcp_video_generate.json`)
+Запуск генерации видео по сценарию.
+Принимает `scenario_path` *(string)* и/или инлайн объект сценария (`scenes`, `image`, `video`, `name`).
+Если передан `scenario_path`, сервер загружает базовый JSON-файл и накладывает оверлей переданных параметров (глубокий мердж для объектов, замена для списков). Ключ `scenario_path` немедленно извлекается и удаляется из результирующего словаря, предотвращая утечки и рекурсию.
+Каждый запуск сохраняет итоговый разрешённый JSON-сценарий в `workflows/{run_prefix}-spec.json` и возвращает `run_prefix` и `spec_path` в ответе.
 
 | Аргумент | Тип | По умолчанию | Описание |
 |---|---|---|---|
-| `scenario_path` | `string` | — | Путь к JSON-файлу сценария (взаимоисключающий с `scenario_data`). |
-| `scenario_data` | `object` | — | Объект сценария по `scenario.json` (взаимоисключающий с `scenario_path`). |
-| `image` | `object` | — | Глобальные переопределения секции `image` (`engine`, `model`, `checkpoint`, `prompt`, `negative_prompt`, `width`, `height`, `steps`, `cfg`, `guidance`, `sampler`, `seed`, `lora`, `lora_strength`). |
-| `video` | `object` | — | Глобальные переопределения секции `video` (`engine`, `model`, `checkpoint`, `checkpoint_low`, `prompt`, `negative_prompt`, `width`, `height`, `fps`, `max_duration`, `steps`, `cfg`, `seed`, `lora_name`, `lora_strength`, `weight_dtype`, `ramp_latents`, `min_cfg`). |
+| `scenario_path` | `string` | — | Путь к базовому JSON-файлу сценария на диске. |
+| `scenes` | `array` | — | Список сцен сценария. |
+| `image` | `object` | — | Глобальные настройки опорного кадра (`engine`, `model`, `prompt`, `negative_prompt`, `width`, `height`, `steps`, `cfg`, `guidance`, `sampler`, `seed`, `loras`). |
+| `video` | `object` | — | Глобальные настройки видео (`engine`, `model`, `prompt`, `negative_prompt`, `width`, `height`, `fps`, `max_duration`, `loras`). |
 | `enable_hud` | `boolean` | `false` | Сгенерировать отладочное видео `{run_prefix}-hud.mp4` с таймлайном блоков. |
 
-### `video_validate_scenario` (`mcp_video_validate_scenario.json`)
-Предварительная валидация сценария по `scenario.json`, проверка существования файлов `anchor_image.image_path` и проверка условий `overlap_duration < clip_duration` и `prefix_duration + clip_duration < max_duration`.
+### `video_validate` (`mcp_video_validate.json`)
+Предварительная сухая валидация сценария по схеме, проверка наличия файлов `image_path` и проверка законов таймингов. Принимает те же `scenario_path` и инлайн-структуры.
 
-| Аргумент | Тип | Описание |
-|---|---|---|
-| `scenario_path` | `string` | Путь к JSON-файлу сценария. |
-| `scenario_data` | `object` | Объект сценария по `scenario.json`. |
+### Автономный CLI запуск (Standalone CLI)
+Все инструменты поддерживают прямой вызов через единый CLI runner с идентичной логикой обработки:
+```cmd
+cmd\cli.cmd [--config config.json] <tool_name> [request_path | -]
+```
+Примеры:
+```cmd
+cmd\cli.cmd video_validate examples/scenario.json
+cmd\cli.cmd --config config.json video_generate workflows/hermione_orbit.json
+echo {"scenario_path":"examples/scenario.json"} | cmd\cli.cmd video_validate -
+```
 
-### `video_generate_block` (`mcp_video_generate_block.json`)
-Генерация одиночного видеосегмента. Обязательны `prompt` и хотя бы один из `start_image` / `prefix_latent`.
+### `media_get_models`, `media_get_samplers`, `media_get_loras`
+Инспекция чекпоинтов, сэмплеров и LoRA с триггерными словами. `media_get_loras` поддерживает опциональный `pattern` (регистронезависимый Python regex для поиска по имени LoRA или триггерам).
 
-| Аргумент | Тип | Обязательный | Описание |
-|---|---|---|---|
-| `prompt` | `string` | **Да** | Промпт движения и камеры. |
-| `engine` | `"wan-fast"` \| `"wan"` \| `"ltx"` | Нет (`"wan-fast"`) | Видео-движок. |
-| `start_image` | `string` | Да (или `prefix_latent`) | Путь к стартовому изображению. |
-| `prefix_latent` | `string` | Да (или `start_image`) | Путь к `.latent` safetensors файлу. |
-| `negative_prompt` | `string` | Нет | Негативный промпт. |
-| `duration` | `number` | Нет (`5.0`) | Длительность блока в секундах (`0 < duration <= 10.0`). |
-| `width` | `integer` | Нет (`832`) | Ширина (кратно 16 для Wan, кратно 32 для LTX). |
-| `height` | `integer` | Нет (`480`) | Высота (кратно 16 для Wan, кратно 32 для LTX). |
-| `fps` | `integer` | Нет (`16` / `24`) | Частота кадров. |
-| `steps` | `integer` | Нет | Число шагов сэмплирования. |
-| `cfg` | `number` | Нет | CFG scale. |
-| `seed` | `integer` | Нет (`-1`) | Сид генерации. |
-
-### `media_get_status` и `media_interrupt` (`mcp_empty.json`)
-Не принимают аргументов (`{}`).
+### `media_get_status`, `media_interrupt`, `media_reload_modules`
+Управление статусом, прерывание и горячая перезагрузка модулей ядра без рестарта сервера.
 
 ---
 
-## 6. Правила именования файлов и вывода в чат
+## 5. Правила именования файлов и вывода в чат
 
-1. **Строгий серверный шаблон имён файлов (без пользовательских имён):**
+1. **Строгий серверный шаблон имён файлов:**
    - Опорный кадр сцены: `{run_prefix}-s{scene_idx:03d}-anchor.png`
    - Блок видео: `{run_prefix}-s{scene_idx:03d}-b{block_idx:03d}-core.mp4`
    - Хвост блока: `-tail.latent` (при `overlap > 0`) или `-tail.png` (при `overlap == 0`)
    - Финальное видео сценария: `{run_prefix}-final.mp4`, постер: `{run_prefix}-final.png`, HUD: `{run_prefix}-hud.mp4`
-   - Одиночный блок (`video_generate_block`): `{run_prefix}-{engine}.mp4`, постер: `{run_prefix}-{engine}.png`
 2. **Оформление в чате:**
    ```markdown
-   [![Нажмите для просмотра](file:///C:/Users/.../media_0.png)](file:///G:/Git/Gemini/media_mcp/videos/filename.mp4)
+   [![Нажмите для просмотра](file:///path/to/media_0.png)](file:///path/to/videos/filename.mp4)
 
-   🎬 **[Смотреть видеоролик](file:///G:/Git/Gemini/media_mcp/videos/filename.mp4)**
+   🎬 **[Смотреть видеоролик](file:///path/to/videos/filename.mp4)**
    ```
 3. **Запрет на самопроверку медиа:** категорически запрещено вызывать `view_file` на сгенерированных изображениях или видео без явного запроса пользователя.

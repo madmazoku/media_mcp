@@ -24,9 +24,9 @@ REPO_DIR = Path(__file__).resolve().parent.parent.parent
 # 1. Resolve configuration JSON file path
 config_file_path = None
 
-# Check CLI arguments: --config <path>
+# Check CLI arguments: --config <path> or -c <path>
 for idx, arg in enumerate(sys.argv):
-    if arg == "--config" and idx + 1 < len(sys.argv):
+    if arg in ("--config", "-c") and idx + 1 < len(sys.argv):
         config_file_path = Path(sys.argv[idx + 1])
         break
 
@@ -59,31 +59,50 @@ default_ffprobe = shutil.which("ffprobe") or "ffprobe"
 FFMPEG_BIN = str(cfg_json.get("ffmpeg_bin", default_ffmpeg))
 FFPROBE_BIN = str(cfg_json.get("ffprobe_bin", default_ffprobe))
 
-# Storage Directories
-OUTPUT_DIR = str(cfg_json.get("output_dir", str(REPO_DIR / "output")))
-OUTPUT_IMG_DIR = str(cfg_json.get("output_img_dir", os.path.join(OUTPUT_DIR, "images")))
-OUTPUT_VID_DIR = str(cfg_json.get("output_vid_dir", os.path.join(OUTPUT_DIR, "videos")))
-TEMP_DIR = str(cfg_json.get("temp_dir", os.path.join(OUTPUT_DIR, "temp")))
-WORKFLOWS_DIR = str(cfg_json.get("workflows_dir", str(REPO_DIR / "workflows")))
+# Storage Directories (configured via config.json)
+OUTPUT_DIR = str(cfg_json.get("output_dir", ""))
+OUTPUT_IMG_DIR = str(cfg_json.get("output_img_dir", os.path.join(OUTPUT_DIR, "images") if OUTPUT_DIR else ""))
+OUTPUT_VID_DIR = str(cfg_json.get("output_vid_dir", os.path.join(OUTPUT_DIR, "videos") if OUTPUT_DIR else ""))
+TEMP_DIR = str(cfg_json.get("temp_dir", os.path.join(OUTPUT_DIR, "temp") if OUTPUT_DIR else ""))
+WORKFLOWS_DIR = str(cfg_json.get("workflows_dir", ""))
 
-# ComfyUI filesystem integration (optional for local setups)
+# ComfyUI filesystem integration (configured via config.json)
 COMFY_INPUT_DIR = str(cfg_json.get("comfy_input_dir", ""))
 COMFY_OUTPUT_DIR = str(cfg_json.get("comfy_output_dir", ""))
 
 # MCP SSE server ports
-IMAGE_MCP_PORT = int(cfg_json.get("image_mcp_port", 7865))
+MEDIA_MCP_PORT = int(cfg_json.get("media_mcp_port", cfg_json.get("image_mcp_port", 7865)))
+IMAGE_MCP_PORT = MEDIA_MCP_PORT
 VIDEO_MCP_PORT = int(cfg_json.get("video_mcp_port", 7866))
 
 # Maximum single-pass block diffusion window (prefix_duration + clip_duration < max_video_duration)
 MAX_VIDEO_DURATION = float(cfg_json.get("max_video_duration", 10.0))
 
+
+def is_configured() -> bool:
+    """Returns True if a valid configuration file was loaded."""
+    return bool(cfg_json)
+
+
+def require_configured(context: str = "This operation") -> None:
+    """Raises RuntimeError if no valid configuration file was loaded."""
+    if not is_configured():
+        raise RuntimeError(
+            f"{context} requires a configuration file. "
+            f"Please specify --config <path_to_config.json> or set MEDIA_CONFIG=<path>."
+        )
+
+
 def ensure_directories():
+    """Ensures configured output and workflow storage directories exist."""
     for d in [OUTPUT_DIR, OUTPUT_IMG_DIR, OUTPUT_VID_DIR, TEMP_DIR, WORKFLOWS_DIR]:
         if d:
             try:
                 os.makedirs(d, exist_ok=True)
-            except Exception as ex:
-                sys.stderr.write(f"[config] Notice: could not create directory {d}: {ex}\n")
+            except Exception:
+                pass
 
-ensure_directories()
+
+if is_configured():
+    ensure_directories()
 

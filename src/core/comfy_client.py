@@ -11,8 +11,8 @@ import os
 import shutil
 import urllib.request
 import urllib.parse
-import urllib.error
-from typing import Dict, Any, Optional, Tuple
+import uuid
+from typing import Dict, Any, Optional, Tuple, List
 from .config import COMFY_URL, COMFY_INPUT_DIR, COMFY_OUTPUT_DIR
 
 
@@ -39,8 +39,48 @@ def get_queue() -> Dict[str, Any]:
     return make_request("/queue")
 
 
-def get_prompt_status() -> Dict[str, Any]:
-    return make_request("/prompt")
+def get_queue_status() -> Dict[str, Any]:
+    try:
+        return make_request("/queue", timeout=5)
+    except Exception:
+        return {}
+
+
+def is_available() -> bool:
+    try:
+        make_request("/system_stats", timeout=2)
+        return True
+    except Exception:
+        return False
+
+
+def get_node_input_combo_list(node_class: str, input_field: str) -> List[str]:
+    """Retrieves allowed combo list values for a node class from ComfyUI /object_info/{node_class}."""
+    try:
+        info = make_request(f"/object_info/{node_class}", timeout=5)
+        node_def = info.get(node_class, {})
+        req_inputs = node_def.get("input", {}).get("required", {})
+        field_def = req_inputs.get(input_field, [])
+        if field_def and isinstance(field_def[0], list):
+            return [str(item) for item in field_def[0]]
+    except Exception:
+        pass
+    return []
+
+
+def get_unet_models() -> List[str]:
+    """Returns available diffusion models / UNets from ComfyUI."""
+    return get_node_input_combo_list("UNETLoader", "unet_name")
+
+
+def get_checkpoint_models() -> List[str]:
+    """Returns available checkpoint models from ComfyUI."""
+    return get_node_input_combo_list("CheckpointLoaderSimple", "ckpt_name")
+
+
+def get_loras() -> List[str]:
+    """Returns available LoRA models from ComfyUI."""
+    return get_node_input_combo_list("LoraLoader", "lora_name")
 
 
 _INTERRUPT_FLAG = False
@@ -143,12 +183,19 @@ def download_output_file(filename: str, subfolder: str = "", file_type: str = "o
 def upload_file_to_comfy(src_path: str, custom_filename: Optional[str] = None) -> str:
     """
     Copies a local file into ComfyUI's input directory so nodes like LoadImage
-    or LoadLatent can reliably access it.
+    or LoadLatent can access it.
+    Requires 'comfy_input_dir' to be configured and exist on disk.
     Returns the filename.
     """
     if not os.path.exists(src_path):
         raise FileNotFoundError(f"Source file not found: {src_path}")
-    os.makedirs(COMFY_INPUT_DIR, exist_ok=True)
+
+    if not COMFY_INPUT_DIR or not os.path.isdir(COMFY_INPUT_DIR):
+        raise RuntimeError(
+            f"ComfyUI input directory is not configured or does not exist on disk: '{COMFY_INPUT_DIR}'. "
+            f"Please set a valid 'comfy_input_dir' in config.json."
+        )
+
     filename = custom_filename or os.path.basename(src_path)
     dest_path = os.path.join(COMFY_INPUT_DIR, filename)
     shutil.copy2(src_path, dest_path)
@@ -157,8 +204,15 @@ def upload_file_to_comfy(src_path: str, custom_filename: Optional[str] = None) -
 
 def find_comfy_output_file(filename: str, subfolder: str = "") -> Optional[str]:
     """
-    Directly checks COMFY_OUTPUT_DIR for an output file to avoid network transfer.
+    Directly checks COMFY_OUTPUT_DIR for an output file.
+    Requires 'comfy_output_dir' to be configured and exist on disk.
     """
+    if not COMFY_OUTPUT_DIR or not os.path.isdir(COMFY_OUTPUT_DIR):
+        raise RuntimeError(
+            f"ComfyUI output directory is not configured or does not exist on disk: '{COMFY_OUTPUT_DIR}'. "
+            f"Please set a valid 'comfy_output_dir' in config.json."
+        )
+
     p = os.path.join(COMFY_OUTPUT_DIR, subfolder, filename) if subfolder else os.path.join(COMFY_OUTPUT_DIR, filename)
     if os.path.exists(p):
         return p
