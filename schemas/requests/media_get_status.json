@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "media_get_status.json",
+  "title": "media_get_status",
+  "description": "Inspect GPU status and running pipeline progress. Takes no arguments.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

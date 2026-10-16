@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "media_reload_modules.json",
+  "title": "Media Reload Modules Response Schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reloaded", "count"],
+  "properties": {
+    "reloaded": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "List of core module names reloaded in reverse dependency order"
+    },
+    "reloaded_modules": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Alias for reloaded list of modules"
+    },
+    "count": {
+      "type": "integer",
+      "description": "Number of reloaded modules"
+    }
+  }
+}

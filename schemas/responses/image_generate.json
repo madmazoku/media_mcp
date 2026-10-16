@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "image_generate.json",
+  "title": "Image Generate Response Schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_prefix",
+    "image_path",
+    "spec_path",
+    "engine",
+    "model",
+    "seed",
+    "width",
+    "height"
+  ],
+  "properties": {
+    "run_prefix": {
+      "type": "string",
+      "description": "Unique run prefix ({timestamp}-{hash})"
+    },
+    "image_path": {
+      "type": "string",
+      "description": "Absolute path to the generated image file (.png)"
+    },
+    "spec_path": {
+      "type": "string",
+      "description": "Absolute path to the resolved generation spec file (.json)"
+    },
+    "engine": {
+      "type": "string",
+      "description": "Generation engine (sdxl, flux1, flux2)"
+    },
+    "model": {
+      "type": "string",
+      "description": "Checkpoint or UNet model name"
+    },
+    "seed": {
+      "type": "integer",
+      "description": "Actual seed used during generation"
+    },
+    "width": {
+      "type": "integer",
+      "description": "Output image width in pixels"
+    },
+    "height": {
+      "type": "integer",
+      "description": "Output height in pixels"
+    }
+  }
+}

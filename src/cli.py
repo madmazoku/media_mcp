@@ -3,14 +3,21 @@
 """
 Standalone CLI runner for media_mcp tools.
 Usage:
-    cli.cmd [--config path] <tool_name> [request_path | -]
-    echo '{"prompt": "..."}' | cli.cmd <tool_name> -
+    bin/cli.sh [--config path] <tool_name> [request.json | -]   (Unix)
+    bin\cli.cmd [--config path] <tool_name> [request.json | -]  (Windows)
+    bin/cli.sh <tool_name> --help
+    bin/cli.sh --help
 """
 
 import sys
 import json
 import os
 from pathlib import Path
+
+# Ensure package import from src/
+SRC_DIR = Path(__file__).resolve().parent
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 # Extract --config or -c before loading any config-dependent modules
 config_path = None
@@ -27,31 +34,14 @@ while i < len(sys.argv):
 if config_path:
     os.environ["MEDIA_CONFIG"] = config_path
 
-# Ensure package import from src/
-SRC_DIR = Path(__file__).resolve().parent
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
-
+from core import config, schema_formatter, schema_validator
 from core.tools import execute_tool, CANONICAL_TOOLS, load_spec_file
 
 args = filtered_argv[1:]
 
-if not args or args[0] in ("-h", "--help", "help"):
-    print("Usage: cli.cmd [--config path] <tool_name> [request_path | -]")
-    print("\nAvailable tools:")
-    for t in CANONICAL_TOOLS:
-        print(f"  - {t}")
-    print("\nExamples:")
-    print("  cli.cmd video_validate examples/scenario.json")
-    print("  cli.cmd image_generate examples/mcp_image_generate.json")
-    print("  cli.cmd --config my_config.json video_validate examples/scenario.json")
-    print("  cli.cmd media_get_status")
-    print("  echo '{\"prompt\": \"...\"}' | cli.cmd image_generate -")
-    sys.exit(0)
-
 
 def cli_progress(message: str, progress=None, total=None):
-    """Prints progress notifications to stderr so stdout remains clean."""
+    """Prints progress notifications to stderr so stdout remains clean JSON."""
     if progress is not None and total:
         pct = int((progress / total) * 100)
         sys.stderr.write(f"\r[{pct}%] {message}")
@@ -60,15 +50,36 @@ def cli_progress(message: str, progress=None, total=None):
     sys.stderr.flush()
 
 
-def main():
+def main() -> int:
+    # 1. Global help invocation (no config required)
+    if not args or args[0] in ("-h", "--help", "help"):
+        print(schema_formatter.format_general_help())
+        return 0
+
     tool_name = args[0]
+
+    # 2. Tool-specific help invocation (no config required)
+    if len(args) > 1 and args[1] in ("-h", "--help", "help"):
+        print(schema_formatter.format_tool_help(tool_name))
+        return 0
+
     if tool_name not in CANONICAL_TOOLS:
-        sys.stderr.write(f"Error: Unknown tool '{tool_name}'. Available: {CANONICAL_TOOLS}\n")
+        sys.stderr.write(f"Error: Unknown tool '{tool_name}'. Available tools: {CANONICAL_TOOLS}\n")
+        sys.stderr.write("Run 'cmd\\cli.cmd --help' to view documentation.\n")
+        return 1
+
+    # 3. Explicit configuration check (Fail-Fast: required for all tool executions)
+    if not config.is_configured():
+        sys.stderr.write(
+            f"Error: Tool '{tool_name}' requires a configuration file.\n"
+            f"Specify --config <path_to_config.json> or set the MEDIA_CONFIG environment variable.\n"
+            f"Run 'cmd\\cli.cmd {tool_name} --help' to view parameter requirements.\n"
+        )
         return 1
 
     request_arg = args[1] if len(args) > 1 else None
 
-    # Resolve payload from stdin, JSON string, or file on disk
+    # 4. Strict payload resolution: only '-' (stdin) or specification file on disk
     payload = {}
     if request_arg == "-":
         try:
@@ -78,23 +89,35 @@ def main():
             sys.stderr.write(f"Error: Failed to parse JSON from stdin: {ex}\n")
             return 1
     elif request_arg:
-        raw_str = request_arg.strip().lstrip("\ufeff")
-        if raw_str.startswith("{") and raw_str.endswith("}"):
-            try:
-                payload = json.loads(raw_str)
-            except Exception as ex:
-                sys.stderr.write(f"Error: Failed to parse JSON argument: {ex}\n")
-                return 1
-        else:
-            try:
-                payload = load_spec_file(request_arg)
-            except Exception as ex:
-                sys.stderr.write(f"Error: {ex}\n")
-                return 1
+        p = Path(request_arg)
+        if not p.is_file():
+            sys.stderr.write(
+                f"Error: Invalid argument '{request_arg}'.\n"
+                f"Payload must be a path to an existing JSON specification file or '-' to read from stdin.\n"
+                f"Direct inline JSON strings are not accepted on the command line.\n"
+            )
+            return 1
+        try:
+            payload = load_spec_file(request_arg)
+        except Exception as ex:
+            sys.stderr.write(f"Error loading specification file '{request_arg}': {ex}\n")
+            return 1
     else:
+        req_schema = schema_validator.get_mcp_tool_schema(tool_name)
+        if req_schema.get("required"):
+            sys.stderr.write(
+                f"Error: Tool '{tool_name}' requires a specification file on disk or '-' to read from stdin.\n"
+                f"Usage:\n"
+                f"    bin/cli.sh {tool_name} <request.json | ->   (Unix)\n"
+                f"    bin\\cli.cmd {tool_name} <request.json | ->  (Windows)\n\n"
+                f"Tip: If piping JSON via pipe, pass '-' as the argument:\n"
+                f"    echo '{{...}}' | bin\\cli.cmd {tool_name} -\n"
+                f"Run 'bin\\cli.cmd {tool_name} --help' to view parameter requirements.\n"
+            )
+            return 1
         payload = {}
 
-    # Delegate execution to the unified core tool runner
+    # 5. Delegate execution to the unified core tool runner
     res = execute_tool(tool_name, payload, progress_callback=cli_progress)
 
     if res.get("isError"):
@@ -102,11 +125,9 @@ def main():
         sys.stderr.write(f"\n[Error] {err_msg}\n")
         return 1
 
-    content = res.get("content", [])
-    for item in content:
-        if item.get("type") == "text":
-            print(item.get("text", ""))
-
+    # 6. Always emit clean, pure formatted JSON to stdout
+    clean_output = {k: v for k, v in res.items() if k not in ("content", "isError")}
+    print(json.dumps(clean_output, indent=2, ensure_ascii=False))
     return 0
 
 

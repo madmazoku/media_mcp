@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "media_get_samplers.json",
+  "title": "Media Get Samplers Response Schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["samplers"],
+  "properties": {
+    "samplers": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "List of compatible samplers with recommended default at index 0"
+    }
+  }
+}

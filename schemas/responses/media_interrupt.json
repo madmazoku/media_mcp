@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "media_interrupt.json",
+  "title": "Media Interrupt Response Schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "interrupted",
+    "message"
+  ],
+  "properties": {
+    "interrupted": {
+      "type": "boolean",
+      "description": "True if interrupt signals were successfully dispatched"
+    },
+    "message": {
+      "type": "string",
+      "description": "Interrupt confirmation message"
+    }
+  }
+}

@@ -209,7 +209,7 @@ def handle_jsonrpc(req: dict) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 def _serve_file_with_range(handler: BaseHTTPRequestHandler, filepath: str, content_type: str):
-    file_size = os.path.getsize(filepath)
+    file_size = Path(filepath).stat().st_size
     range_header = handler.headers.get("Range")
     if range_header and range_header.startswith("bytes="):
         parts = range_header.split("=")[1].split("-")
@@ -275,21 +275,21 @@ class MediaSseHandler(BaseHTTPRequestHandler):
 
         # Serve generated images
         if parsed.path.startswith(("/images/", "/image/")):
-            filename = os.path.basename(parsed.path)
-            fp = os.path.join(config.OUTPUT_IMG_DIR, filename)
-            if os.path.exists(fp) and os.path.isfile(fp):
+            filename = Path(parsed.path).name
+            fp = Path(config.OUTPUT_IMG_DIR) / filename
+            if fp.is_file():
                 ctype = "image/png" if filename.lower().endswith(".png") else "image/jpeg"
-                _serve_file_with_range(self, fp, ctype)
+                _serve_file_with_range(self, fp.as_posix(), ctype)
                 return
             self.send_error(404, "Image Not Found")
             return
 
         # Serve generated videos with Range requests
         if parsed.path.startswith(("/video/", "/videos/")):
-            filename = os.path.basename(parsed.path)
-            fp = os.path.join(config.OUTPUT_VID_DIR, filename)
-            if os.path.exists(fp) and os.path.isfile(fp):
-                _serve_file_with_range(self, fp, "video/mp4")
+            filename = Path(parsed.path).name
+            fp = Path(config.OUTPUT_VID_DIR) / filename
+            if fp.is_file():
+                _serve_file_with_range(self, fp.as_posix(), "video/mp4")
                 return
             self.send_error(404, "Video Not Found")
             return
@@ -409,8 +409,15 @@ def run_stdio_server():
 
 
 if __name__ == "__main__":
+    if not config.is_configured():
+        sys.stderr.write(
+            "[media-mcp] Error: Server requires a valid configuration file.\n"
+            "[media-mcp] Please specify --config <path_to_config.json> or set MEDIA_CONFIG=<path>.\n"
+        )
+        sys.exit(1)
+
     if "--sse" in sys.argv:
-        port = 7865
+        port = config.MEDIA_MCP_PORT
         for arg in sys.argv:
             if arg.startswith("--port="):
                 port = int(arg.split("=")[1])

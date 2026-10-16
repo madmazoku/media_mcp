@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "mcp_media_get_loras.json",
+  "$id": "media_get_loras.json",
   "title": "media_get_loras",
   "description": "Inspect compatible LoRAs and their activation triggers for a specific engine and model.",
   "type": "object",

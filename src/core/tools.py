@@ -42,8 +42,6 @@ CANONICAL_TOOLS = [
     "media_reload_modules",
 ]
 
-CONFIG_REQUIRED_TOOLS = {"image_generate", "video_generate"}
-
 
 # ---------------------------------------------------------------------------
 # Deep Merge & File Helpers
@@ -93,6 +91,12 @@ def reload_core_modules() -> List[str]:
     Dynamically reloads all loaded modules in sys.modules under 'core' in reverse dependency order,
     ensuring code updates take effect immediately without restarting servers.
     """
+    saved_cfg = None
+    if "core.config" in sys.modules:
+        cfg_mod = sys.modules["core.config"]
+        if hasattr(cfg_mod, "cfg_json") and cfg_mod.cfg_json:
+            saved_cfg = dict(cfg_mod.cfg_json)
+
     core_mods = [k for k in list(sys.modules.keys()) if k == "core" or k.startswith("core.")]
     core_mods.sort(key=lambda s: s.count("."), reverse=True)
     reloaded = []
@@ -104,6 +108,10 @@ def reload_core_modules() -> List[str]:
                 reloaded.append(mod_name)
             except Exception as e:
                 log(f"Warning: Failed to reload {mod_name}: {e}")
+
+    if saved_cfg and "core.config" in sys.modules:
+        sys.modules["core.config"].load_config_dict(saved_cfg)
+
     return reloaded
 
 
@@ -145,18 +153,17 @@ def execute_image_generate(args: Dict[str, Any], progress_cb: Optional[Callable]
     )
 
     content: List[Dict[str, Any]] = [{"type": "text", "text": summary_text}]
-    if b64_data:
-        content.append({"type": "image", "data": b64_data, "mimeType": "image/png"})
 
     return {
         "content": content,
         "run_prefix": run_prefix,
-        "image_path": img_path,
-        "spec_path": spec_path,
-        "seed": seed,
-        "width": width,
-        "height": height,
-        "metadata": metadata
+        "image_path": Path(img_path).resolve().as_posix() if img_path else "",
+        "spec_path": Path(spec_path).resolve().as_posix() if spec_path else "",
+        "engine": str(metadata.get("engine", "sdxl")).lower(),
+        "model": str(metadata.get("model", "")),
+        "seed": int(seed) if seed is not None else 0,
+        "width": int(width) if str(width).isdigit() else 1024,
+        "height": int(height) if str(height).isdigit() else 1024
     }
 
 
@@ -176,13 +183,13 @@ def execute_video_generate(args: Dict[str, Any], progress_cb: Optional[Callable]
     final_path = res["video_path"]
     spec_path = res.get("spec_path", "")
     hud_path = res.get("hud_video_path")
-    poster_path = res.get("poster_path")
-    poster_b64 = res.get("poster_base64")
-    dur = res.get("duration", 0.0)
-    w = res.get("width", 832)
-    h = res.get("height", 480)
-    fps = res.get("fps", 16)
-    scenes_cnt = res.get("scenes_count", 1)
+    poster_path = res.get("poster_path", "")
+    dur = float(res.get("duration", 0.0))
+    w = int(res.get("width", 832))
+    h = int(res.get("height", 480))
+    fps = int(res.get("fps", 16))
+    scenes_cnt = int(res.get("scenes_count", 1))
+    blocks_cnt = int(res.get("blocks_count", 0))
 
     file_uri = Path(final_path).resolve().as_uri()
     hud_uri = Path(hud_path).resolve().as_uri() if hud_path else None
@@ -201,21 +208,20 @@ def execute_video_generate(args: Dict[str, Any], progress_cb: Optional[Callable]
         result_text += f"- Diagnostic HUD: [Open HUD Video]({hud_uri})\n"
 
     content: List[Dict[str, Any]] = [{"type": "text", "text": result_text}]
-    if poster_b64:
-        content.append({"type": "image", "data": poster_b64, "mimeType": "image/png"})
 
     return {
         "content": content,
         "run_prefix": run_prefix,
-        "video_path": final_path,
-        "spec_path": spec_path,
-        "poster_path": poster_path,
-        "hud_video_path": hud_path,
+        "video_path": Path(final_path).resolve().as_posix() if final_path else "",
+        "spec_path": Path(spec_path).resolve().as_posix() if spec_path else "",
+        "poster_path": Path(poster_path).resolve().as_posix() if poster_path else "",
+        "hud_video_path": Path(hud_path).resolve().as_posix() if hud_path else None,
         "duration": dur,
         "width": w,
         "height": h,
         "fps": fps,
-        "scenes_count": scenes_cnt
+        "scenes_count": scenes_cnt,
+        "blocks_count": blocks_cnt
     }
 
 
@@ -383,8 +389,10 @@ def execute_media_get_status(args: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "content": [{"type": "text", "text": text_resp}],
         "pipeline": pipe_st,
+        "comfy_online": comfy_avail,
+        "comfyui_available": comfy_avail,
         "a1111_available": a1111_avail,
-        "comfy_available": comfy_avail
+        "report": text_resp
     }
 
 
@@ -395,7 +403,7 @@ def execute_media_interrupt(args: Dict[str, Any]) -> Dict[str, Any]:
     video_pipeline.request_interrupt()
     msg = "Interrupt signals dispatched to ComfyUI, A1111 WebUI, and Active Video Pipelines."
     log(msg)
-    return {"content": [{"type": "text", "text": msg}], "interrupted": True}
+    return {"content": [{"type": "text", "text": msg}], "interrupted": True, "message": msg}
 
 
 def execute_media_reload_modules(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -404,7 +412,9 @@ def execute_media_reload_modules(args: Dict[str, Any]) -> Dict[str, Any]:
     log(msg)
     return {
         "content": [{"type": "text", "text": msg}],
-        "reloaded_modules": reloaded
+        "reloaded": reloaded,
+        "reloaded_modules": reloaded,
+        "count": len(reloaded)
     }
 
 
@@ -494,8 +504,8 @@ def execute_tool(
 
     args = dict(payload or {})
 
-    # 1. Environment configuration check (Fail-Fast)
-    if tool_name in CONFIG_REQUIRED_TOOLS and not config.is_configured():
+    # 1. Environment configuration check (Fail-Fast for all tools)
+    if not config.is_configured():
         err_msg = (
             f"Tool '{tool_name}' requires an environment configuration file.\n"
             f"Please specify --config <path_to_config.json> or set MEDIA_CONFIG environment variable."
@@ -506,7 +516,7 @@ def execute_tool(
             "content": [{"type": "text", "text": f"Configuration Error:\n{err_msg}"}]
         }
 
-    # 2. Schema validation against canonical JSON Schema
+    # 2. Schema validation against canonical JSON Schema (input)
     try:
         schema_validator.validate_mcp_args(tool_name, args)
     except schema_validator.SchemaValidationError as ex:
@@ -533,9 +543,18 @@ def execute_tool(
         else:
             res = handler(args)
 
-        if "isError" not in res and "error" in res and "content" not in res:
+        if res.get("isError") or "error" in res:
             res["isError"] = True
-            res["content"] = [{"type": "text", "text": f"Error: {res['error']}"}]
+            if "content" not in res:
+                res["content"] = [{"type": "text", "text": f"Error: {res.get('error', 'Execution failed')}"}]
+            return res
+
+        # 4. Mandatory Response Schema Validation (output)
+        clean_res = {k: v for k, v in res.items() if k not in ("content", "isError")}
+        schema_validator.validate_mcp_response(tool_name, clean_res)
+
+        # 5. Standard MCP text content with pure formatted JSON
+        res["content"] = [{"type": "text", "text": json.dumps(clean_res, indent=2, ensure_ascii=False)}]
 
         return res
     except Exception as ex:

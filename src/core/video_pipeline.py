@@ -9,6 +9,7 @@ Seamless FFmpeg stream copy assembly + dynamic countdown HUD.
 
 import os
 import sys
+import json
 import time
 import math
 import shutil
@@ -19,7 +20,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from . import config
-from .config import OUTPUT_VID_DIR, OUTPUT_IMG_DIR, MAX_VIDEO_DURATION
+from .config import MAX_VIDEO_DURATION, get_temp_dir
 from .schema_validator import validate_scenario
 from . import ffmpeg_engine
 from . import comfy_client
@@ -497,6 +498,10 @@ def execute_scenario_pipeline(
                 cb=progress_callback
             )
 
+            scene_anchor_filename = f"{run_prefix}-s{scene_idx:03d}-anchor.png"
+            if not anchor_meta.get("custom_filename"):
+                anchor_meta["custom_filename"] = (get_temp_dir() / scene_anchor_filename).resolve().as_posix()
+
             ok, anchor_img_path, anchor_b64 = img_engine_mod.generate_anchor_frame(
                 anchor_meta=anchor_meta,
                 width=width,
@@ -577,7 +582,7 @@ def execute_scenario_pipeline(
                         k_core = max(1, round(dur * fps / stride))
                         ltx_core_frames = stride * k_core + 1
                         ltx_num_frames = ltx_core_frames
-                    elif next_tail_latent and os.path.exists(next_tail_latent):
+                    elif next_tail_latent and Path(next_tail_latent).is_file():
                         # Mode A: Latent prefix (previous block had overlap > 0)
                         ltx_start_img = None
                         ltx_pref_latent = next_tail_latent
@@ -595,7 +600,7 @@ def execute_scenario_pipeline(
                         k_core = max(1, round(dur * fps / stride))
                         ltx_core_frames = stride * k_core
                         ltx_num_frames = ltx_pref_pixel_frames + ltx_core_frames
-                    elif next_tail_image and os.path.exists(next_tail_image):
+                    elif next_tail_image and Path(next_tail_image).is_file():
                         # Mode B: 1-frame Image Chaining (previous block had overlap == 0)
                         ltx_start_img = next_tail_image
                         ltx_pref_latent = None
@@ -603,7 +608,7 @@ def execute_scenario_pipeline(
                         ltx_pref_pixel_frames = 1
                         ltx_core_frames = stride * k_core
                         ltx_num_frames = stride * k_core + 1
-                        log(f"Configuring LTX 1-frame I2V chaining: {os.path.basename(next_tail_image)} (core={ltx_core_frames})")
+                        log(f"Configuring LTX 1-frame I2V chaining: {Path(next_tail_image).name} (core={ltx_core_frames})")
                     else:
                         ltx_start_img = anchor_img_path
                         ltx_pref_latent = None
@@ -643,16 +648,16 @@ def execute_scenario_pipeline(
                         raise RuntimeError(f"Block generation failed [{scene_name} : {b_name}]: {res.error}")
 
                     if not is_last:
-                        if overlap > 0 and save_tail and res.tail_latent_path and os.path.exists(res.tail_latent_path):
+                        if overlap > 0 and save_tail and res.tail_latent_path and Path(res.tail_latent_path).is_file():
                             next_tail_latent = res.tail_latent_path
                             next_tail_latent_count = tail_frames
                             next_tail_image = None
-                            log(f"Received pristine workflow tail latent for next block (LTX): {os.path.basename(next_tail_latent)} ({tail_frames} latents)")
-                        elif res.tail_image_path and os.path.exists(res.tail_image_path):
+                            log(f"Received pristine workflow tail latent for next block (LTX): {Path(next_tail_latent).name} ({tail_frames} latents)")
+                        elif res.tail_image_path and Path(res.tail_image_path).is_file():
                             next_tail_latent = None
                             next_tail_latent_count = 0
                             next_tail_image = res.tail_image_path
-                            log(f"Received pristine workflow tail image for next block: {os.path.basename(next_tail_image)}")
+                            log(f"Received pristine workflow tail image for next block: {Path(next_tail_image).name}")
                         else:
                             next_tail_latent = None
                             next_tail_latent_count = 0
@@ -682,7 +687,7 @@ def execute_scenario_pipeline(
                         k_core = max(1, round(dur * fps / 4))
                         wan_core_frames = 4 * k_core + 1
                         wan_num_frames = wan_core_frames
-                    elif next_tail_latent and os.path.exists(next_tail_latent):
+                    elif next_tail_latent and Path(next_tail_latent).is_file():
                         # Mode A: Latent prefix (previous block had overlap > 0)
                         wan_start_img = None
                         wan_pref_latent = next_tail_latent
@@ -700,7 +705,7 @@ def execute_scenario_pipeline(
                         k_core = max(1, round(dur * fps / 4))
                         wan_core_frames = 4 * k_core
                         wan_num_frames = wan_pref_pixel_frames + wan_core_frames
-                    elif next_tail_image and os.path.exists(next_tail_image):
+                    elif next_tail_image and Path(next_tail_image).is_file():
                         # Mode B: 1-frame Image Chaining (previous block had overlap == 0)
                         wan_start_img = next_tail_image
                         wan_pref_latent = None
@@ -708,7 +713,7 @@ def execute_scenario_pipeline(
                         wan_pref_pixel_frames = 1
                         wan_core_frames = 4 * k_core
                         wan_num_frames = 4 * k_core + 1
-                        log(f"Configuring 1-frame I2V chaining from previous block: {os.path.basename(next_tail_image)} (diffusing {wan_num_frames} frames, slicing core 1..{wan_core_frames})")
+                        log(f"Configuring 1-frame I2V chaining from previous block: {Path(next_tail_image).name} (diffusing {wan_num_frames} frames, slicing core 1..{wan_core_frames})")
                     else:
                         wan_start_img = anchor_img_path
                         wan_pref_latent = None
@@ -724,9 +729,9 @@ def execute_scenario_pipeline(
                     log(f"Wan frames: total={wan_num_frames}, prefix={wan_pref_pixel_frames} ({k_pref_lat if (b_idx > 0 and wan_pref_latent) else 0} latents), core={wan_core_frames}, next_tail={tail_frames} latents")
                     log(f"Ramp latents: {blk_ramp}, min_cfg: {blk_min_cfg}")
                     if wan_pref_latent:
-                        log(f"Input prefix latent: {os.path.basename(wan_pref_latent)}")
+                        log(f"Input prefix latent: {Path(wan_pref_latent).name}")
                     else:
-                        log(f"Start anchor image: {os.path.basename(wan_start_img) if wan_start_img else 'None'}")
+                        log(f"Start anchor image: {Path(wan_start_img).name if wan_start_img else 'None'}")
                     log(f"Motion prompt: '{motion_prompt[:60]}...'")
 
                     wan_save_tail_image = (not is_last and overlap == 0)
@@ -758,16 +763,16 @@ def execute_scenario_pipeline(
                         raise RuntimeError(f"Block generation failed [{scene_name} : {b_name}]: {res.error}")
 
                     if not is_last:
-                        if overlap > 0 and res.tail_latent_path and os.path.exists(res.tail_latent_path):
+                        if overlap > 0 and res.tail_latent_path and Path(res.tail_latent_path).is_file():
                             next_tail_latent = res.tail_latent_path
                             next_tail_latent_count = k_tail_lat
                             next_tail_image = None
-                            log(f"Captured tail latent for next block (overlap={overlap}s): {os.path.basename(next_tail_latent)} ({k_tail_lat} latents)")
-                        elif res.tail_image_path and os.path.exists(res.tail_image_path):
+                            log(f"Captured tail latent for next block (overlap={overlap}s): {Path(next_tail_latent).name} ({k_tail_lat} latents)")
+                        elif res.tail_image_path and Path(res.tail_image_path).is_file():
                             next_tail_latent = None
                             next_tail_latent_count = 0
                             next_tail_image = res.tail_image_path
-                            log(f"Received pristine workflow tail image for next block: {os.path.basename(next_tail_image)}")
+                            log(f"Received pristine workflow tail image for next block: {Path(next_tail_image).name}")
                         else:
                             next_tail_latent = None
                             next_tail_latent_count = 0
@@ -795,14 +800,18 @@ def execute_scenario_pipeline(
 
         # Final movie assembly across all blocks in a single lossless Stream Copy (-c copy) pass
         final_name = f"{run_prefix}-final.mp4"
-        final_path = os.path.join(OUTPUT_VID_DIR, final_name)
+        out_vid_dir = Path(config.OUTPUT_VID_DIR) if config.OUTPUT_VID_DIR and Path(config.OUTPUT_VID_DIR).is_dir() else (get_temp_dir() / "videos")
+        out_vid_dir.mkdir(parents=True, exist_ok=True)
+        final_path = (out_vid_dir / final_name).resolve().as_posix()
         ffmpeg_engine.concat_videos(all_block_cores, final_path)
         total_duration = ffmpeg_engine.get_duration(final_path)
 
         # Poster handling: prioritize pristine anchor keyframe from Scene 1
-        poster_filename = f"{run_prefix}-final.png"
-        poster_path = os.path.join(OUTPUT_IMG_DIR, poster_filename)
-        if first_poster_path and os.path.exists(first_poster_path):
+        poster_filename = f"{run_prefix}-poster.png"
+        out_img_dir = Path(config.OUTPUT_IMG_DIR) if config.OUTPUT_IMG_DIR and Path(config.OUTPUT_IMG_DIR).is_dir() else (get_temp_dir() / "images")
+        out_img_dir.mkdir(parents=True, exist_ok=True)
+        poster_path = (out_img_dir / poster_filename).resolve().as_posix()
+        if first_poster_path and Path(first_poster_path).is_file():
             try:
                 shutil.copy2(first_poster_path, poster_path)
             except Exception as e:
@@ -816,12 +825,13 @@ def execute_scenario_pipeline(
                     pass
         else:
             poster_path, poster_b64 = ffmpeg_engine.extract_poster(final_path, poster_path)
+            poster_path = Path(poster_path).resolve().as_posix()
 
         # Optional HUD generation
         hud_path = None
         if enable_hud and generated_block_metadata:
             hud_name = f"{run_prefix}-hud.mp4"
-            hud_final = os.path.join(OUTPUT_VID_DIR, hud_name)
+            hud_final = (out_vid_dir / hud_name).resolve().as_posix()
             try:
                 ffmpeg_engine.generate_hud_overlay(final_path, generated_block_metadata, hud_final)
                 hud_path = hud_final
@@ -830,8 +840,8 @@ def execute_scenario_pipeline(
 
         # Save resolved scenario spec artifact for replay/audit
         spec_filename = f"{run_prefix}-spec.json"
-        spec_dir = config.WORKFLOWS_DIR if config.WORKFLOWS_DIR and os.path.isdir(config.WORKFLOWS_DIR) else OUTPUT_VID_DIR
-        spec_path = os.path.join(spec_dir, spec_filename)
+        workflows_dir = Path(config.WORKFLOWS_DIR) if config.WORKFLOWS_DIR and Path(config.WORKFLOWS_DIR).is_dir() else out_vid_dir
+        spec_path = (workflows_dir / spec_filename).resolve().as_posix()
         try:
             with open(spec_path, "w", encoding="utf-8") as f:
                 json.dump(resolved_scenario_dict, f, indent=2, ensure_ascii=False)
@@ -850,6 +860,7 @@ def execute_scenario_pipeline(
             "height": height,
             "fps": fps,
             "scenes_count": len(scenes),
+            "blocks_count": total_blocks,
             "hud_video_path": hud_path
         }
     finally:

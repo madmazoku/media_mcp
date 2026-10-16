@@ -5,7 +5,23 @@
   "description": "Strict configuration schema for media_mcp (config.json).",
   "type": "object",
   "additionalProperties": false,
+  "required": [
+    "output_dir",
+    "comfy_dir",
+    "comfy_url",
+    "sd_webui_url"
+  ],
   "properties": {
+    "output_dir": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Root directory for generated media outputs (images, videos, workflows, temp are derived automatically)"
+    },
+    "comfy_dir": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Root directory of local ComfyUI installation (input and output directories are derived automatically)"
+    },
     "comfy_url": {
       "type": "string",
       "minLength": 1,
@@ -16,49 +32,6 @@
       "minLength": 1,
       "description": "Automatic1111 WebUI HTTP base URL (e.g. 'http://127.0.0.1:7860')"
     },
-    "ffmpeg_bin": {
-      "type": "string",
-      "minLength": 1,
-      "description": "FFmpeg executable path or binary name"
-    },
-    "ffprobe_bin": {
-      "type": "string",
-      "minLength": 1,
-      "description": "FFprobe executable path or binary name"
-    },
-    "output_dir": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Root directory for generated media outputs"
-    },
-    "output_img_dir": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Directory for generated images and posters"
-    },
-    "output_vid_dir": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Directory for generated final videos"
-    },
-    "temp_dir": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Directory for intermediate block artifacts"
-    },
-    "workflows_dir": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Directory for scenario JSON files"
-    },
-    "comfy_input_dir": {
-      "type": "string",
-      "description": "Local filesystem path to ComfyUI/input directory"
-    },
-    "comfy_output_dir": {
-      "type": "string",
-      "description": "Local filesystem path to ComfyUI/output directory"
-    },
     "media_mcp_port": {
       "type": "integer",
       "minimum": 1,
@@ -66,19 +39,15 @@
       "default": 7865,
       "description": "SSE HTTP port for unified media_mcp server"
     },
-    "image_mcp_port": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 65535,
-      "default": 7865,
-      "description": "SSE HTTP port for image_mcp server (legacy compatibility)"
+    "ffmpeg_bin": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional FFmpeg executable path (defaults to 'ffmpeg' found in system PATH)"
     },
-    "video_mcp_port": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 65535,
-      "default": 7866,
-      "description": "SSE HTTP port for video_mcp server"
+    "ffprobe_bin": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional FFprobe executable path (defaults to 'ffprobe' found in system PATH)"
     },
     "max_video_duration": {
       "type": "number",

@@ -24,7 +24,7 @@ def read_safetensors_metadata(filepath: str) -> Dict[str, Any]:
     Reads the embedded JSON __metadata__ dictionary from a .safetensors file header
     in sub-millisecond time without reading tensor bytes or loading models into RAM/GPU.
     """
-    if not os.path.exists(filepath):
+    if not Path(filepath).is_file():
         return {}
     try:
         with open(filepath, "rb") as f:
@@ -38,7 +38,7 @@ def read_safetensors_metadata(filepath: str) -> Dict[str, Any]:
             parsed = json.loads(header_json)
             return parsed.get("__metadata__", {})
     except Exception as ex:
-        log(f"Warning: Failed to read safetensors metadata from {os.path.basename(filepath)}: {ex}")
+        log(f"Warning: Failed to read safetensors metadata from {Path(filepath).name}: {ex}")
         return {}
 
 
@@ -101,7 +101,7 @@ def detect_lora_architecture(meta: Dict[str, Any], filepath: str = "") -> str:
     """
     base_ver = str(meta.get("ss_base_model_version") or "").lower()
     sd_model_name = str(meta.get("ss_sd_model_name") or "").lower()
-    fn = os.path.basename(filepath).lower() if filepath else ""
+    fn = Path(filepath).name.lower() if filepath else ""
 
     combined = f"{base_ver} {sd_model_name} {fn}"
     if any(x in combined for x in ["flux2"]):

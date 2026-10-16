@@ -12,6 +12,7 @@ import shutil
 import urllib.request
 import urllib.parse
 import uuid
+from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
 from .config import COMFY_URL, COMFY_INPUT_DIR, COMFY_OUTPUT_DIR
 
@@ -187,17 +188,17 @@ def upload_file_to_comfy(src_path: str, custom_filename: Optional[str] = None) -
     Requires 'comfy_input_dir' to be configured and exist on disk.
     Returns the filename.
     """
-    if not os.path.exists(src_path):
+    if not Path(src_path).is_file():
         raise FileNotFoundError(f"Source file not found: {src_path}")
 
-    if not COMFY_INPUT_DIR or not os.path.isdir(COMFY_INPUT_DIR):
+    if not COMFY_INPUT_DIR or not Path(COMFY_INPUT_DIR).is_dir():
         raise RuntimeError(
             f"ComfyUI input directory is not configured or does not exist on disk: '{COMFY_INPUT_DIR}'. "
             f"Please set a valid 'comfy_input_dir' in config.json."
         )
 
-    filename = custom_filename or os.path.basename(src_path)
-    dest_path = os.path.join(COMFY_INPUT_DIR, filename)
+    filename = custom_filename or Path(src_path).name
+    dest_path = (Path(COMFY_INPUT_DIR) / filename).as_posix()
     shutil.copy2(src_path, dest_path)
     return filename
 
@@ -211,13 +212,13 @@ def find_comfy_output_file(filename: str, subfolder: str = "") -> Optional[str]:
     Directly checks COMFY_OUTPUT_DIR for an output file.
     Requires 'comfy_output_dir' to be configured and exist on disk.
     """
-    if not COMFY_OUTPUT_DIR or not os.path.isdir(COMFY_OUTPUT_DIR):
+    if not COMFY_OUTPUT_DIR or not Path(COMFY_OUTPUT_DIR).is_dir():
         raise RuntimeError(
             f"ComfyUI output directory is not configured or does not exist on disk: '{COMFY_OUTPUT_DIR}'. "
             f"Please set a valid 'comfy_output_dir' in config.json."
         )
 
-    p = os.path.join(COMFY_OUTPUT_DIR, subfolder, filename) if subfolder else os.path.join(COMFY_OUTPUT_DIR, filename)
-    if os.path.exists(p):
-        return p
+    p = (Path(COMFY_OUTPUT_DIR) / subfolder / filename) if subfolder else (Path(COMFY_OUTPUT_DIR) / filename)
+    if p.is_file():
+        return p.resolve().as_posix()
     return None

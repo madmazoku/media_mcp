@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "video_validate.json",
+  "title": "Video Validate Response Schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "is_valid",
+    "total_duration",
+    "errors",
+    "warnings",
+    "scenes"
+  ],
+  "properties": {
+    "is_valid": {
+      "type": "boolean",
+      "description": "True if scenario passes all schema, aspect ratio, and timing validations"
+    },
+    "total_duration": {
+      "type": "number",
+      "description": "Projected total video duration in seconds"
+    },
+    "errors": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Validation error messages"
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Validation warning messages"
+    },
+    "scenes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "blocks_count", "projected_duration", "anchor_type"],
+        "properties": {
+          "name": { "type": "string" },
+          "blocks_count": { "type": "integer" },
+          "projected_duration": { "type": "number" },
+          "anchor_type": { "type": "string" }
+        }
+      },
+      "description": "Summary breakdown for each validated scene"
+    }
+  }
+}

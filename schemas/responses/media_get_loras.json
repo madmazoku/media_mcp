@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "media_get_loras.json",
+  "title": "Media Get LoRAs Response Schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["loras"],
+  "properties": {
+    "loras": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "triggers"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "LoRA model name without file extension"
+          },
+          "triggers": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Trained activation trigger words"
+          }
+        }
+      },
+      "description": "List of compatible LoRAs and their activation triggers"
+    }
+  }
+}

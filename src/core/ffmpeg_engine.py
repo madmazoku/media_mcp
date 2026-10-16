@@ -10,6 +10,7 @@ import time
 import shutil
 import base64
 import subprocess
+from pathlib import Path
 from typing import List, Tuple, Optional
 from .config import FFMPEG_BIN, FFPROBE_BIN, TEMP_DIR
 
@@ -42,10 +43,11 @@ def concat_videos(video_list: List[str], out_path: str) -> str:
         shutil.copy2(video_list[0], out_path)
         return out_path
 
-    concat_txt = os.path.join(TEMP_DIR, f"concat_{int(time.time()*1000)}.txt")
+    concat_path = Path(TEMP_DIR) / f"concat_{int(time.time()*1000)}.txt"
+    concat_txt = concat_path.as_posix()
     with open(concat_txt, "w", encoding="utf-8") as f:
         for v in video_list:
-            f.write(f"file '{v.replace(os.sep, '/')}'\n")
+            f.write(f"file '{Path(v).as_posix()}'\n")
 
     cmd = [
         FFMPEG_BIN,
@@ -58,10 +60,7 @@ def concat_videos(video_list: List[str], out_path: str) -> str:
     ]
 
     subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-    try:
-        os.remove(concat_txt)
-    except Exception:
-        pass
+    concat_path.unlink(missing_ok=True)
     return out_path
 
 

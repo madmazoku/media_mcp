@@ -15,15 +15,27 @@ from jsonschema import Draft202012Validator
 SCHEMAS_DIR = Path(__file__).resolve().parent.parent.parent / "schemas"
 
 MCP_TOOL_SCHEMA_MAP: Dict[str, str] = {
-    "image_generate": "mcp_image_generate.json",
-    "video_generate": "mcp_video_generate.json",
-    "video_validate": "mcp_video_validate.json",
-    "media_get_models": "mcp_media_get_models.json",
-    "media_get_samplers": "mcp_media_get_samplers.json",
-    "media_get_loras": "mcp_media_get_loras.json",
-    "media_get_status": "mcp_empty.json",
-    "media_interrupt": "mcp_empty.json",
-    "media_reload_modules": "mcp_empty.json",
+    "image_generate": "requests/image_generate.json",
+    "video_generate": "requests/video_generate.json",
+    "video_validate": "requests/video_validate.json",
+    "media_get_models": "requests/media_get_models.json",
+    "media_get_samplers": "requests/media_get_samplers.json",
+    "media_get_loras": "requests/media_get_loras.json",
+    "media_get_status": "requests/media_get_status.json",
+    "media_interrupt": "requests/media_interrupt.json",
+    "media_reload_modules": "requests/media_reload_modules.json",
+}
+
+MCP_RESPONSE_SCHEMA_MAP: Dict[str, str] = {
+    "image_generate": "responses/image_generate.json",
+    "video_generate": "responses/video_generate.json",
+    "video_validate": "responses/video_validate.json",
+    "media_get_models": "responses/media_get_models.json",
+    "media_get_samplers": "responses/media_get_samplers.json",
+    "media_get_loras": "responses/media_get_loras.json",
+    "media_get_status": "responses/media_get_status.json",
+    "media_interrupt": "responses/media_interrupt.json",
+    "media_reload_modules": "responses/media_reload_modules.json",
 }
 
 _RAW_SCHEMA_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -42,9 +54,22 @@ class SchemaValidationError(ValueError):
 
 def _load_raw_schema(filename: str) -> Dict[str, Any]:
     if filename not in _RAW_SCHEMA_CACHE:
-        schema_path = SCHEMAS_DIR / filename
-        if not schema_path.exists():
-            raise FileNotFoundError(f"JSON Schema file not found: {schema_path}")
+        schema_path = (SCHEMAS_DIR / filename).resolve()
+        if not schema_path.is_file():
+            candidates = [
+                SCHEMAS_DIR / filename,
+                SCHEMAS_DIR / "requests" / filename,
+                SCHEMAS_DIR / "responses" / filename,
+                SCHEMAS_DIR / Path(filename).name,
+            ]
+            found = False
+            for cand in candidates:
+                if cand.is_file():
+                    schema_path = cand
+                    found = True
+                    break
+            if not found:
+                raise FileNotFoundError(f"JSON Schema file not found: {filename} (searched in {SCHEMAS_DIR})")
         with open(schema_path, "r", encoding="utf-8") as f:
             _RAW_SCHEMA_CACHE[filename] = json.load(f)
     return copy.deepcopy(_RAW_SCHEMA_CACHE[filename])
@@ -192,8 +217,8 @@ def validate_scenario(scenario_data: Any) -> None:
 
 
 def validate_image_spec(image_spec_data: Any) -> None:
-    """Validate image specification dictionary against schemas/image_spec.json."""
-    validate_against_schema("image_spec.json", image_spec_data, "image_spec")
+    """Validate image specification dictionary against schemas/requests/image_generate.json."""
+    validate_against_schema("requests/image_generate.json", image_spec_data, "image_spec")
 
 
 def validate_mcp_args(tool_name: str, tool_args: Any) -> None:
@@ -202,3 +227,21 @@ def validate_mcp_args(tool_name: str, tool_args: Any) -> None:
         raise KeyError(f"Unknown MCP tool '{tool_name}'")
     schema_file = MCP_TOOL_SCHEMA_MAP[tool_name]
     validate_against_schema(schema_file, tool_args, f"MCP tool '{tool_name}'")
+
+
+def get_mcp_response_schema(tool_name: str) -> Dict[str, Any]:
+    """Return inlined JSON Schema dict for a tool's response structure."""
+    if tool_name not in MCP_RESPONSE_SCHEMA_MAP:
+        raise KeyError(f"No response schema registered for MCP tool '{tool_name}'")
+    schema = load_schema(MCP_RESPONSE_SCHEMA_MAP[tool_name])
+    for meta_key in ("$schema", "$id", "title"):
+        schema.pop(meta_key, None)
+    return schema
+
+
+def validate_mcp_response(tool_name: str, response_data: Any) -> None:
+    """Validate MCP tool return value against its response schema."""
+    if tool_name not in MCP_RESPONSE_SCHEMA_MAP:
+        return
+    schema_file = MCP_RESPONSE_SCHEMA_MAP[tool_name]
+    validate_against_schema(schema_file, response_data, f"MCP tool response '{tool_name}'")

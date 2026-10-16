@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "media_get_models.json",
+  "title": "Media Get Models Response Schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "image": {
+      "type": "object",
+      "description": "Installed checkpoint models grouped by image engine"
+    },
+    "video": {
+      "type": "object",
+      "description": "Installed UNET and video models grouped by video engine"
+    }
+  }
+}

@@ -77,9 +77,9 @@ description: >-
 
 ## 4. Спецификация MCP-инструментов (API Reference)
 
-Все MCP-запросы валидируются по схемам в `schemas/mcp_*.json`.
+Все MCP-запросы валидируются по схемам в `schemas/requests/<tool>.json`.
 
-### `video_generate` (`mcp_video_generate.json`)
+### `video_generate` (`schemas/requests/video_generate.json`)
 Запуск генерации видео по сценарию.
 Принимает `scenario_path` *(string)* и/или инлайн объект сценария (`scenes`, `image`, `video`, `name`).
 Если передан `scenario_path`, сервер загружает базовый JSON-файл и накладывает оверлей переданных параметров (глубокий мердж для объектов, замена для списков). Ключ `scenario_path` немедленно извлекается и удаляется из результирующего словаря, предотвращая утечки и рекурсию.
@@ -93,7 +93,7 @@ description: >-
 | `video` | `object` | — | Глобальные настройки видео (`engine`, `model`, `prompt`, `negative_prompt`, `width`, `height`, `fps`, `max_duration`, `loras`). |
 | `enable_hud` | `boolean` | `false` | Сгенерировать отладочное видео `{run_prefix}-hud.mp4` с таймлайном блоков. |
 
-### `video_validate` (`mcp_video_validate.json`)
+### `video_validate` (`schemas/requests/video_validate.json`)
 Предварительная сухая валидация сценария по схеме, проверка наличия файлов `image_path` и проверка законов таймингов. Принимает те же `scenario_path` и инлайн-структуры.
 
 ### Автономный CLI запуск (Standalone CLI)
@@ -124,9 +124,10 @@ echo {"scenario_path":"examples/scenario.json"} | cmd\cli.cmd video_validate -
    - Хвост блока: `-tail.latent` (при `overlap > 0`) или `-tail.png` (при `overlap == 0`)
    - Финальное видео сценария: `{run_prefix}-final.mp4`, постер: `{run_prefix}-final.png`, HUD: `{run_prefix}-hud.mp4`
 2. **Оформление в чате:**
+   - Отображать постер из `poster_path` (или скопированный в каталог сессии артефактов при необходимости), под ним давать кликабельную ссылку на `video_path`:
    ```markdown
-   [![Нажмите для просмотра](file:///path/to/media_0.png)](file:///path/to/videos/filename.mp4)
+   ![Постер](file:///path/to/poster_path)
 
-   🎬 **[Смотреть видеоролик](file:///path/to/videos/filename.mp4)**
+   🎬 **[Смотреть видеоролик](file:///path/to/video_path)**
    ```
 3. **Запрет на самопроверку медиа:** категорически запрещено вызывать `view_file` на сгенерированных изображениях или видео без явного запроса пользователя.
