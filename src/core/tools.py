@@ -237,39 +237,34 @@ def execute_video_validate(args: Dict[str, Any]) -> Dict[str, Any]:
             "scenes": []
         }
 
+    v_cfg = args.get("video", {})
+    vid_w = int(v_cfg.get("width", 832))
+    vid_h = int(v_cfg.get("height", 480))
     timing_errors = video_pipeline.collect_scenario_timing_errors(scenes)
+    ar_errors = video_pipeline.collect_scenario_aspect_ratio_errors(scenes, video_width=vid_w, video_height=vid_h)
     errors.extend(timing_errors)
+    errors.extend(ar_errors)
 
     for sc in scenes:
         s_name = sc.get("name", "Scene")
         anchor = sc.get("anchor_image", {})
         blocks = sc.get("blocks", [])
 
+        has_keyframe = bool(anchor.get("keyframe_path"))
         has_image = bool(anchor.get("image_path"))
         has_prompt = bool(anchor.get("prompt"))
 
-        if not has_image and not has_prompt:
-            errors.append(f"{s_name}: Neither 'image_path' nor 'prompt' specified for anchor_image.")
+        if not has_keyframe and not has_image and not has_prompt:
+            errors.append(f"{s_name}: Neither 'keyframe_path', 'image_path' nor 'prompt' specified for anchor_image.")
 
-        if has_image:
-            img_p = Path(anchor["image_path"])
-            if not img_p.exists():
-                if has_prompt:
-                    warnings.append(
-                        f"{s_name}: Anchor image_path not found on disk: {img_p} (will fallback to prompt generation)."
-                    )
-                else:
-                    errors.append(
-                        f"{s_name}: Anchor image_path not found on disk: {img_p} and no fallback prompt provided."
-                    )
-
+        anchor_type = "Ready Keyframe" if has_keyframe else ("img2img Refinement" if has_image else "txt2img Prompt")
         s_dur = sum(float(blk.get("duration", 5.0)) for blk in blocks)
         total_projected_dur += s_dur
         scene_summaries.append({
             "name": s_name,
             "blocks_count": len(blocks),
             "projected_duration": round(s_dur, 2),
-            "anchor_type": "Existing File" if has_image else "Auto-generated via Prompt"
+            "anchor_type": anchor_type
         })
 
     is_valid = (len(errors) == 0)

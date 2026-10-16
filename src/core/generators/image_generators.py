@@ -133,6 +133,19 @@ class SdxlImageGenerator(BaseImageGenerator):
                 init_b64 = base64.b64encode(f.read()).decode("utf-8")
             payload["init_images"] = [init_b64]
             payload["denoising_strength"] = float(request.denoise)
+            if request.is_inpaint and request.mask_path:
+                if not os.path.exists(request.mask_path):
+                    return GenerationResult(success=False, error=f"Mask image not found on disk: {request.mask_path}")
+                with open(request.mask_path, "rb") as f:
+                    mask_b64 = base64.b64encode(f.read()).decode("utf-8")
+                payload["mask"] = mask_b64
+                payload["mask_blur"] = 0
+                payload["inpainting_fill"] = 1  # preserve original image under mask
+                payload["inpaint_full_res"] = False
+                payload["mask_round"] = False  # Prevent A1111 from binarizing continuous mask (np.around)
+                if "override_settings" not in payload:
+                    payload["override_settings"] = {}
+                payload["override_settings"]["overlay_inpaint"] = False
 
         cb = _IMAGE_PROGRESS_CALLBACK
         stop_event = threading.Event()
@@ -187,7 +200,7 @@ class SdxlImageGenerator(BaseImageGenerator):
 
             meta = {
                 "engine": "sdxl",
-                "mode": "img2img" if request.is_img2img else "txt2img",
+                "mode": "inpaint" if request.is_inpaint else ("img2img" if request.is_img2img else "txt2img"),
                 "model": current_model,
                 "width": gen_w,
                 "height": gen_h,
@@ -202,6 +215,10 @@ class SdxlImageGenerator(BaseImageGenerator):
             if request.is_img2img:
                 meta["source_image_path"] = request.image_path
                 meta["denoise"] = float(request.denoise)
+            if request.is_inpaint:
+                meta["mask_path"] = request.mask_path
+            if request.fit:
+                meta["fit"] = request.fit
 
             return GenerationResult(success=True, image_path=final_path, file_path=final_path, base64_data=raw_b64, metadata=meta)
         except Exception as ex:
@@ -273,6 +290,19 @@ class Flux1ImageGenerator(BaseImageGenerator):
             wf["10"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["6", 0], "vae": ["3", 0]}}
             latent_source = ["10", 0]
             denoise_val = float(request.denoise)
+            if request.is_inpaint and request.mask_path:
+                if not os.path.exists(request.mask_path):
+                    return GenerationResult(success=False, error=f"Mask image not found on disk: {request.mask_path}")
+                try:
+                    comfy_mask_fn = comfy_client.copy_to_comfy_input(request.mask_path)
+                except Exception as ex:
+                    return GenerationResult(success=False, error=f"Failed to prepare input mask for ComfyUI: {ex}")
+                wf["12"] = {"class_type": "LoadImageMask", "inputs": {"image": comfy_mask_fn, "channel": "red"}}
+                wf["13"] = {
+                    "class_type": "SetLatentNoiseMask",
+                    "inputs": {"samples": ["10", 0], "mask": ["12", 0]}
+                }
+                latent_source = ["13", 0]
         else:
             latent_source = ["6", 0]
             denoise_val = 1.0
@@ -322,7 +352,7 @@ class Flux1ImageGenerator(BaseImageGenerator):
         b64_data = base64.b64encode(raw_bytes).decode("utf-8")
         meta = {
             "engine": "flux1",
-            "mode": "img2img" if request.is_img2img else "txt2img",
+            "mode": "inpaint" if request.is_inpaint else ("img2img" if request.is_img2img else "txt2img"),
             "model": unet_name,
             "width": width,
             "height": height,
@@ -335,6 +365,10 @@ class Flux1ImageGenerator(BaseImageGenerator):
         if request.is_img2img:
             meta["source_image_path"] = request.image_path
             meta["denoise"] = float(request.denoise)
+        if request.is_inpaint:
+            meta["mask_path"] = request.mask_path
+        if request.fit:
+            meta["fit"] = request.fit
 
         return GenerationResult(success=True, image_path=final_path, file_path=final_path, base64_data=b64_data, metadata=meta)
 
@@ -392,15 +426,36 @@ class Flux2ImageGenerator(BaseImageGenerator):
             wf["1007"] = {"class_type": "LoadImage", "inputs": {"image": comfy_input_fn}}
             wf["1008"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["1007", 0], "vae": ["1010", 0]}}
             latent_source = ["1008", 0]
-            wf["1024"]["inputs"]["denoise"] = float(request.denoise)
+            wf["1026"] = {
+                "class_type": "SplitSigmasDenoise",
+                "inputs": {
+                    "sigmas": ["1024", 0],
+                    "denoise": float(request.denoise)
+                }
+            }
+            sigmas_source = ["1026", 1]
+            if request.is_inpaint and request.mask_path:
+                if not os.path.exists(request.mask_path):
+                    return GenerationResult(success=False, error=f"Mask image not found on disk: {request.mask_path}")
+                try:
+                    comfy_mask_fn = comfy_client.copy_to_comfy_input(request.mask_path)
+                except Exception as ex:
+                    return GenerationResult(success=False, error=f"Failed to prepare input mask for ComfyUI: {ex}")
+                wf["1012"] = {"class_type": "LoadImageMask", "inputs": {"image": comfy_mask_fn, "channel": "red"}}
+                wf["1013"] = {
+                    "class_type": "SetLatentNoiseMask",
+                    "inputs": {"samples": ["1008", 0], "mask": ["1012", 0]}
+                }
+                latent_source = ["1013", 0]
         else:
             latent_source = ["1007", 0]
+            sigmas_source = ["1024", 0]
 
         wf["1021"] = {
             "class_type": "SamplerCustomAdvanced",
             "inputs": {
                 "noise": ["1022", 0], "guider": ["1006", 0], "sampler": ["1023", 0],
-                "sigmas": ["1024", 0], "latent_image": latent_source
+                "sigmas": sigmas_source, "latent_image": latent_source
             }
         }
 
@@ -440,7 +495,7 @@ class Flux2ImageGenerator(BaseImageGenerator):
         b64_data = base64.b64encode(raw_bytes).decode("utf-8")
         meta = {
             "engine": "flux2",
-            "mode": "img2img" if request.is_img2img else "txt2img",
+            "mode": "inpaint" if request.is_inpaint else ("img2img" if request.is_img2img else "txt2img"),
             "model": unet_name,
             "width": width,
             "height": height,
@@ -452,5 +507,9 @@ class Flux2ImageGenerator(BaseImageGenerator):
         if request.is_img2img:
             meta["source_image_path"] = request.image_path
             meta["denoise"] = float(request.denoise)
+        if request.is_inpaint:
+            meta["mask_path"] = request.mask_path
+        if request.fit:
+            meta["fit"] = request.fit
 
         return GenerationResult(success=True, image_path=final_path, file_path=final_path, base64_data=b64_data, metadata=meta)

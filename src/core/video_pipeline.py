@@ -213,41 +213,49 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
         sc_model = sc.get("model") or sc.get("checkpoint") or root_video_model
         sc_name = sc.get("name") or sc.get("scene_name", f"Scene #{s_idx + 1}")
 
-        anchor = dict(sc["anchor_image"])
-        anchor["engine"] = root_image_engine
-        for k in ("model", "width", "height", "steps", "cfg", "guidance", "sampler"):
-            if k in image_cfg:
-                anchor[k] = image_cfg[k]
-        if "model" not in anchor and "checkpoint" in image_cfg:
-            anchor["model"] = image_cfg["checkpoint"]
-
-        # Seed: scene-specific seed has priority, otherwise global seed
-        if "seed" not in anchor and "seed" in image_cfg:
-            anchor["seed"] = image_cfg["seed"]
-
-        # Denoise: scene-specific denoise has priority, otherwise global denoise, default 0.65
-        if "denoise" not in anchor and "denoise" in image_cfg:
-            anchor["denoise"] = image_cfg["denoise"]
-        elif "denoise" not in anchor:
-            anchor["denoise"] = 0.65
-
-        # LoRAs: merge global image.loras with scene-specific anchor.loras
-        merged_loras = {}
-        for l in image_cfg.get("loras", []):
-            if isinstance(l, dict) and l.get("name"):
-                merged_loras[l["name"]] = float(l.get("strength", 0.8))
-        for l in anchor.get("loras", []):
-            if isinstance(l, dict) and l.get("name"):
-                merged_loras[l["name"]] = float(l.get("strength", 0.8))
-        if merged_loras:
-            anchor["loras"] = [{"name": k, "strength": v} for k, v in merged_loras.items()]
+        raw_anchor = sc["anchor_image"]
+        if isinstance(raw_anchor, dict) and raw_anchor.get("keyframe_path"):
+            # Ready keyframe on disk: completely isolated from image generation pipeline.
+            anchor = {"keyframe_path": raw_anchor["keyframe_path"]}
         else:
-            anchor["loras"] = []
+            anchor = dict(raw_anchor)
+            anchor["engine"] = root_image_engine
+            for k in ("model", "width", "height", "steps", "cfg", "guidance", "sampler", "fit"):
+                if k in image_cfg:
+                    anchor[k] = image_cfg[k]
+            if "model" not in anchor and "checkpoint" in image_cfg:
+                anchor["model"] = image_cfg["checkpoint"]
 
-        if anchor.get("prompt") or root_image_prompt:
-            anchor["prompt"] = combine_prompts(root_image_prompt, anchor.get("prompt"))
-        if anchor.get("negative_prompt") or root_image_negative:
-            anchor["negative_prompt"] = combine_negative_prompts(root_image_negative, anchor.get("negative_prompt"))
+            # Seed: scene-specific seed has priority, otherwise global seed
+            if "seed" not in anchor and "seed" in image_cfg:
+                anchor["seed"] = image_cfg["seed"]
+
+            # Denoise: scene-specific denoise has priority, otherwise global denoise, default 0.65 (only for img2img)
+            if anchor.get("image_path"):
+                if "denoise" not in anchor and "denoise" in image_cfg:
+                    anchor["denoise"] = image_cfg["denoise"]
+                elif "denoise" not in anchor:
+                    anchor["denoise"] = 0.65
+            else:
+                anchor["denoise"] = 1.0
+
+            # LoRAs: merge global image.loras with scene-specific anchor.loras
+            merged_loras = {}
+            for l in image_cfg.get("loras", []):
+                if isinstance(l, dict) and l.get("name"):
+                    merged_loras[l["name"]] = float(l.get("strength", 0.8))
+            for l in anchor.get("loras", []):
+                if isinstance(l, dict) and l.get("name"):
+                    merged_loras[l["name"]] = float(l.get("strength", 0.8))
+            if merged_loras:
+                anchor["loras"] = [{"name": k, "strength": v} for k, v in merged_loras.items()]
+            else:
+                anchor["loras"] = []
+
+            if anchor.get("prompt") or root_image_prompt:
+                anchor["prompt"] = combine_prompts(root_image_prompt, anchor.get("prompt"))
+            if anchor.get("negative_prompt") or root_image_negative:
+                anchor["negative_prompt"] = combine_negative_prompts(root_image_negative, anchor.get("negative_prompt"))
 
         raw_blocks = sc["blocks"]
         norm_blocks = []
@@ -319,6 +327,77 @@ def collect_scenario_timing_errors(scenes: List[Dict[str, Any]], max_duration: f
     return errors
 
 
+def collect_scenario_aspect_ratio_errors(
+    scenes: List[Dict[str, Any]],
+    video_width: int = 832,
+    video_height: int = 480,
+    tolerance: float = 0.05
+) -> List[str]:
+    """
+    Validates that anchor images (keyframe_path, image_path, or explicit txt2img resolution)
+    have an aspect ratio matching the target video resolution within the given tolerance (default 5%).
+    Prevents geometry distortion and unnatural stretching/squishing in video models.
+    """
+    from PIL import Image
+    errors: List[str] = []
+    if video_height <= 0 or video_width <= 0:
+        return errors
+
+    ar_vid = video_width / video_height
+
+    for s_idx, sc in enumerate(scenes):
+        sc_name = sc.get("scene_name") or sc.get("name", f"Scene #{s_idx + 1}")
+        anchor = sc.get("anchor_image", {})
+        # If fit is specified (e.g. crop or outpaint), image_engine adapts the aspect ratio automatically
+        if anchor.get("fit"):
+            continue
+
+        # 1. Ready keyframe or img2img source image check
+        img_ref = anchor.get("keyframe_path") or anchor.get("image_path")
+        if img_ref:
+            p = Path(img_ref)
+            if not p.is_file():
+                for base in [Path.cwd(), Path(config.OUTPUT_IMG_DIR), Path(config.WORKFLOWS_DIR), Path(config.REPO_DIR)]:
+                    cand = base / img_ref
+                    if cand.is_file():
+                        p = cand
+                        break
+            if p.is_file():
+                try:
+                    with Image.open(p) as img:
+                        w, h = img.size
+                    if w > 0 and h > 0:
+                        ar_img = w / h
+                        diff_pct = abs(ar_img - ar_vid) / ar_vid
+                        if diff_pct > tolerance:
+                            errors.append(
+                                f"[{sc_name}] Aspect ratio mismatch: anchor image '{img_ref}' has resolution {w}x{h} "
+                                f"(aspect ratio {ar_img:.2f}), but target video is {video_width}x{video_height} "
+                                f"(aspect ratio {ar_vid:.2f}, difference {diff_pct * 100:.1f}% > {tolerance * 100:.1f}%). "
+                                f"Anchor image aspect ratio must match video aspect ratio to prevent distortion."
+                            )
+                except Exception as ex:
+                    errors.append(f"[{sc_name}] Failed to inspect anchor image '{img_ref}': {ex}")
+            else:
+                errors.append(f"[{sc_name}] Anchor image file not found on disk: {img_ref}")
+
+        # 2. Explicit txt2img resolution check (if width/height were explicitly configured)
+        elif anchor.get("width") and anchor.get("height"):
+            w = int(anchor["width"])
+            h = int(anchor["height"])
+            if w > 0 and h > 0:
+                ar_img = w / h
+                diff_pct = abs(ar_img - ar_vid) / ar_vid
+                if diff_pct > tolerance:
+                    errors.append(
+                        f"[{sc_name}] Aspect ratio mismatch: anchor resolution {w}x{h} (aspect ratio {ar_img:.2f}) "
+                        f"does not match target video {video_width}x{video_height} (aspect ratio {ar_vid:.2f}, "
+                        f"difference {diff_pct * 100:.1f}% > {tolerance * 100:.1f}%)."
+                    )
+
+    return errors
+
+
 # ---------------------------------------------------------------------------
 # Main Pipeline Executor
 # ---------------------------------------------------------------------------
@@ -362,8 +441,10 @@ def execute_scenario_pipeline(
     max_duration = float(effective_vid.get("max_duration", MAX_VIDEO_DURATION))
 
     timing_errors = collect_scenario_timing_errors(scenes, max_duration=max_duration)
-    if timing_errors:
-        raise ValueError("; ".join(timing_errors))
+    ar_errors = collect_scenario_aspect_ratio_errors(scenes, video_width=width, video_height=height)
+    combined_errors = timing_errors + ar_errors
+    if combined_errors:
+        raise ValueError("; ".join(combined_errors))
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_hash = uuid.uuid4().hex[:6]

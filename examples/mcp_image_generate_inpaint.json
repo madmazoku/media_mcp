@@ -1,0 +1,9 @@
+{
+  "engine": "flux1",
+  "prompt": "young Hermione Granger wearing an elegant emerald green knitted sweater, smiling warmly",
+  "image_path": "media_mcp/images/example_anchor.png",
+  "mask_path": "media_mcp/images/example_sweater_mask.png",
+  "denoise": 0.85,
+  "guidance": 3.5,
+  "steps": 25
+}

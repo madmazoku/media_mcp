@@ -96,6 +96,11 @@
           "type": "integer",
           "minimum": -1
         },
+        "fit": {
+          "type": "string",
+          "enum": ["crop", "outpaint"],
+          "description": "Fitting strategy when adapting anchor image_path to target scenario resolution ('crop' or 'outpaint')"
+        },
         "loras": {
           "type": "array",
           "items": {
@@ -178,46 +183,70 @@
       }
     },
     "anchor_image": {
-      "type": "object",
-      "additionalProperties": false,
-      "anyOf": [
-        { "required": ["image_path"] },
-        { "required": ["prompt"] }
-      ],
-      "properties": {
-        "image_path": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Path to an existing anchor keyframe image on disk (for ready keyframe or img2img refinement)"
+      "oneOf": [
+        {
+          "type": "object",
+          "description": "Ready keyframe on disk to be used directly as video anchor frame (no image generator invocation)",
+          "additionalProperties": false,
+          "required": ["keyframe_path"],
+          "properties": {
+            "keyframe_path": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Path to an existing anchor keyframe image on disk. Used directly as initial frame for video generation without invoking the image generator."
+            }
+          }
         },
-        "prompt": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Visual prompt text describing the scene appearance"
-        },
-        "negative_prompt": {
-          "type": "string",
-          "description": "Negative prompt (SDXL only, concatenated with global negative_prompt)"
-        },
-        "denoise": {
-          "type": "number",
-          "minimum": 0.05,
-          "maximum": 1.0,
-          "description": "Denoising strength for img2img refinement of this scene's anchor frame (overrides global image.denoise)"
-        },
-        "seed": {
-          "type": "integer",
-          "minimum": -1,
-          "description": "Optional scene-specific random seed (-1 for randomized)"
-        },
-        "loras": {
-          "type": "array",
-          "description": "Scene-specific LoRAs to merge with global image.loras",
-          "items": {
-            "$ref": "#/$defs/lora_item"
+        {
+          "type": "object",
+          "description": "Generated anchor frame via txt2img or img2img through the image engine",
+          "additionalProperties": false,
+          "properties": {
+            "prompt": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Visual prompt text describing the scene appearance (inherited from global image.prompt if omitted)"
+            },
+            "negative_prompt": {
+              "type": "string",
+              "description": "Negative prompt (SDXL only, concatenated with global negative_prompt)"
+            },
+            "image_path": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Source image on disk for img2img refinement"
+            },
+            "mask_path": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Optional path to inpainting mask on disk for selective anchor frame refinement (allowed with image_path)"
+            },
+            "denoise": {
+              "type": "number",
+              "minimum": 0.05,
+              "maximum": 1.0,
+              "description": "Denoising strength for img2img refinement of this scene's anchor frame (overrides global image.denoise)"
+            },
+            "seed": {
+              "type": "integer",
+              "minimum": -1,
+              "description": "Optional scene-specific random seed (-1 for randomized)"
+            },
+            "fit": {
+              "type": "string",
+              "enum": ["crop", "outpaint"],
+              "description": "Fitting strategy when adapting anchor image_path to target scenario resolution ('crop' or 'outpaint')"
+            },
+            "loras": {
+              "type": "array",
+              "description": "Scene-specific LoRAs to merge with global image.loras",
+              "items": {
+                "$ref": "#/$defs/lora_item"
+              }
+            }
           }
         }
-      }
+      ]
     },
     "block": {
       "type": "object",

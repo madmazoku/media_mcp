@@ -45,11 +45,23 @@ class ImageRequest(GenerationRequest):
     model: Optional[str] = None
     custom_filename: Optional[str] = None
     image_path: Optional[str] = None
+    mask_path: Optional[str] = None
+    fit: Optional[str] = None
     denoise: float = 0.65
+
+    def __post_init__(self):
+        if not self.image_path:
+            self.denoise = 1.0
+            self.mask_path = None
+            self.fit = None
 
     @property
     def is_img2img(self) -> bool:
         return bool(self.image_path)
+
+    @property
+    def is_inpaint(self) -> bool:
+        return bool(self.image_path and self.mask_path)
 
     # Compatibility aliases
     @property
