@@ -213,41 +213,49 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
         sc_model = sc.get("model") or sc.get("checkpoint") or root_video_model
         sc_name = sc.get("name") or sc.get("scene_name", f"Scene #{s_idx + 1}")
 
-        anchor = dict(sc["anchor_image"])
-        anchor["engine"] = root_image_engine
-        for k in ("model", "width", "height", "steps", "cfg", "guidance", "sampler"):
-            if k in image_cfg:
-                anchor[k] = image_cfg[k]
-        if "model" not in anchor and "checkpoint" in image_cfg:
-            anchor["model"] = image_cfg["checkpoint"]
-
-        # Seed: scene-specific seed has priority, otherwise global seed
-        if "seed" not in anchor and "seed" in image_cfg:
-            anchor["seed"] = image_cfg["seed"]
-
-        # Denoise: scene-specific denoise has priority, otherwise global denoise, default 0.65
-        if "denoise" not in anchor and "denoise" in image_cfg:
-            anchor["denoise"] = image_cfg["denoise"]
-        elif "denoise" not in anchor:
-            anchor["denoise"] = 0.65
-
-        # LoRAs: merge global image.loras with scene-specific anchor.loras
-        merged_loras = {}
-        for l in image_cfg.get("loras", []):
-            if isinstance(l, dict) and l.get("name"):
-                merged_loras[l["name"]] = float(l.get("strength", 0.8))
-        for l in anchor.get("loras", []):
-            if isinstance(l, dict) and l.get("name"):
-                merged_loras[l["name"]] = float(l.get("strength", 0.8))
-        if merged_loras:
-            anchor["loras"] = [{"name": k, "strength": v} for k, v in merged_loras.items()]
+        raw_anchor = sc["anchor_image"]
+        if isinstance(raw_anchor, dict) and raw_anchor.get("keyframe_path"):
+            # Ready keyframe on disk: completely isolated from image generation pipeline.
+            anchor = {"keyframe_path": raw_anchor["keyframe_path"]}
         else:
-            anchor["loras"] = []
+            anchor = dict(raw_anchor)
+            anchor["engine"] = root_image_engine
+            for k in ("model", "width", "height", "steps", "cfg", "guidance", "sampler"):
+                if k in image_cfg:
+                    anchor[k] = image_cfg[k]
+            if "model" not in anchor and "checkpoint" in image_cfg:
+                anchor["model"] = image_cfg["checkpoint"]
 
-        if anchor.get("prompt") or root_image_prompt:
-            anchor["prompt"] = combine_prompts(root_image_prompt, anchor.get("prompt"))
-        if anchor.get("negative_prompt") or root_image_negative:
-            anchor["negative_prompt"] = combine_negative_prompts(root_image_negative, anchor.get("negative_prompt"))
+            # Seed: scene-specific seed has priority, otherwise global seed
+            if "seed" not in anchor and "seed" in image_cfg:
+                anchor["seed"] = image_cfg["seed"]
+
+            # Denoise: scene-specific denoise has priority, otherwise global denoise, default 0.65 (only for img2img)
+            if anchor.get("image_path"):
+                if "denoise" not in anchor and "denoise" in image_cfg:
+                    anchor["denoise"] = image_cfg["denoise"]
+                elif "denoise" not in anchor:
+                    anchor["denoise"] = 0.65
+            else:
+                anchor["denoise"] = 1.0
+
+            # LoRAs: merge global image.loras with scene-specific anchor.loras
+            merged_loras = {}
+            for l in image_cfg.get("loras", []):
+                if isinstance(l, dict) and l.get("name"):
+                    merged_loras[l["name"]] = float(l.get("strength", 0.8))
+            for l in anchor.get("loras", []):
+                if isinstance(l, dict) and l.get("name"):
+                    merged_loras[l["name"]] = float(l.get("strength", 0.8))
+            if merged_loras:
+                anchor["loras"] = [{"name": k, "strength": v} for k, v in merged_loras.items()]
+            else:
+                anchor["loras"] = []
+
+            if anchor.get("prompt") or root_image_prompt:
+                anchor["prompt"] = combine_prompts(root_image_prompt, anchor.get("prompt"))
+            if anchor.get("negative_prompt") or root_image_negative:
+                anchor["negative_prompt"] = combine_negative_prompts(root_image_negative, anchor.get("negative_prompt"))
 
         raw_blocks = sc["blocks"]
         norm_blocks = []

@@ -89,6 +89,9 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
             if not found:
                 return False, None, None, {"error": f"Source image for img2img not found on disk: {raw_src}"}
         source_img_path = str(p.resolve())
+    elif denoise_val != 1.0:
+        log(f"Notice: Normalizing denoise from {denoise_val} to 1.0 for pure txt2img generation.")
+        denoise_val = 1.0
 
     try:
         generator = create_image_generator(engine_name, settings=params)
@@ -163,20 +166,17 @@ def generate_anchor_frame(
     """
     Generates or verifies an anchor keyframe for a scene using strict schema fields.
     Supports:
-    1. Ready keyframe: {"image_path": "path/to/image.png"} (no prompt) -> returns existing file directly.
+    1. Ready keyframe: {"keyframe_path": "path/to/image.png"} -> returns existing file directly (no generation).
     2. img2img refinement: {"image_path": "path/to/image.png", "prompt": "..."} -> runs img2img through generate_image().
     3. txt2img generation: {"prompt": "..."} (no image_path) -> runs txt2img through generate_image().
     Returns: (success, image_path, base64_data)
     """
-    img_path = anchor_meta.get("image_path")
-    has_prompt = bool(anchor_meta.get("prompt", "").strip())
-
-    # Case 1: Ready keyframe (image_path specified, NO prompt)
-    if img_path and not has_prompt:
-        p = Path(img_path)
+    keyframe_path = anchor_meta.get("keyframe_path")
+    if keyframe_path:
+        p = Path(keyframe_path)
         if not p.is_file():
             for base in [Path.cwd(), Path(config.OUTPUT_IMG_DIR), Path(config.WORKFLOWS_DIR), Path(config.REPO_DIR)]:
-                cand = base / img_path
+                cand = base / keyframe_path
                 if cand.is_file():
                     p = cand
                     break
@@ -187,13 +187,13 @@ def generate_anchor_frame(
                     b64 = base64.b64encode(f.read()).decode("utf-8")
                 return True, str(p.resolve()), b64
             except Exception as ex:
-                log(f"Warning: could not read existing anchor image base64: {ex}")
+                log(f"Warning: could not read existing anchor keyframe base64: {ex}")
                 return True, str(p.resolve()), None
-        return False, f"Anchor image_path not found on disk: {img_path}", None
+        return False, f"Anchor keyframe_path not found on disk: {keyframe_path}", None
 
-    # Case 2 & 3: Generation (either txt2img or img2img)
+    has_prompt = bool(anchor_meta.get("prompt", "").strip())
     if not has_prompt:
-        return False, "Neither valid 'image_path' nor 'prompt' provided for anchor frame", None
+        return False, "Prompt is required for anchor image generation when keyframe_path is not specified", None
 
     # Prepare merged generation parameters
     gen_params = dict(anchor_meta)

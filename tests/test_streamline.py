@@ -462,6 +462,93 @@ class TestStreamlineArchitecture(unittest.TestCase):
         with self.assertRaises(schema_validator.SchemaValidationError):
             schema_validator.validate_scenario(invalid_scene_anchor)
 
+    def test_15_keyframe_path_isolation_and_denoise_normalization(self):
+        """Verify keyframe_path isolation in scenario normalization and denoise normalization in ImageRequest."""
+        from core import video_pipeline, schema_validator, image_engine
+        from core.generators.base import ImageRequest
+        import tempfile
+        from pathlib import Path
+
+        # 1. ImageRequest normalization
+        txt_req = ImageRequest(prompt="pure text prompt", denoise=0.45)
+        self.assertFalse(txt_req.is_img2img)
+        self.assertEqual(txt_req.denoise, 1.0)  # Automatically normalized to 1.0
+
+        img_req = ImageRequest(prompt="refine", image_path="some/file.png", denoise=0.45)
+        self.assertTrue(img_req.is_img2img)
+        self.assertEqual(img_req.denoise, 0.45)
+
+        # 2. Scenario schema validation with ready keyframe_path
+        valid_scenario = {
+            "name": "Keyframe Isolation Scenario",
+            "image": {
+                "engine": "flux1",
+                "prompt": "Global root style prompt that should not contaminate ready keyframe",
+                "denoise": 0.65,
+                "loras": [{"name": "global_lora", "strength": 0.7}]
+            },
+            "video": {"engine": "wan-fast"},
+            "scenes": [
+                {
+                    "name": "Scene 1 Ready Keyframe",
+                    "anchor_image": {
+                        "keyframe_path": "already_rendered_hero.png"
+                    },
+                    "blocks": [{"motion_prompt": "camera pan"}]
+                }
+            ]
+        }
+        schema_validator.validate_scenario(valid_scenario)
+
+        # 3. Validation failure if other properties are attached to keyframe_path
+        invalid_keyframe_prompt = {
+            "name": "Invalid Keyframe Scenario",
+            "scenes": [
+                {
+                    "anchor_image": {
+                        "keyframe_path": "hero.png",
+                        "prompt": "should not be allowed"
+                    },
+                    "blocks": [{"motion_prompt": "zoom"}]
+                }
+            ]
+        }
+        with self.assertRaises(schema_validator.SchemaValidationError):
+            schema_validator.validate_scenario(invalid_keyframe_prompt)
+
+        invalid_keyframe_denoise = {
+            "name": "Invalid Keyframe Denoise Scenario",
+            "scenes": [
+                {
+                    "anchor_image": {
+                        "keyframe_path": "hero.png",
+                        "denoise": 0.5
+                    },
+                    "blocks": [{"motion_prompt": "zoom"}]
+                }
+            ]
+        }
+        with self.assertRaises(schema_validator.SchemaValidationError):
+            schema_validator.validate_scenario(invalid_keyframe_denoise)
+
+        # 4. Pipeline normalization check: ready keyframe must be completely isolated
+        normalized_scenes = video_pipeline.normalize_scenario_structure(valid_scenario)
+        self.assertEqual(len(normalized_scenes), 1)
+        norm_anchor = normalized_scenes[0]["anchor_image"]
+        self.assertEqual(norm_anchor, {"keyframe_path": "already_rendered_hero.png"})
+        self.assertNotIn("prompt", norm_anchor)
+        self.assertNotIn("loras", norm_anchor)
+        self.assertNotIn("denoise", norm_anchor)
+
+        # 5. Direct resolution via generate_anchor_frame
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_frame = Path(tmp_dir) / "frame0.png"
+            test_frame.write_bytes(b"\x89PNG\r\n\x1a\nfakeimagebytes")
+            success, resolved_path, b64 = image_engine.generate_anchor_frame({"keyframe_path": str(test_frame)})
+            self.assertTrue(success)
+            self.assertEqual(resolved_path, str(test_frame.resolve()))
+            self.assertIsNotNone(b64)
+
 
 if __name__ == "__main__":
     unittest.main()

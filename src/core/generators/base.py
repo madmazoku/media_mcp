@@ -47,6 +47,10 @@ class ImageRequest(GenerationRequest):
     image_path: Optional[str] = None
     denoise: float = 0.65
 
+    def __post_init__(self):
+        if not self.image_path:
+            self.denoise = 1.0
+
     @property
     def is_img2img(self) -> bool:
         return bool(self.image_path)
