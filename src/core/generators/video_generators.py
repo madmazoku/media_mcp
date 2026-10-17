@@ -468,7 +468,7 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
         if request.save_tail and request.tail_frames > 0:
             wf["cut_tail_latent"] = {
                 "inputs": {
-                    "samples": ["sampler_stage2", 0],
+                    "samples": latent_for_decode,
                     "dim": "t",
                     "index": -int(request.tail_frames),
                     "amount": int(request.tail_frames)
@@ -763,8 +763,11 @@ class LtxVideoGenerator(BaseVideoGenerator):
                 }
                 guider_model = [u_key, 0]
 
-        # Conditioning Setup: Pure 5D Latent Prefix Lock/Restore vs 1-Frame Image-to-Video
+        # Conditioning Setup: Pure 5D Latent Prefix via LTXVAddLatentGuide/LTXVCropGuides vs 1-Frame Image-to-Video
+        active_positive = ["ltxv_cond", 0]
+        active_negative = ["ltxv_cond", 1]
         latent_for_decode = ["sampler", 0]
+
         if request.prefix_latent_path and Path(request.prefix_latent_path).is_file():
             pref_filename = Path(request.prefix_latent_path).name
             prefix_fn = comfy_client.upload_file_to_comfy(
@@ -773,29 +776,39 @@ class LtxVideoGenerator(BaseVideoGenerator):
                 run_prefix=prefix_str,
                 suffix="prefix"
             )
-            ramp_l = 3 if request.ramp_latents is None else int(request.ramp_latents)
-            min_c = 1.0 if request.min_cfg is None else float(request.min_cfg)
 
-            log(f"Configuring PURE 5D LATENT PREFIX for LTX via WanLatentPrefixLock + WanLatentPrefixRestore: {prefix_fn}")
+            log(f"Configuring NATIVE 5D LATENT PREFIX for LTX via LTXVAddLatentGuide + LTXVCropGuides: {prefix_fn}")
             wf["load_prefix_latent"] = {
                 "inputs": {"latent": prefix_fn},
                 "class_type": "LoadLatent"
             }
-            wf["prefix_lock"] = {
+            wf["ltx_latent_guide"] = {
                 "inputs": {
-                    "model": guider_model,
-                    "prefix_latent": ["load_prefix_latent", 0],
-                    "ramp_latents": ramp_l,
-                    "min_cfg": min_c
+                    "positive": ["ltxv_cond", 0],
+                    "negative": ["ltxv_cond", 1],
+                    "vae": ["vae_loader", 0],
+                    "latent": ["empty_latent", 0],
+                    "guiding_latent": ["load_prefix_latent", 0],
+                    "latent_idx": 0,
+                    "strength": 1.0
                 },
-                "class_type": "WanLatentPrefixLock"
+                "class_type": "LTXVAddLatentGuide"
             }
-            guider_model = ["prefix_lock", 0]
-            active_latent_node = ["empty_latent", 0]
+            active_positive = ["ltx_latent_guide", 0]
+            active_negative = ["ltx_latent_guide", 1]
+            active_latent_node = ["ltx_latent_guide", 2]
 
+            wf["ltx_crop_guides"] = {
+                "inputs": {
+                    "positive": active_positive,
+                    "negative": active_negative,
+                    "latent": ["sampler", 0]
+                },
+                "class_type": "LTXVCropGuides"
+            }
             wf["prefix_latent_restore"] = {
                 "inputs": {
-                    "samples": ["sampler", 0],
+                    "samples": ["ltx_crop_guides", 2],
                     "prefix_latent": ["load_prefix_latent", 0]
                 },
                 "class_type": "WanLatentPrefixRestore"
@@ -826,8 +839,8 @@ class LtxVideoGenerator(BaseVideoGenerator):
             "guider": {
                 "inputs": {
                     "model": guider_model,
-                    "positive": ["ltxv_cond", 0],
-                    "negative": ["ltxv_cond", 1],
+                    "positive": active_positive,
+                    "negative": active_negative,
                     "cfg": cfg
                 },
                 "class_type": "CFGGuider"
@@ -911,7 +924,7 @@ class LtxVideoGenerator(BaseVideoGenerator):
         if request.save_tail and request.tail_frames > 0:
             wf["cut_tail_latent"] = {
                 "inputs": {
-                    "samples": ["sampler", 0],
+                    "samples": latent_for_decode,
                     "dim": "t",
                     "index": -int(request.tail_frames),
                     "amount": int(request.tail_frames)

@@ -183,6 +183,8 @@ class WanLatentPrefixRestore:
     """
     Ensures bit-exact prefix latent frames on KSampler output before VAE decode.
     Replaces frames 0..k_lat with the pristine raw VAE prefix latent.
+    Applies Latent AdaIN (Adaptive Instance Normalization) to newly diffused core frames
+    to strictly prevent channel drift, contrast blow-out, and color desaturation across chained blocks.
     """
     @classmethod
     def INPUT_TYPES(s):
@@ -190,6 +192,9 @@ class WanLatentPrefixRestore:
             "required": {
                 "samples": ("LATENT",),
                 "prefix_latent": ("LATENT",),
+            },
+            "optional": {
+                "color_lock_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
             }
         }
 
@@ -198,7 +203,7 @@ class WanLatentPrefixRestore:
     FUNCTION = "execute"
     CATEGORY = "model/conditioning/wan"
 
-    def execute(self, samples, prefix_latent):
+    def execute(self, samples, prefix_latent, color_lock_strength=1.0):
         out = {k: v for k, v in samples.items()}
         s = samples["samples"].clone()
         p = prefix_latent["samples"].to(device=s.device, dtype=s.dtype)
@@ -206,6 +211,19 @@ class WanLatentPrefixRestore:
             p = comfy.utils.common_upscale(p, s.shape[-1], s.shape[-2], "bilinear", "center")
         k = min(p.shape[2], s.shape[2])
         b = min(p.shape[0], s.shape[0])
+
+        # Apply Latent AdaIN to prevent channel mean drift and variance explosion across blocks
+        if color_lock_strength > 0 and s.shape[2] > k and k > 0:
+            pref_mean = p[:b, :, :k].mean(dim=(2, 3, 4), keepdim=True)
+            pref_std = p[:b, :, :k].std(dim=(2, 3, 4), keepdim=True).clamp(min=1e-5)
+
+            core_mean = s[:b, :, k:].mean(dim=(2, 3, 4), keepdim=True)
+            core_std = s[:b, :, k:].std(dim=(2, 3, 4), keepdim=True).clamp(min=1e-5)
+
+            normalized_core = (s[:b, :, k:] - core_mean) / core_std * pref_std + pref_mean
+            s[:b, :, k:] = s[:b, :, k:] * (1.0 - color_lock_strength) + normalized_core * color_lock_strength
+
+        # Restore pristine prefix latents bit-for-bit
         s[:b, :, :k] = p[:b, :, :k]
         out["samples"] = s
         return (out,)

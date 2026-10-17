@@ -136,11 +136,14 @@ class TestVideoPipeline(unittest.TestCase):
                 ltx_gen.generate(req_prefix)
             wf = captured_wfs[-1]
 
-            # Must use LoadLatent + WanLatentPrefixLock + WanLatentPrefixRestore
+            # Must use LoadLatent + LTXVAddLatentGuide + LTXVCropGuides + WanLatentPrefixRestore
             self.assertIn("load_prefix_latent", wf)
             self.assertEqual(wf["load_prefix_latent"]["class_type"], "LoadLatent")
-            self.assertIn("prefix_lock", wf)
-            self.assertEqual(wf["prefix_lock"]["class_type"], "WanLatentPrefixLock")
+            self.assertIn("ltx_latent_guide", wf)
+            self.assertEqual(wf["ltx_latent_guide"]["class_type"], "LTXVAddLatentGuide")
+            self.assertEqual(wf["ltx_latent_guide"]["inputs"]["strength"], 1.0)
+            self.assertIn("ltx_crop_guides", wf)
+            self.assertEqual(wf["ltx_crop_guides"]["class_type"], "LTXVCropGuides")
             self.assertIn("prefix_latent_restore", wf)
             self.assertEqual(wf["prefix_latent_restore"]["class_type"], "WanLatentPrefixRestore")
 
@@ -148,10 +151,10 @@ class TestVideoPipeline(unittest.TestCase):
             self.assertNotIn("prefix_latent_decode", wf)
             self.assertNotIn("inplace_cond", wf)
 
-            # User LoRA must be chained before prefix_lock
-            self.assertIn("user_lora_0", wf)
-            self.assertEqual(wf["prefix_lock"]["inputs"]["model"], ["user_lora_0", 0])
-            self.assertEqual(wf["guider"]["inputs"]["model"], ["prefix_lock", 0])
+            # Guider and Sampler must receive guided conditioning
+            self.assertEqual(wf["guider"]["inputs"]["positive"], ["ltx_latent_guide", 0])
+            self.assertEqual(wf["guider"]["inputs"]["negative"], ["ltx_latent_guide", 1])
+            self.assertEqual(wf["sampler"]["inputs"]["latent_image"], ["ltx_latent_guide", 2])
             self.assertEqual(wf["vae_decode"]["inputs"]["samples"], ["prefix_latent_restore", 0])
 
     def test_04_video_validate_respects_scenario_path_max_duration(self):
@@ -258,6 +261,48 @@ class TestVideoPipeline(unittest.TestCase):
             self.assertGreater(saved_spec["video"]["seed"], 0)
             self.assertIn("seed", saved_spec["image"])
             self.assertGreater(saved_spec["image"]["seed"], 0)
+
+    def test_06_wan_latent_prefix_restore_latent_adain(self):
+        """Verify WanLatentPrefixRestore normalizes core frame channel stats via Latent AdaIN."""
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("PyTorch not installed in test environment")
+
+        from unittest.mock import MagicMock
+        for mod_name in ("comfy", "comfy.model_management", "comfy.utils", "comfy.latent_formats", "node_helpers"):
+            if mod_name not in sys.modules:
+                sys.modules[mod_name] = MagicMock()
+
+        import importlib.util
+        node_file = Path(__file__).resolve().parent.parent / "custom_nodes" / "ComfyUI-MediaMCP" / "wan_latent_nodes.py"
+        spec = importlib.util.spec_from_file_location("wan_latent_nodes", node_file)
+        wan_nodes = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wan_nodes)
+
+        node = wan_nodes.WanLatentPrefixRestore()
+        # Create mock prefix latent with specific mean (+1.5) and std (0.5)
+        prefix_tensor = torch.randn(1, 16, 5, 16, 16) * 0.5 + 1.5
+        # Create core latent with drifted mean (-2.0) and blown-out std (3.0)
+        core_tensor = torch.randn(1, 16, 17, 16, 16) * 3.0 - 2.0
+
+        out_tuple = node.execute(
+            samples={"samples": core_tensor},
+            prefix_latent={"samples": prefix_tensor},
+            color_lock_strength=1.0
+        )
+        out_latent = out_tuple[0]["samples"]
+
+        # 1. Prefix frames (0..4) are restored bit-exact
+        self.assertTrue(torch.allclose(out_latent[:, :, :5], prefix_tensor, atol=1e-5))
+
+        # 2. Core frames (5..16) have their mean and std normalized to prefix stats
+        core_out = out_latent[:, :, 5:]
+        core_out_mean = core_out.mean(dim=(2, 3, 4))
+        core_out_std = core_out.std(dim=(2, 3, 4))
+
+        self.assertTrue(torch.allclose(core_out_mean, torch.full_like(core_out_mean, 1.5), atol=0.15))
+        self.assertTrue(torch.allclose(core_out_std, torch.full_like(core_out_std, 0.5), atol=0.15))
 
 
 if __name__ == "__main__":

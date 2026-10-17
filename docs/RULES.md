@@ -43,7 +43,7 @@ These rules govern the development, testing, and operation of the `media_mcp` pi
   - Technical parameters (`engine`, `model`, `width`, `height`, `fps`, `steps`, `cfg`, `guidance`, `sampler`, `seed`, `max_duration`, `ramp_latents`, `min_cfg`, `weight_dtype`) belong strictly in root `.image` and `.video` sections.
   - `anchor_image` and `blocks[]` contain only narrative/framing parameters (`prompt`, `motion_prompt`, `negative_prompt`, `duration`, `overlap`, `loras`, `denoise`, `fit`, `image_path`, `keyframe_path`, `mask_path`).
 - Default to 1-frame I2V chaining (`overlap: 0.0s`) for clean production video without Causal VAE deconvolution artifacts.
-- Use **True Forced Prefix Conditioning** (`WanLatentPrefixLock` + `WanLatentPrefixRestore` in 5D latent space) between sequential blocks when `overlap > 0.0s`.
+- Use **True Forced Prefix Conditioning** (`WanLatentPrefixLock` + `WanLatentPrefixRestore` for Wan 2.2, `LTXVAddLatentGuide` + `LTXVCropGuides` + `WanLatentPrefixRestore` for LTX) with Latent AdaIN color stabilization in 5D latent space between sequential blocks when `overlap > 0.0s`. Tail latents are always cut from `latent_for_decode` post-normalization.
 - Lossless Stream Copy (`-c copy`) for final multi-block FFmpeg assembly.
 - Before making changes to latent processing, padding, masking, or stride math in video pipelines, **ALWAYS** consult [`docs/MEDIA_MCP_KNOWLEDGE_BASE.md`](MEDIA_MCP_KNOWLEDGE_BASE.md) and [`docs/VIDEO_BLOCK_CHAINING_RESEARCH.md`](VIDEO_BLOCK_CHAINING_RESEARCH.md) to avoid repeating solved bugs.
 

@@ -180,13 +180,25 @@ ffmpeg -y -f concat -safe 0 -i filelist.txt -c copy output.mp4
          return denoised
      ```
    - За счёт этого метод Эйлера на каждом шаге вычисляет шаг $d = (x - x_0) / \sigma$ строго по направлению к `prefix_norm`. Текстовый промпт нового блока не может сместить префикс, а DiT-внимание ядра получает идеальный неискаженный контекст.
-2. **`WanLatentPrefixRestore`** (Latent Splicer Node):
-   - Принимает выход сэмплера `samples` (`LATENT`) и `prefix_latent` (`LATENT`).
+2. **`WanLatentPrefixRestore`** (Latent Splicer & AdaIN Color Lock Node):
+   - Принимает выход сэмплера `samples` (`LATENT`), `prefix_latent` (`LATENT`) и опциональный параметр `color_lock_strength` (по умолчанию `1.0`).
    - Перед VAE Decode принудительно заменяет первые $k_{\text{lat}}$ латентов на исходный `tail.latent` из файла бит-в-бит:
      ```python
-     samples["samples"][:, :, :k_lat] = prefix_latent["samples"][:, :, :k_lat]
+     s[:b, :, :k_lat] = prefix_latent["samples"][:, :, :k_lat]
      ```
-   - Гарантирует абсолютную идентичность префикса исходному хвосту.
+   - **Latent AdaIN (защита от цветового дрейфа и раздувания контраста):**
+     Выравнивает поканальные средние $\mu_c$ и стандартные отклонения $\sigma_c$ сгенерированных кадров ядра ($t \ge k_{\text{lat}}$) по статистике `prefix_latent`:
+     $$\hat{s}_{:,:,k:} = \frac{s_{:,:,k:} - \mu_{\text{core}}}{\sigma_{\text{core}}} \cdot \sigma_{\text{pref}} + \mu_{\text{pref}}$$
+     Это гарантирует 100% стабильность цвета, контраста и яркости на протяжении авторегрессии любой длины без накопления дрейфа каналов LoRA.
+   - **Отбор хвостового латента (`cut_tail_latent`):**
+     Нода `LatentCut` берёт сэмплы строго **после** `WanLatentPrefixRestore`, гарантируя, что сохранённый `*-tail.latent` передаётся в следующий блок уже нормализованным.
+
+### В. Архитектура 5D-латентного префикса в LTX-Video: `LTXVAddLatentGuide` + `LTXVCropGuides`
+У модели LTX-2.3 22B (`class LTXV` в ComfyUI) нет отдельного потока `concat_latent_image`, а кондиционирование основано на per-token `timestep = 0` и `noise_mask = 0.0`.
+- В LTX префикс подключается через нативную пару ComfyUI-нод:
+  1. **`LTXVAddLatentGuide`**: принимает `guiding_latent`, нативно выставляет `noise_mask = 0.0` (благодаря чему `LTXV.process_timestep` передаёт `timestep = 0.0` для префикса, а `KSamplerX0Inpaint` оставляет его незашумлённым) и прописывает 3D RoPE-координаты `keyframe_idxs`.
+  2. **`LTXVCropGuides`**: срезает служебные guide-токены после `SamplerCustomAdvanced` перед передачей в `WanLatentPrefixRestore` (Latent AdaIN) и `VAEDecode`.
+- Это исключает генерацию LTX с нуля и обеспечивает непрерывность сцены.
 
 ---
 
