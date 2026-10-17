@@ -293,20 +293,29 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
     return normalized_scenes
 
 
-def collect_scenario_timing_errors(scenes: List[Dict[str, Any]], max_duration: Optional[float] = None) -> List[str]:
+ENGINE_MAX_DURATIONS: Dict[str, float] = {
+    "wan-fast": 6.0,
+    "wan-full": 6.0,
+    "ltx": 16.0,
+}
+
+
+def collect_scenario_timing_errors(scenes: List[Dict[str, Any]], default_engine: str = "wan-fast") -> List[str]:
     """
     Validates dynamic block merging timing constraints inside each scene (montage):
     1. overlap_duration < clip_duration
-    2. prefix_duration + clip_duration < max_duration
+    2. prefix_duration + clip_duration < engine_limit (immutable hardware/architecture constant per engine)
     Returns a list of human-readable error messages.
     """
-    limit = float(max_duration if max_duration is not None else config.MAX_VIDEO_DURATION)
     errors: List[str] = []
     for s_idx, sc in enumerate(scenes):
         sc_name = sc.get("scene_name", f"Scene #{s_idx + 1}")
+        sc_engine = str(sc.get("engine") or "").lower()
         blocks = sc.get("blocks", [])
         for b_idx, blk in enumerate(blocks):
             b_name = blk.get("name", f"Block #{b_idx + 1}")
+            b_engine = str(blk.get("engine") or sc_engine or default_engine).lower()
+            limit = float(ENGINE_MAX_DURATIONS.get(b_engine, 6.0))
             clip_duration = float(blk.get("duration", 5.0))
             prefix_duration = float(blocks[b_idx - 1].get("overlap") or 0.0) if b_idx > 0 else 0.0
             overlap_duration = float(blk.get("overlap") or 0.0) if b_idx < len(blocks) - 1 else 0.0
@@ -321,7 +330,7 @@ def collect_scenario_timing_errors(scenes: List[Dict[str, Any]], max_duration: O
                 errors.append(
                     f"[{sc_name} : {b_name}] Generation window exceeded: prefix_duration ({prefix_duration}s) + "
                     f"clip_duration ({clip_duration}s) = {prefix_duration + clip_duration:.2f}s >= "
-                    f"max_duration ({limit}s). Condition 'prefix_duration + clip_duration < max_duration' is required."
+                    f"engine limit ({limit}s for engine '{b_engine}'). Condition 'prefix_duration + clip_duration < engine limit' is required."
                 )
     return errors
 
@@ -445,9 +454,8 @@ def execute_scenario_pipeline(
     width = int(effective_vid.get("width", 832))
     height = int(effective_vid.get("height", 480))
     fps = int(effective_vid.get("fps", 16))
-    max_duration = float(effective_vid.get("max_duration", config.MAX_VIDEO_DURATION))
 
-    timing_errors = collect_scenario_timing_errors(scenes, max_duration=max_duration)
+    timing_errors = collect_scenario_timing_errors(scenes, default_engine=v_engine)
     ar_errors = collect_scenario_aspect_ratio_errors(scenes, video_width=width, video_height=height)
     combined_errors = timing_errors + ar_errors
     if combined_errors:
@@ -458,7 +466,7 @@ def execute_scenario_pipeline(
     run_prefix = f"{timestamp}-{run_hash}"
     log(
         f"Executing scenario pipeline with {len(scenes)} scenes "
-        f"(run_id={run_prefix}, video_engine={v_engine}, model={v_model}, {width}x{height} @ {fps}fps, max_duration={max_duration}s)..."
+        f"(run_id={run_prefix}, video_engine={v_engine}, model={v_model}, {width}x{height} @ {fps}fps)..."
     )
 
     all_block_cores: List[str] = []
@@ -556,6 +564,12 @@ def execute_scenario_pipeline(
 
                 generator = create_video_generator(b_engine_raw, settings=b_settings)
                 stride = int(getattr(generator, "temporal_stride", 4))
+
+                if b_engine_raw.startswith("wan") and dur > 5.5:
+                    log(
+                        f"Warning: [{scene_name} : {b_name}] Duration ({dur}s) exceeds Wan 2.2 native training horizon "
+                        f"(5.06s / 81 frames). Consider keeping blocks <= 5.0s for optimal image quality across chaining."
+                    )
 
                 block_prefix = f"{run_prefix}-s{scene_idx:03d}-b{block_idx:03d}"
                 out_core_name = f"{block_prefix}-core.mp4"

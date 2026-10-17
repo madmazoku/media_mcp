@@ -25,7 +25,14 @@ description: >-
   - Описывают динамику, физику и траекторию камеры (`motion_prompt`).
   - **1-Frame I2V Chaining (`overlap: 0.0`, по умолчанию):** последний кадр предыдущего блока (`-tail.png`) передаётся стартовым кадром в следующий блок, а дублирующий первый кадр отрезается через `ImageFromBatch`.
   - **True Latent-Chaining (`overlap > 0`):** хвост предыдущего блока (`-tail.latent`) длительностью `overlap` вырезается через `LatentCut` и передаётся в следующий блок как префикс (`prefix_duration`). Следующий блок диффундирует суммарное окно `prefix_duration + clip_duration`, после чего `ImageFromBatch` отсекает префикс и сохраняет полную длительность `clip_duration` в `{block_prefix}-core.mp4`.
-  - **Мгновенная сборка фильма:** все блоки всех сцен соединяются напрямую через `ffmpeg -f concat -c copy` с **нулевым перекодированием (0% потерь качества)**.
+  - **Длительность блока (`duration`):** значение `duration` задаёт итоговую чистую длительность ядра клипа ($T_{\text{core}}$), идущего в фильм. При `overlap > 0` префикс добавляется *сверх* этого значения на этапе диффузии и затем отсекается. Рекомендуемая длительность блока — **3.0–4.0 секунды**. Это даёт модели 48–56 свободных кадров для раскатистой инерции, естественной физики и в 2 раза сокращает количество склеек по сравнению с 2-секундными нарезками.
+  - **Лимит блоков на одну сцену (Борьба с генеративной энтропией):**
+    - В одной непрерывной сцене **не рекомендуется делать более 2–3 блоков (максимум 8–12 секунд непрерывного плана)**.
+    - В латентном пространстве ($8\times$ VAE сжатие) каждый цикл повторной диффузии накапливает энтропию. После 4–5 склеек неизбежно начинается деградация мелкой анатомии (фаланги пальцев, черты лица) и накопление цветового шума («звёздочки» и клиппинг VAE при $>6$ склейках).
+  - **Монтажная смена сцен для длинного метра (15–60+ секунд):**
+    - Фильмы длиннее 10 секунд строятся через массив монтажных планов **`scenes[]`**, а не через бесконечный чейнинг блоков в одной сцене.
+    - Каждая новая сцена генерирует свой кристально чистый опорный кадр `anchor_image` (общий план $\to$ средний ракурс со спины $\to$ крупный план лица), что **полностью обнуляет накопленную энтропию до нуля**.
+    - Все блоки всех сцен соединяются напрямую через `ffmpeg -f concat -c copy` с **нулевым перекодированием (0% потерь качества)**.
   - Одиночный ролик — это просто сцена из одного блока.
 
 ---
@@ -38,9 +45,9 @@ description: >-
 Имена уровней: строго `name` (на уровне сценария, сцены и блока).
 
 ### Видео-движки (`video.engine`, `scenes[].engine`, `blocks[].engine`):
-- **`"wan-fast"` (Wan 2.2 14B Fast, дефолт)** — 4-step Lightx2v LoRA, CFG 1.0, шаг VAE: 4 кадра ($4k+1$).
-- **`"wan-full"` (Wan 2.2 14B Full)** — полный 20-шаговый сэмплинг UNet High/Low Noise, CFG 3.5–5.0, шаг VAE: 4 кадра ($4k+1$).
-- **`"ltx"` (LTX-2.3 22B)** — 20 шагов, CFG 3.0, Distilled LoRA 1.1, шаг VAE: 8 кадров ($8k+1$), `width` и `height` строго кратны **32**.
+- **`"wan-fast"` (Wan 2.2 14B Fast, дефолт)** — 4-step Lightx2v LoRA, CFG 1.0, шаг VAE: 4 кадра ($4k+1$). Нативный обучающий контекст — **81 кадр (5.06с при 16 fps)**. Рекомендуемая длительность блока: **3.5–5.0с** (дефолтный лимит окна `block + prefix`: **6.0с**).
+- **`"wan-full"` (Wan 2.2 14B Full)** — полный 20-шаговый сэмплинг UNet High/Low Noise, CFG 3.5–5.0, шаг VAE: 4 кадра ($4k+1$). Нативный контекст — **81 кадр (5.06с)** (дефолтный лимит окна: **6.0с**).
+- **`"ltx"` (LTX-2.3 22B)** — $8\times$ темпоральное VAE-сжатие, шаг VAE: 8 кадров ($8k+1$), `width` и `height` строго кратны **32**. Дефолтный CFG 1.0 (25 шагов, сэмплер `euler_ancestral`, Distilled LoRA strength 0.7; при CFG > 1.5 сила LoRA автоматически снижается до 0.2). Поддерживает длинные блоки **6.0–12.0с** (дефолтный лимит окна: **16.0с**). В 1-кадровом I2V использует `LTXVPreprocess` (CRF 33) + `LTXVImgToVideoInplace` (strength 0.9).
 
 ### Фото-движки опорного кадра (`image.engine`):
 Параметры среды рендеринга (`engine`, `model`, `width`, `height`, `steps`, `cfg`, `guidance`, `sampler`, `denoise`) задаются глобально в секции `image` для всего фильма:
@@ -57,25 +64,97 @@ description: >-
 
 ---
 
-## 3. Законы таймингов и слияния блоков внутри одной сцены (монтажа)
+## 3. Эвристики удержания стиля и эстетики (Style Persistence & Chaining)
+
+При многоблочной генерации видео критически важно не допустить **деградации или спонтанной смены стиля** от блока к блоку (например, вырождения аниме/рисунка в фотореализм к 3-му блоку).
+
+### Механика стилевого дрейфа между блоками:
+1. **1-Frame I2V Chaining (`overlap: 0.0`):** каждый последующий блок диффундирует с чистого пиксельного кадра (`-tail.png`) предыдущего блока. Сам по себе опорный кадр задаёт лишь стартовую точку ($t=0$). Новые кадры синтезируются диффузией под управлением текстового промпта.
+2. **True Latent-Chaining (`overlap > 0`):** префиксные латенты удерживают геометрию и цвет стыка, но все последующие новые кадры блока ($t \ge k$) также синтезируются диффузией DiT.
+3. **Разница между Wan 2.2 и LTX-2.3:**
+   - **`wan-fast` / `wan-full`:** использует явное кросс-внимание на эмбеддинги визуального энкодера CLIP/UMT5 и обучался на широком спектре стилей (включая аниме и 3D). Он значительно устойчивее держит исходный стиль кадра.
+   - **`ltx` (LTX-2.3 22B):** кодирует опорный кадр только в каузальный токен $t=0$ и обучался преимущественно на **фотореалистичном видео**. Без постоянного текстового подкрепления стиля в промпте, самовнимание трансформера к 2-му и 3-му блокам неумолимо сваливается в свой базовый датасетный приоритет — **фотореализм** (сглаживание контуров, реалистичная кожа, объёмный свет).
+
+### Золотое правило: стилевое якорение через `.video.prompt` и `.video.negative_prompt`:
+Поля корневой секции `video.prompt` и `video.negative_prompt` автоматически объединяются с каждым блоком через правило специфичности (локальное действие блока идёт первым, общий стиль — вторым):
+$$\text{block\_prompt} = \text{motion\_prompt} + \text{", "} + \text{video.prompt}$$
+$$\text{block\_negative} = \text{video.negative\_prompt} + \text{", "} + \text{block.negative\_prompt}$$
+
+Если сценарий стилизован (аниме, 3D, рисунок, нуар), **всегда** выносите стилевые токены в `video.prompt`, а анти-стили — в `video.negative_prompt`:
+
+```json
+{
+  "image": {
+    "engine": "sdxl",
+    "model": "waiANIPONYXL_v140.safetensors [4817ae4643]",
+    "prompt": "score_9, score_8_up, source_anime, 1girl, gadget hackwrench, orange hair, blue goggles, masterpiece",
+    "negative_prompt": "score_4, score_5, score_6, ugly, blurry"
+  },
+  "video": {
+    "engine": "ltx",
+    "model": "ltx-2.3-22b-dev-fp8.safetensors",
+    "prompt": "source_anime, anime style, 2d cartoon illustration, cel shaded, clean line art",
+    "negative_prompt": "photorealistic, real life, 3d render, photo, realistic skin texture, volumetric photorealism",
+    "width": 576,
+    "height": 832,
+    "fps": 16
+  },
+  "scenes": [...]
+}
+```
+
+### Рекомендуемые стилевые пресеты для `.video`:
+- **Аниме / 2D Мультфильм (Anime / Cel-shaded):**
+  - `video.prompt`: `"source_anime, anime style, 2d animation, cel shaded, vibrant colors, clean line art"`
+  - `video.negative_prompt`: `"photorealistic, real life, 3d render, realistic photography, skin pores, volumetric cgi"`
+- **3D Мультфильм (Pixar / Stylized CGI):**
+  - `video.prompt`: `"3d pixar animation style, stylized cgi 3d render, smooth surfaces, cute expressive proportions"`
+  - `video.negative_prompt`: `"live action, photograph, 2d flat drawing, gritty, sketch"`
+- **Кинематографичный реализм (Cinematic Live-Action):**
+  - `video.prompt`: `"cinematic film still, 35mm film grain, master cinematography, realistic lighting"`
+  - `video.negative_prompt`: `"anime, cartoon, drawing, illustration, 3d render, cgi, plastic, oversaturated"`
+
+### Эвристики для 360° кругового обзора (Turntable / Camera Orbit):
+При постановке задач кругового обзора персонажа или объекта соблюдайте правила кинематики:
+1. **Запрет на взаимно конфликтующие векторы движения:**
+   Категорически избегайте формулировок вида `"character rotates clockwise, camera orbits clockwise"`. В системе координат камеры синхронное вращение персонажа и камеры в одну сторону обнуляет относительный угол ($\Delta\theta = 0$). Нейросеть сбивается и генерирует хаотичные конвульсивные рывки.
+2. **Разделение режимов (Камера против Персонажа):**
+   - **Режим 1 (Camera Orbit):** персонаж танцует/позирует на месте, камера облетает её:
+     > `"Stationary character dancing on the spot, smooth camera orbit circling clockwise around her from front to right side profile"`
+   - **Режим 2 (Character Pirouette):** камера статична на штативе, персонаж плавно поворачивается:
+     > `"Static camera, character slowly turns 90 degrees clockwise in place to showcase right side profile"`
+3. **Разбивка на 4 стороны света (по 90° на блок):**
+   Полный круг $360^\circ$ разбивается ровно на **4 кардинальных сектора** по 3.0–3.5с:
+   - **Блок 1 (0° $\to$ 90°):** передний вид $\longrightarrow$ чистый правый профиль.
+   - **Блок 2 (90° $\to$ 180°):** правый профиль $\longrightarrow$ чистый вид со спины.
+   - **Блок 3 (180° $\to$ 270°):** вид со спины $\longrightarrow$ чистый левый профиль.
+   - **Блок 4 (270° $\to$ 360°):** левый профиль $\longrightarrow$ возвращение в передний ракурс.
+   Четкие геометрические ориентиры исключают спешку и размытие анатомии.
+
+---
+
+## 4. Законы таймингов и слияния блоков внутри одной сцены (монтажа)
 
 При слиянии блоков внутри одной сцены для каждого блока $i$ действуют два строгих математических условия:
 - Пусть $\text{clip\_duration} = \text{blocks}[i].\text{duration}$.
 - Пусть $\text{prefix\_duration} = \text{blocks}[i-1].\text{overlap}$ при $i > 0$ (и $0.0$ для первого блока сцены $i = 0$).
 - Пусть $\text{overlap\_duration} = \text{blocks}[i].\text{overlap}$ при $i < N - 1$ (и $0.0$ для последнего блока сцены).
-- Пусть $\text{max\_duration} = \text{video.max\_duration}$ (по умолчанию `10.0` сек из `config.json`).
+- Пусть $\text{engine\_limit}$ — неизменяемый предел окна диффузии движка: **`6.0` сек** для `wan-fast`/`wan-full` и **`16.0` сек** для `ltx`. Это физическая константа архитектуры модели (не задаётся и не переопределяется в сценарии).
 
 Обязательные условия валидации:
 1. **Хвост перекрытия строго меньше длительности клипа:**
    $$\text{overlap\_duration} < \text{clip\_duration}$$
-2. **Суммарное окно диффузии блока строго меньше максимальной длительности (`max_duration`):**
-   $$\text{prefix\_duration} + \text{clip\_duration} < \text{max\_duration}$$
+2. **Суммарное окно диффузии блока строго меньше предела движка (`engine_limit`):**
+   $$\text{prefix\_duration} + \text{clip\_duration} < \text{engine\_limit}$$
 
 Поскольку префикс $\text{prefix\_duration}$ добавляется к генерации и затем отсекается через `ImageFromBatch`, каждый блок отдаёт в итоговый монтаж полную длительность $\text{clip\_duration}$, а суммарная длительность сцены равна $\sum \text{clip\_duration}$.
 
+> [!TIP]
+> Для Wan 2.2 (`wan-fast`, `wan-full`) обучающий горизонт модели составляет 81 кадр ($5.06$с при 16 fps). Попытка генерировать блоки $>5.5$с приводит к темпоральной RoPE-экстраполяции и потере детализации к концу блока. Для более длинных планов (до 10–14 секунд на блок) используйте движок `ltx`.
+
 ---
 
-## 4. Спецификация MCP-инструментов (API Reference)
+## 5. Спецификация MCP-инструментов (API Reference)
 
 Все MCP-запросы валидируются по схемам в `schemas/requests/<tool>.json`.
 
@@ -90,7 +169,7 @@ description: >-
 | `scenario_path` | `string` | — | Путь к базовому JSON-файлу сценария на диске. |
 | `scenes` | `array` | — | Список сцен сценария. |
 | `image` | `object` | — | Глобальные настройки опорного кадра (`engine`, `model`, `prompt`, `negative_prompt`, `width`, `height`, `steps`, `cfg`, `guidance`, `sampler`, `seed`, `loras`). |
-| `video` | `object` | — | Глобальные настройки видео (`engine`, `model`, `prompt`, `negative_prompt`, `width`, `height`, `fps`, `max_duration`, `loras`). |
+| `video` | `object` | — | Глобальные настройки видео (`engine`, `model`, `prompt`, `negative_prompt`, `width`, `height`, `fps`, `loras`). |
 | `enable_hud` | `boolean` | `false` | Сгенерировать отладочное видео `{run_prefix}-hud.mp4` с таймлайном блоков. |
 
 ### `video_validate` (`schemas/requests/video_validate.json`)
@@ -116,7 +195,7 @@ echo {"scenario_path":"examples/scenario.json"} | cmd\cli.cmd video_validate -
 
 ---
 
-## 5. Правила именования файлов и вывода в чат
+## 6. Правила именования файлов и вывода в чат
 
 1. **Строгий серверный шаблон имён файлов:**
    - Опорный кадр сцены: `{run_prefix}-s{scene_idx:03d}-anchor.png`

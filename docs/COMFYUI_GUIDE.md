@@ -8,7 +8,7 @@
 
 Видеопайплайн оперирует трехуровневой структурой (`schemas/scenario.json`):
 1. **Корневые технические секции (`.image` и `.video`):**
-   - Задают обязательные `engine` и `model`, а также все технические настройки (`width`, `height`, `fps`, `steps`, `cfg`, `guidance`, `sampler`, `seed`, `max_duration`, `ramp_latents`, `min_cfg`, `weight_dtype`) и глобальные стилевые `prompt`, `negative_prompt`, `loras`.
+   - Задают обязательные `engine` и `model`, а также все технические настройки (`width`, `height`, `fps`, `steps`, `cfg`, `guidance`, `sampler`, `seed`, `ramp_latents`, `min_cfg`, `weight_dtype`) и глобальные стилевые `prompt`, `negative_prompt`, `loras`.
 2. **Сцена (`scenes[]`):** единая локация и состояние персонажа:
    - **`anchor_image`**: опорное изображение (`prompt`, либо `image_path` для img2img/inpaint/outpaint, либо готовый `keyframe_path`).
 3. **Блок (`scenes[].blocks[]`):** непрерывный отрезок видео (обычно 3–5 секунд):
@@ -34,8 +34,7 @@
     "model": "wan2.2_i2v_14B_fp8_scaled.safetensors",
     "width": 832,
     "height": 480,
-    "fps": 16,
-    "max_duration": 10.0
+    "fps": 16
   },
   "scenes": [
     {
@@ -94,6 +93,9 @@ bin/cli.cmd --config path/to/config.json video_validate --payload examples/scena
    - Все блоки кодируются с идентичными параметрами H.264 и собираются через `ffmpeg -f concat -safe 0 -c copy` без пережатия видеопотока.
 3. **Исключение дублирования стыковочного кадра:**
    - При 1-кадровом I2V чейнинге (`overlap = 0.0`) кадр 0 нового блока совпадает с последним кадром предыдущего. Пайплайн автоматически сдвигает нарезку ядра нового блока на 1 кадр (`batch_index = 1`), исключая микро-зависание видео на стыке.
+4. **5D латентный префиксный чейнинг (`overlap > 0.0s`):**
+   - **Wan 2.2 (`wan-fast`, `wan-full`):** использует `WanLatentPrefixLock` (инъекция префикса в сэмплер) + `WanLatentPrefixRestore` (принудительное восстановление префикса и **Latent AdaIN** выравнивание среднего $\mu$ и дисперсии $\sigma$ каналов латентов ядра по префиксу для исключения выцветания/раздувания контраста). Отрезка хвостового латента (`cut_tail_latent`) производится строго из нормализованного `latent_for_decode`.
+   - **LTX-Video (`ltx`):** использует связку нативных нод `LTXVAddLatentGuide` (инъекция направляющего кадра с `noise_mask = 0.0` и RoPE-координатами) + `LTXVCropGuides` (отсечение guide-токенов) + `WanLatentPrefixRestore` (Latent AdaIN), полностью устраняя рестарт генерации каждого блока с белого шума.
 
 ---
 
