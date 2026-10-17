@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "media-mcp"
+version = "2.0.0"
+description = "Unified Model Context Protocol (MCP) Server & Pipeline for AI Image and Multi-Scene Video Generation (ComfyUI + Automatic1111)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "jsonschema>=4.20.0",
+    "requests>=2.31.0",
+    "urllib3>=2.0.0",
+    "Pillow>=10.0.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

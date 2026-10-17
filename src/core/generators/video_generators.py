@@ -3,22 +3,21 @@
 """
 Video Generators for media_mcp.
 Polymorphic strategy implementations for Wan 2.2 Fast (4-step LoRA), Wan 2.2 Full (20-step UNet),
-and LTX-2.3 22B.
+and LTX-2.3 22B with True 5D Latent Prefix Locking and Restoration.
 """
 
 from __future__ import annotations
-import os
 import sys
-import time
 import uuid
 import datetime
 import shutil
 import random
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union, List
+from typing import Any, Dict, Optional, List
 
-from ..config import TEMP_DIR
+from .. import config
 from .. import comfy_client
+from .. import discovery
 from .base import BaseGenerator, VideoRequest, GenerationResult, snap_to_16, snap_to_32
 
 
@@ -31,13 +30,35 @@ class BaseVideoGenerator(BaseGenerator):
     """Abstract base class for video generators."""
 
     kind = "video"
+    temporal_stride: int = 4
+    default_fps: int = 16
 
     def metadata(self) -> Dict[str, Any]:
         return {
             "name": self.name,
             "kind": self.kind,
+            "temporal_stride": self.temporal_stride,
+            "default_fps": self.default_fps,
             "settings": dict(self.settings)
         }
+
+    def _locate_direct_output(self, prefix_match: str, ext: str, exclude_prefix: Optional[str] = None) -> Optional[str]:
+        """Checks top-level COMFY_OUTPUT_DIR directly without recursive os.walk."""
+        out_dir = config.COMFY_OUTPUT_DIR
+        if not out_dir or not Path(out_dir).is_dir():
+            return None
+        try:
+            for entry in Path(out_dir).iterdir():
+                if not entry.is_file():
+                    continue
+                name = entry.name
+                if name.startswith(prefix_match) and name.endswith(ext):
+                    if exclude_prefix and name.startswith(exclude_prefix):
+                        continue
+                    return entry.resolve().as_posix()
+        except Exception:
+            pass
+        return None
 
     def _execute_comfy_workflow(
         self,
@@ -62,6 +83,7 @@ class BaseVideoGenerator(BaseGenerator):
             return GenerationResult(success=False, error=str(history))
 
         outputs = history.get("outputs", {})
+        temp_dir = config.get_temp_dir()
 
         # 1. Locate core video
         save_video_out = outputs.get("save_video", {})
@@ -74,15 +96,13 @@ class BaseVideoGenerator(BaseGenerator):
             found_local_file = comfy_client.find_comfy_output_file(fn, sub)
 
         if not found_local_file:
-            for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
-                for f in files:
-                    if f.startswith(prefix_str) and not f.startswith(f"{prefix_str}-tail") and f.endswith(".mp4"):
-                        found_local_file = (Path(root) / f).as_posix()
-                        break
-                if found_local_file:
-                    break
+            found_local_file = self._locate_direct_output(
+                prefix_match=prefix_str,
+                ext=".mp4",
+                exclude_prefix=f"{prefix_str}-tail"
+            )
 
-        out_file = (Path(TEMP_DIR) / out_video_name).resolve().as_posix()
+        out_file = (Path(temp_dir) / out_video_name).resolve().as_posix()
         if found_local_file and Path(found_local_file).is_file():
             shutil.copy2(found_local_file, out_file)
         elif videos:
@@ -99,24 +119,16 @@ class BaseVideoGenerator(BaseGenerator):
         if save_tail_latent:
             save_tail_out = outputs.get("save_tail_latent", {})
             saved_latents = save_tail_out.get("latents", [])
+            found_latent = None
             if saved_latents:
                 fn = saved_latents[0].get("filename")
                 sub = saved_latents[0].get("subfolder", "")
-                found = comfy_client.find_comfy_output_file(fn, sub)
-                if found and Path(found).is_file():
-                    out_tail_latent_path = (Path(TEMP_DIR) / f"{prefix_str}-tail.latent").resolve().as_posix()
-                    shutil.copy2(found, out_tail_latent_path)
-            if not out_tail_latent_path:
-                for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
-                    for f in files:
-                        if f.startswith(f"{prefix_str}-tail") and f.endswith(".latent"):
-                            cand = (Path(root) / f).as_posix()
-                            out_tail_latent_path = (Path(TEMP_DIR) / f"{prefix_str}-tail.latent").resolve().as_posix()
-                            shutil.copy2(cand, out_tail_latent_path)
-                            break
-                    if out_tail_latent_path:
-                        break
-            if out_tail_latent_path:
+                found_latent = comfy_client.find_comfy_output_file(fn, sub)
+            if not found_latent:
+                found_latent = self._locate_direct_output(prefix_match=f"{prefix_str}-tail", ext=".latent")
+            if found_latent and Path(found_latent).is_file():
+                out_tail_latent_path = (Path(temp_dir) / f"{prefix_str}-tail.latent").resolve().as_posix()
+                shutil.copy2(found_latent, out_tail_latent_path)
                 log(f"Successfully captured tail latent: {Path(out_tail_latent_path).name}")
             else:
                 log(f"Warning: Tail latent output file not found for {prefix_str}")
@@ -131,18 +143,11 @@ class BaseVideoGenerator(BaseGenerator):
                 fn = saved_images[0].get("filename")
                 sub = saved_images[0].get("subfolder", "")
                 found_tail_img = comfy_client.find_comfy_output_file(fn, sub)
-
             if not found_tail_img:
-                for root, _, files in os.walk(comfy_client.COMFY_OUTPUT_DIR):
-                    for f in files:
-                        if f.startswith(f"{prefix_str}-tail") and f.endswith(".png"):
-                            found_tail_img = (Path(root) / f).as_posix()
-                            break
-                    if found_tail_img:
-                        break
+                found_tail_img = self._locate_direct_output(prefix_match=f"{prefix_str}-tail", ext=".png")
 
             if found_tail_img and Path(found_tail_img).is_file():
-                out_tail_image_path = (Path(TEMP_DIR) / f"{prefix_str}-tail.png").resolve().as_posix()
+                out_tail_image_path = (Path(temp_dir) / f"{prefix_str}-tail.png").resolve().as_posix()
                 shutil.copy2(found_tail_img, out_tail_image_path)
                 log(f"Successfully captured pristine tail image from workflow: {Path(out_tail_image_path).name}")
             else:
@@ -157,12 +162,14 @@ class BaseVideoGenerator(BaseGenerator):
         )
 
 
-
 class BaseWanVideoGenerator(BaseVideoGenerator):
     """
     Common Wan 2.2 base implementing VAE, CLIP, conditioning, latent chaining,
-    and core/tail slicing via native ComfyUI nodes.
+    user LoRA chaining, and core/tail slicing via native ComfyUI nodes.
     """
+
+    temporal_stride = 4
+    default_fps = 16
 
     def _build_wan_graph(
         self,
@@ -181,6 +188,18 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
         fps = request.fps or self.settings.get("fps", 16)
         seed = random.randint(1, 1_000_000_000) if request.seed in (-1, None) else int(request.seed)
 
+        model_bundle = str(
+            request.model or self.settings.get("model") or self.settings.get("checkpoint") or ""
+        ).strip()
+        if not model_bundle:
+            raise ValueError("Parameter 'model' is required for Wan video generation.")
+
+        unet_high_name, unet_low_name = discovery.resolve_wan_model_bundle(model_bundle)
+        if self.settings.get("checkpoint_low") or self.settings.get("model_low"):
+            unet_low_name = str(self.settings.get("checkpoint_low") or self.settings.get("model_low"))
+
+        weight_dtype = str(request.weight_dtype or self.settings.get("weight_dtype") or "default").strip()
+
         wf: Dict[str, Any] = {
             "clip_loader": {
                 "inputs": {
@@ -198,31 +217,17 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
             },
             "unet_high": {
                 "inputs": {
-                    "unet_name": self.settings.get("checkpoint") or self.settings.get("model") or "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
-                    "weight_dtype": "default"
+                    "unet_name": unet_high_name,
+                    "weight_dtype": weight_dtype
                 },
                 "class_type": "UNETLoader"
             },
             "unet_low": {
                 "inputs": {
-                    "unet_name": self.settings.get("checkpoint_low") or self.settings.get("model_low") or "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
-                    "weight_dtype": "default"
+                    "unet_name": unet_low_name,
+                    "weight_dtype": weight_dtype
                 },
                 "class_type": "UNETLoader"
-            },
-            "sampling_high": {
-                "inputs": {
-                    "model": high_source,
-                    "shift": 5.0
-                },
-                "class_type": "ModelSamplingSD3"
-            },
-            "sampling_low": {
-                "inputs": {
-                    "model": low_source,
-                    "shift": 5.0
-                },
-                "class_type": "ModelSamplingSD3"
             },
             "positive_cond": {
                 "inputs": {
@@ -240,12 +245,59 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
             }
         }
 
+        # Chain user-specified LoRAs onto both high_source and low_source branches
+        loras_list: List[Dict[str, Any]] = request.loras if request.loras is not None else (self.settings.get("loras") or [])
+        for idx, lora_entry in enumerate(loras_list):
+            if not isinstance(lora_entry, dict):
+                continue
+            l_name = str(lora_entry.get("name") or "").strip()
+            l_strength = float(lora_entry.get("strength", 0.8))
+            if l_name and l_name.lower() not in ("none", "disabled", "false", ""):
+                lora_fn = l_name if l_name.endswith(".safetensors") else f"{l_name}.safetensors"
+                h_key = f"user_lora_high_{idx}"
+                l_key = f"user_lora_low_{idx}"
+                wf[h_key] = {
+                    "inputs": {
+                        "model": high_source,
+                        "lora_name": lora_fn,
+                        "strength_model": l_strength
+                    },
+                    "class_type": "LoraLoaderModelOnly"
+                }
+                wf[l_key] = {
+                    "inputs": {
+                        "model": low_source,
+                        "lora_name": lora_fn,
+                        "strength_model": l_strength
+                    },
+                    "class_type": "LoraLoaderModelOnly"
+                }
+                high_source = [h_key, 0]
+                low_source = [l_key, 0]
+
+        wf["sampling_high"] = {
+            "inputs": {
+                "model": high_source,
+                "shift": 5.0
+            },
+            "class_type": "ModelSamplingSD3"
+        }
+        wf["sampling_low"] = {
+            "inputs": {
+                "model": low_source,
+                "shift": 5.0
+            },
+            "class_type": "ModelSamplingSD3"
+        }
+
         # Conditioning Setup
         if request.prefix_latent_path and Path(request.prefix_latent_path).is_file():
             pref_filename = Path(request.prefix_latent_path).name
             prefix_fn = comfy_client.upload_file_to_comfy(
                 request.prefix_latent_path,
-                custom_filename=pref_filename
+                custom_filename=pref_filename,
+                run_prefix=prefix_str,
+                suffix="prefix"
             )
             log(f"Configuring DIRECT LATENT PREFIX via WanLatentPrefixToVideo: {prefix_fn}")
             wf["load_prefix_latent"] = {
@@ -266,7 +318,11 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
                 "class_type": "WanLatentPrefixToVideo"
             }
         elif request.image_path and Path(request.image_path).is_file():
-            img_fn = comfy_client.upload_file_to_comfy(request.image_path)
+            img_fn = comfy_client.upload_file_to_comfy(
+                request.image_path,
+                run_prefix=prefix_str,
+                suffix="anchor"
+            )
             wf["start_image"] = {"inputs": {"image": img_fn, "upload": "image"}, "class_type": "LoadImage"}
             wf["wan_conditioning"] = {
                 "inputs": {
@@ -390,7 +446,6 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
         else:
             video_images_input = ["vae_decode", 0]
 
-
         wf.update({
             "create_video": {
                 "inputs": {
@@ -450,12 +505,10 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
         return wf
 
 
-
 class WanFastVideoGenerator(BaseWanVideoGenerator):
     """
     Wan 2.2 Fast Mode Generator.
     Uses 4-step Lightx2v distillation LoRAs, CFG 1.0, 4 steps (split 2/2).
-    Generates draft blocks quickly (~25s/block) with minimal motion.
     """
 
     def generate(self, request: VideoRequest) -> GenerationResult:
@@ -466,13 +519,13 @@ class WanFastVideoGenerator(BaseWanVideoGenerator):
         if request.out_video_name:
             out_video_name = request.out_video_name
         else:
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
             req_hash = uuid.uuid4().hex[:6]
             out_video_name = f"{timestamp}-{req_hash}-wan-fast.mp4"
         clean_base = Path(out_video_name).stem
         if clean_base.endswith("-core"):
             clean_base = clean_base[:-5]
-        prefix_str = clean_base
+        prefix_str = request.run_prefix or clean_base
 
         log(f"Configuring Wan 2.2 FAST MODE: 4-steps distillation LoRA, CFG {actual_cfg}, {actual_steps} steps (split @ {split_step})")
 
@@ -510,7 +563,7 @@ class WanFastVideoGenerator(BaseWanVideoGenerator):
             wf=wf,
             prefix_str=prefix_str,
             out_video_name=out_video_name,
-            save_tail_latent=request.save_tail,
+            save_tail_latent=(request.save_tail and request.tail_frames > 0),
             save_tail_image=request.save_tail_image,
             progress_callback=request.progress_callback
         )
@@ -521,24 +574,23 @@ class WanFullVideoGenerator(BaseWanVideoGenerator):
     Wan 2.2 Full Sampling Mode Generator.
     Uses pure High and Low Noise UNets with NO distillation LoRAs.
     Default 20 steps (split 10/10), CFG 5.0.
-    Produces full macro-dynamics and high-quality motion.
     """
 
     def generate(self, request: VideoRequest) -> GenerationResult:
         actual_steps = int(request.steps or self.settings.get("steps", 20))
-        actual_cfg = float(request.cfg if request.cfg is not None else self.settings.get("cfg", 3.5))
+        actual_cfg = float(request.cfg if request.cfg is not None else self.settings.get("cfg", 5.0))
         split_step = max(1, int(round(actual_steps * 0.5)))
 
         if request.out_video_name:
             out_video_name = request.out_video_name
         else:
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
             req_hash = uuid.uuid4().hex[:6]
             out_video_name = f"{timestamp}-{req_hash}-wan-full.mp4"
         clean_base = Path(out_video_name).stem
         if clean_base.endswith("-core"):
             clean_base = clean_base[:-5]
-        prefix_str = clean_base
+        prefix_str = request.run_prefix or clean_base
 
         log(f"Configuring Wan 2.2 FULL SAMPLING MODE: Direct High/Low Noise UNets, CFG {actual_cfg}, {actual_steps} steps (split @ {split_step})")
 
@@ -557,7 +609,7 @@ class WanFullVideoGenerator(BaseWanVideoGenerator):
             wf=wf,
             prefix_str=prefix_str,
             out_video_name=out_video_name,
-            save_tail_latent=request.save_tail,
+            save_tail_latent=(request.save_tail and request.tail_frames > 0),
             save_tail_image=request.save_tail_image,
             progress_callback=request.progress_callback
         )
@@ -567,8 +619,12 @@ class LtxVideoGenerator(BaseVideoGenerator):
     """
     LTX-2.3 22B Video Generator via ComfyUI.
     Uses 20 steps, CFG 3.0, Distilled LoRA 1.1, and LTXVConditioning.
-    Supports true tail latent prefix conditioning.
+    Supports pure 5D tail latent prefix conditioning via WanLatentPrefixLock + WanLatentPrefixRestore
+    without intermediate VAEDecode/VAEEncode degradation.
     """
+
+    temporal_stride = 8
+    default_fps = 24
 
     def generate(self, request: VideoRequest) -> GenerationResult:
         width = snap_to_32(request.width or self.settings.get("width", 832))
@@ -582,32 +638,38 @@ class LtxVideoGenerator(BaseVideoGenerator):
         if request.out_video_name:
             out_video_name = request.out_video_name
         else:
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
             req_hash = uuid.uuid4().hex[:6]
             out_video_name = f"{timestamp}-{req_hash}-ltx.mp4"
         clean_base = Path(out_video_name).stem
         if clean_base.endswith("-core"):
             clean_base = clean_base[:-5]
-        prefix_str = clean_base
+        prefix_str = request.run_prefix or clean_base
 
-        model_setting = str(self.settings.get("model") or self.settings.get("checkpoint") or "ltx-2.3-22b-dev-fp8.safetensors").strip()
+        model_setting = str(
+            request.model or self.settings.get("model") or self.settings.get("checkpoint") or ""
+        ).strip()
+        if not model_setting:
+            return GenerationResult(success=False, error="Parameter 'model' is required for LTX video generation.")
+
         m_lower = model_setting.lower()
         if "sulphur" in m_lower or "sulfur" in m_lower:
-            if "bf16" in m_lower:
+            if "bf16" in m_lower and not model_setting.endswith(".safetensors"):
                 unet_name = "sulphur_dev_bf16_model.safetensors"
-            else:
+            elif not model_setting.endswith(".safetensors"):
                 unet_name = "sulphur_dev_model_fp8mixed.safetensors"
-        elif "dev" in m_lower or "ltx" in m_lower or "base" in m_lower:
-            if "bf16" in m_lower:
-                unet_name = "ltx-2.3-22b-dev.safetensors"
             else:
-                unet_name = "ltx-2.3-22b-dev-fp8.safetensors"
+                unet_name = model_setting
+        elif model_setting.endswith(".safetensors"):
+            unet_name = model_setting
+        elif "bf16" in m_lower:
+            unet_name = "ltx-2.3-22b-dev.safetensors"
         else:
-            unet_name = model_setting if model_setting.endswith(".safetensors") else f"{model_setting}.safetensors"
+            unet_name = "ltx-2.3-22b-dev-fp8.safetensors"
 
         log(f"Configuring LTX generator: UNet={unet_name}, CFG={cfg}, steps={steps}")
 
-        weight_dtype = str(self.settings.get("weight_dtype") or "default").strip()
+        weight_dtype = str(request.weight_dtype or self.settings.get("weight_dtype") or "default").strip()
         lora_setting = self.settings.get("lora_strength")
         lora_strength = float(lora_setting) if lora_setting is not None else 1.0
 
@@ -666,49 +728,6 @@ class LtxVideoGenerator(BaseVideoGenerator):
             }
         }
 
-        # Start conditioning (Prefix latent or start image)
-        start_image_node = None
-        if request.prefix_latent_path and Path(request.prefix_latent_path).is_file():
-            pref_filename = Path(request.prefix_latent_path).name
-            prefix_fn = comfy_client.upload_file_to_comfy(
-                request.prefix_latent_path,
-                custom_filename=pref_filename
-            )
-            log(f"Configuring TRUE TAIL LATENT PREFIX for LTX: {prefix_fn}")
-            wf["load_prefix_latent"] = {
-                "inputs": {"latent": prefix_fn},
-                "class_type": "LoadLatent"
-            }
-            wf["prefix_latent_decode"] = {
-                "inputs": {
-                    "samples": ["load_prefix_latent", 0],
-                    "vae": ["vae_loader", 0]
-                },
-                "class_type": "VAEDecode"
-            }
-            start_image_node = ["prefix_latent_decode", 0]
-        elif request.image_path and Path(str(request.image_path)).is_file():
-            img_fn = comfy_client.upload_file_to_comfy(str(request.image_path))
-            wf["start_image"] = {"inputs": {"image": img_fn, "upload": "image"}, "class_type": "LoadImage"}
-            start_image_node = ["start_image", 0]
-        else:
-            raise ValueError(f"No valid start input provided for LTX video generator: {request.image_path}")
-
-        if start_image_node:
-            wf["inplace_cond"] = {
-                "inputs": {
-                    "image": start_image_node,
-                    "vae": ["vae_loader", 0],
-                    "latent": ["empty_latent", 0],
-                    "strength": 1.0,
-                    "bypass": False
-                },
-                "class_type": "LTXVImgToVideoInplace"
-            }
-            active_latent_node = ["inplace_cond", 0]
-        else:
-            active_latent_node = ["empty_latent", 0]
-
         if lora_strength > 0:
             wf["lora_loader"] = {
                 "inputs": {
@@ -719,10 +738,89 @@ class LtxVideoGenerator(BaseVideoGenerator):
                 "class_type": "LoraLoaderModelOnly"
             }
             guider_model = ["lora_loader", 0]
-            log(f"LTX LoRA enabled: strength={lora_strength}")
+            log(f"LTX base LoRA enabled: strength={lora_strength}")
         else:
             guider_model = ["unet_loader", 0]
-            log("LTX LoRA disabled (strength=0)")
+            log("LTX base LoRA disabled (strength=0)")
+
+        # Chain user-specified LoRAs onto guider_model
+        loras_list: List[Dict[str, Any]] = request.loras if request.loras is not None else (self.settings.get("loras") or [])
+        for idx, lora_entry in enumerate(loras_list):
+            if not isinstance(lora_entry, dict):
+                continue
+            l_name = str(lora_entry.get("name") or "").strip()
+            l_strength = float(lora_entry.get("strength", 0.8))
+            if l_name and l_name.lower() not in ("none", "disabled", "false", ""):
+                lora_fn = l_name if l_name.endswith(".safetensors") else f"{l_name}.safetensors"
+                u_key = f"user_lora_{idx}"
+                wf[u_key] = {
+                    "inputs": {
+                        "model": guider_model,
+                        "lora_name": lora_fn,
+                        "strength_model": l_strength
+                    },
+                    "class_type": "LoraLoaderModelOnly"
+                }
+                guider_model = [u_key, 0]
+
+        # Conditioning Setup: Pure 5D Latent Prefix Lock/Restore vs 1-Frame Image-to-Video
+        latent_for_decode = ["sampler", 0]
+        if request.prefix_latent_path and Path(request.prefix_latent_path).is_file():
+            pref_filename = Path(request.prefix_latent_path).name
+            prefix_fn = comfy_client.upload_file_to_comfy(
+                request.prefix_latent_path,
+                custom_filename=pref_filename,
+                run_prefix=prefix_str,
+                suffix="prefix"
+            )
+            ramp_l = 3 if request.ramp_latents is None else int(request.ramp_latents)
+            min_c = 1.0 if request.min_cfg is None else float(request.min_cfg)
+
+            log(f"Configuring PURE 5D LATENT PREFIX for LTX via WanLatentPrefixLock + WanLatentPrefixRestore: {prefix_fn}")
+            wf["load_prefix_latent"] = {
+                "inputs": {"latent": prefix_fn},
+                "class_type": "LoadLatent"
+            }
+            wf["prefix_lock"] = {
+                "inputs": {
+                    "model": guider_model,
+                    "prefix_latent": ["load_prefix_latent", 0],
+                    "ramp_latents": ramp_l,
+                    "min_cfg": min_c
+                },
+                "class_type": "WanLatentPrefixLock"
+            }
+            guider_model = ["prefix_lock", 0]
+            active_latent_node = ["empty_latent", 0]
+
+            wf["prefix_latent_restore"] = {
+                "inputs": {
+                    "samples": ["sampler", 0],
+                    "prefix_latent": ["load_prefix_latent", 0]
+                },
+                "class_type": "WanLatentPrefixRestore"
+            }
+            latent_for_decode = ["prefix_latent_restore", 0]
+        elif request.image_path and Path(str(request.image_path)).is_file():
+            img_fn = comfy_client.upload_file_to_comfy(
+                str(request.image_path),
+                run_prefix=prefix_str,
+                suffix="anchor"
+            )
+            wf["start_image"] = {"inputs": {"image": img_fn, "upload": "image"}, "class_type": "LoadImage"}
+            wf["inplace_cond"] = {
+                "inputs": {
+                    "image": ["start_image", 0],
+                    "vae": ["vae_loader", 0],
+                    "latent": ["empty_latent", 0],
+                    "strength": 1.0,
+                    "bypass": False
+                },
+                "class_type": "LTXVImgToVideoInplace"
+            }
+            active_latent_node = ["inplace_cond", 0]
+        else:
+            raise ValueError(f"No valid start input provided for LTX video generator: {request.image_path}")
 
         wf.update({
             "guider": {
@@ -769,7 +867,7 @@ class LtxVideoGenerator(BaseVideoGenerator):
             },
             "vae_decode": {
                 "inputs": {
-                    "samples": ["sampler", 0],
+                    "samples": latent_for_decode,
                     "vae": ["vae_loader", 0]
                 },
                 "class_type": "VAEDecode"

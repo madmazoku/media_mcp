@@ -1,10 +1,11 @@
 {
+  "engine": "flux2",
+  "model": "aishaNSFWFlux2Klein9B_v11Fp8.safetensors",
   "prompt": "wide landscape background extension, cinematic lighting, ultra-detailed workshop environment",
   "image_path": "images/gadget.png",
   "fit": "outpaint",
   "width": 1360,
   "height": 768,
-  "engine": "flux2",
   "guidance": 3.5,
   "denoise": 0.85
 }

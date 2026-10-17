@@ -7,11 +7,23 @@
   "properties": {
     "image": {
       "type": "object",
-      "description": "Installed checkpoint models grouped by image engine"
+      "additionalProperties": false,
+      "properties": {
+        "sdxl": { "type": "array", "items": { "type": "string" } },
+        "flux1": { "type": "array", "items": { "type": "string" } },
+        "flux2": { "type": "array", "items": { "type": "string" } }
+      },
+      "description": "Installed checkpoint and UNET models grouped by image engine"
     },
     "video": {
       "type": "object",
-      "description": "Installed UNET and video models grouped by video engine"
+      "additionalProperties": false,
+      "properties": {
+        "wan-fast": { "type": "array", "items": { "type": "string" } },
+        "wan-full": { "type": "array", "items": { "type": "string" } },
+        "ltx": { "type": "array", "items": { "type": "string" } }
+      },
+      "description": "Installed UNET and video model bundles grouped by video engine"
     }
   }
 }

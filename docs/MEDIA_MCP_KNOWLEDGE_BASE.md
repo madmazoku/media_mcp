@@ -106,26 +106,17 @@ k_tail_lat = max(2, math.ceil((overlap_pixels - 1) / 4) + 1)
 ### Нарезка блоков:
 - **Блок 1**: генерирует $T_{\text{core}} + 1$ кадров. Хвост отрезается нодой `LatentCut(dim="t", index=-k, amount=k)` от выхода сэмплера.
 - **Блок $N$ ($N \ge 2$)**: генерирует $T_{\text{total}} = T_{\text{prefix}} + T_{\text{core}}$ кадров.
-  - Кадры $[0 : T_{\text{prefix}}]$ отрезаются через `ImageFromBatch` $\to$ сохраняются в `{prefix_str}_prefix.mp4` (отладка).
-  - Кадры $[T_{\text{prefix}} : T_{\text{total}}]$ отрезаются через `ImageFromBatch` $\to$ сохраняются в `{prefix_str}_core.mp4` (рабочий блок).
+  - Кадры $[0 : T_{\text{prefix}}]$ отрезаются через `ImageFromBatch` $\to$ сохраняются в `{prefix_str}-prefix.mp4` (отладка).
+  - Кадры $[T_{\text{prefix}} : T_{\text{total}}]$ отрезаются через `ImageFromBatch` $\to$ сохраняются в `{prefix_str}-core.mp4` (рабочий блок).
 
 ---
 
-## 5. Инструмент контроля непрерывности (`inspect_block_continuity.py`)
+## 5. Чтение размерности латентов без PyTorch (`read_latent_temporal_frames`)
 
-Расположен в корне проекта: [`G:\Git\Gemini\scripts\inspect_block_continuity.py`](file:///G:/Git/Gemini/scripts/inspect_block_continuity.py)
+Чтобы избежать загрузки тяжёлого пакета `torch` в процесс MCP-сервера при расчёте временного сдвига $T_{\text{prefix}}$ из сохранённого файла `{prefix_str}-tail.latent`, модуль `src/core/lora_inspector.py` реализует функцию `read_latent_temporal_frames(path)`:
+- Считывает 8-байтовый little-endian заголовок `.safetensors` и парсит JSON-метаданные тензора `samples` (`shape: [B, C, T, H, W]`).
+- Извлекает координату $T = \text{shape}[2]$ напрямую через стандартные модули `struct` и `json` за $<0.1\text{ мс}$.
 
-### Назначение:
-- Автоматически находит артефакты запуска по префиксу: `b001_core.mp4`, `b001_tail.latent`, `b002_prefix.mp4`, `b002_core.mp4`.
-- Рассчитывает покадровые метрики MSE, MAE, PSNR и цветовой сдвиг $\Delta\text{RGB}$.
-- Генерирует дифференциальную тепловую карту стыка: `seam_diff_heatmap.png`.
-- Проверяет структуру тензора safetensors без запуска ComfyUI.
-
-### Запуск:
-```bash
-python G:/Git/Gemini/scripts/inspect_block_continuity.py --run-prefix <ID_ЗАПУСКА>
-```
-*Критерий успешности:* Средний $\text{MAE} < 15.0$ между хвостом Блока 1 и префиксом Блока 2, отсутствие скачка $\Delta\text{RGB}$ на стыке.
 
 ---
 

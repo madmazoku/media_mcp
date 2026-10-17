@@ -1,70 +1,102 @@
-# Руководство по генерации видео и цепочек в проекте Gemini
+# Руководство по сценарной генерации видео (Scenario Video Pipeline)
 
-Вся инфраструктура настроена локально в проектной папке `G:\Git\Gemini`.
-
----
-
-## 1. Структура проекта
-
-```
-G:\Git\Gemini\
-├── 📂 scripts\                    # Исполняемые скрипты
-│   ├── comfyui_generator.py       # Txt2Img генератор (FLUX uncensored)
-│   ├── video_extender.py          # Базовые утилиты продления видео и xfade
-│   └── scenario_video_pipeline.py # Сценарный конвейер с префиксным перекрытием 20+5
-├── 📂 workflows\                  # Схемы и шаблоны сценариев
-│   ├── sample_scenario.json       # Пример 3-блочного сценария (20с+5с, 20с+5с, 15с = 45с)
-│   └── ...
-├── 📂 output\
-│   ├── 📂 images\                # Сгенерированные мастер-кадры
-│   └── 📂 video\                 # Финальные смонтированные фильмы
-└── 📂 temp\                       # Буфер префиксных видеоклипов и кадров стыковки
-```
+Вся инфраструктура видеогенерации и сценарного конвейера инкапсулирована в `media_mcp`. Под капотом используются модели **Wan 2.2** (`wan-fast`, `wan-full`) и **LTX-Video** (`ltx`), управляемые через ComfyUI API с 5D латентным префиксным чейнингом и бесшовным монтажом FFmpeg.
 
 ---
 
-## 2. Сценарный генератор (`scenario_video_pipeline.py`)
+## 1. Сценарная иерархия: Корневые `.image`/`.video` $\to$ Сцена $\to$ Блоки
 
-### Концепция работы:
-* Для каждого блока задается: **Длительность (`duration`)** + **Время пересечения (`overlap`)** + **Промпт содержимого**.
-* По умолчанию для блоков принято: **`duration = 20.0s`**, **`overlap = 5.0s`**.
-* **Префиксное продолжение:** Ровно последние 5 секунд Блока $N$ становятся начальными 5 секундами Блока $N+1$.
-* **Поддержка затравочной картинки (`--start-image`):**
-  * Если задана картинка (например `--start-image G:\Git\Gemini\gadget_manga.jpg`), Блок 1 стартует с нее с сохранением персонажа и стиля.
-  * Если картинка не указана, конвейер автоматически генерирует затравочный мастер-кадр через нецензурированный **FLUX.1 Dev** (`persephone`) в нативном 16:9 разрешении **832×480**.
+Видеопайплайн оперирует трехуровневой структурой (`schemas/scenario.json`):
+1. **Корневые технические секции (`.image` и `.video`):**
+   - Задают обязательные `engine` и `model`, а также все технические настройки (`width`, `height`, `fps`, `steps`, `cfg`, `guidance`, `sampler`, `seed`, `max_duration`, `ramp_latents`, `min_cfg`, `weight_dtype`) и глобальные стилевые `prompt`, `negative_prompt`, `loras`.
+2. **Сцена (`scenes[]`):** единая локация и состояние персонажа:
+   - **`anchor_image`**: опорное изображение (`prompt`, либо `image_path` для img2img/inpaint/outpaint, либо готовый `keyframe_path`).
+3. **Блок (`scenes[].blocks[]`):** непрерывный отрезок видео (обычно 3–5 секунд):
+   - **`motion_prompt`**: описание действия персонажа и движения камеры.
+   - **`duration`**: чистая продолжительность генерируемого клипа (в секундах).
+   - **`overlap`**: время латентного перекрытия со следующим блоком (`0.0` по умолчанию для чистого 1-кадрового I2V чейнинга; `> 0.0` для 5D латентного префикса).
 
 ---
 
-### Примеры использования
+## 2. Формат спецификации сценария (`scenario.json`)
 
-#### А. Запуск готового сценария из JSON (например, на 45 секунд):
-```powershell
-python G:\Git\Gemini\scripts\scenario_video_pipeline.py --scenario G:\Git\Gemini\workflows\sample_scenario.json --start-image G:\Git\Gemini\gadget_manga.jpg --output "final_movie_45s.mp4"
-```
-
-#### Б. Быстрый запуск из консоли (2 блока по 20 сек с перекрытием 5 сек = 35 сек):
-```powershell
-python G:\Git\Gemini\scripts\scenario_video_pipeline.py --prompt "Cyberpunk female operative navigating neon rainy alleys, cinematic moody lighting" --duration 20.0 --overlap 5.0 --output "cyberpunk_35s.mp4"
-```
-
-#### В. Формат файла сценария (`sample_scenario.json`):
 ```json
-[
-  {
-    "duration": 20.0,
-    "overlap": 5.0,
-    "prompt": "Lord Captain stands on voidship bridge looking through star viewport, slow camera pan"
+{
+  "name": "Starship Bridge Inspection",
+  "image": {
+    "engine": "flux2",
+    "model": "aishaNSFWFlux2Klein9B_v11Fp8.safetensors",
+    "guidance": 3.5,
+    "steps": 20
   },
-  {
-    "duration": 20.0,
-    "overlap": 5.0,
-    "prompt": "Lord Captain slowly turns towards holographic tactical console, dramatic amber shadows"
+  "video": {
+    "engine": "wan-fast",
+    "model": "wan2.2_i2v_14B_fp8_scaled.safetensors",
+    "width": 832,
+    "height": 480,
+    "fps": 16,
+    "max_duration": 10.0
   },
-  {
-    "duration": 15.0,
-    "overlap": 0.0,
-    "prompt": "Close-up of Lord Captain operating glowing holographic controls, confident expression"
-  }
-]
+  "scenes": [
+    {
+      "name": "Scene 1: Starship Bridge",
+      "anchor_image": {
+        "prompt": "Lord Captain stands on voidship bridge looking through star viewport, cinematic lighting, 8k"
+      },
+      "blocks": [
+        {
+          "duration": 5.0,
+          "overlap": 0.0,
+          "motion_prompt": "Lord Captain looking through viewport, stars outside drifting slowly, subtle breathing"
+        },
+        {
+          "duration": 5.0,
+          "overlap": 0.0,
+          "motion_prompt": "Lord Captain slowly turns head towards holographic console, dramatic amber light reflections"
+        }
+      ]
+    }
+  ]
+}
 ```
-*Итоговый хронометраж фильма:* $(20 - 5) + (20 - 5) + 15 = \mathbf{45.0 \text{ секунд}}$ без единого визуального стыка.
+
+---
+
+## 3. Способы запуска
+
+### А. Через Stdio MCP (AI-ассистент):
+Ассистент вызывает инструмент `video_generate` с JSON-телом сценария (или `scenario_path`).
+- Перед запуском рекомендуется вызывать `video_validate` для сухой проверки всех полей, таймингов и пропорций.
+- Результат возвращает: `video_path` (смонтированный MP4), `poster_path` (постер сцены 1), `spec_path` (зафиксированный JSON запуска).
+
+### Б. Через командную строку (CLI):
+```bash
+bin/cli.cmd --config path/to/config.json video_generate --payload examples/scenario.json
+```
+Или передача JSON через стандартный поток ввода (stdin):
+```bash
+cat examples/scenario.json | bin/cli.cmd --config path/to/config.json video_generate --stdin
+```
+
+### В. Сухая валидация через CLI:
+```bash
+bin/cli.cmd --config path/to/config.json video_validate --payload examples/scenario.json
+```
+
+---
+
+## 4. Математика таймингов и склейки кадров
+
+1. **Квантование кадров VAE:**
+   - Для **Wan 2.2** VAE temporal stride равен 4: $T_{\text{pixel}} = 1 + 4 \times k_{\text{lat}}$ (17, 33, 49, 65, 81 кадров).
+   - Для **LTX-Video** VAE temporal stride равен 8: $T_{\text{pixel}} = 1 + 8 \times k_{\text{lat}}$ (17, 25, 33, 41, 49, 65, 81 кадров).
+2. **Бесшовный Stream Copy (FFmpeg `-c copy`):**
+   - Все блоки кодируются с идентичными параметрами H.264 и собираются через `ffmpeg -f concat -safe 0 -c copy` без пережатия видеопотока.
+3. **Исключение дублирования стыковочного кадра:**
+   - При 1-кадровом I2V чейнинге (`overlap = 0.0`) кадр 0 нового блока совпадает с последним кадром предыдущего. Пайплайн автоматически сдвигает нарезку ядра нового блока на 1 кадр (`batch_index = 1`), исключая микро-зависание видео на стыке.
+
+---
+
+## 5. Дополнительные исследовательские материалы
+- Подробный математический анализ латентов, double-scaling ловушки и фазовых искажений Causal VAE: [`docs/MEDIA_MCP_KNOWLEDGE_BASE.md`](MEDIA_MCP_KNOWLEDGE_BASE.md).
+- Анализ алгоритмов перекрытия (FreeNoise, AdaIN, Latent Fusing): [`docs/VIDEO_BLOCK_CHAINING_RESEARCH.md`](VIDEO_BLOCK_CHAINING_RESEARCH.md).

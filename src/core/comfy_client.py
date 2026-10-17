@@ -4,13 +4,13 @@
 ComfyUI HTTP client for queuing, monitoring, and retrieving artifacts.
 """
 
+import datetime
 import sys
-import json
 import time
-import os
 import shutil
 import urllib.parse
 import uuid
+import re
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
 import requests
@@ -18,7 +18,6 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from . import config
-from .config import COMFY_URL, COMFY_INPUT_DIR, COMFY_OUTPUT_DIR
 
 
 def log(msg: str):
@@ -27,6 +26,7 @@ def log(msg: str):
 
 
 _SESSION: Optional[requests.Session] = None
+_RUN_PREFIX_RGX = re.compile(r"^\d{8}[-_]\d{6}-[0-9a-fA-F]{6}")
 
 
 def get_session() -> requests.Session:
@@ -45,7 +45,7 @@ def get_session() -> requests.Session:
 
 
 def _format_url(endpoint: str) -> str:
-    base = (config.COMFY_URL or COMFY_URL or "").strip()
+    base = (config.COMFY_URL or "").strip()
     if not base:
         raise ValueError("ComfyUI URL is not configured. Please set 'comfy_url' in config.json.")
     if not base.startswith(("http://", "https://")):
@@ -172,23 +172,13 @@ def wait_for_prompt(
 ) -> Tuple[bool, Dict[str, Any]]:
     """
     Monitors prompt execution in ComfyUI with active queue tracking and HTTP Keep-Alive.
-
-    Phases:
-    1. Pending in Queue:
-       Prompt is in 'queue_pending'. Position is tracked and execution timeout does NOT tick down.
-    2. Running on GPU:
-       Prompt is in 'queue_running'. Active GPU diffusion phase. Execution timeout applies.
-    3. Completed:
-       Prompt appears in '/history/{prompt_id}'.
-    4. Disappeared / Cancelled:
-       Fails fast if prompt disappears from queue without appearing in history.
     """
     start_time = time.time()
     execution_start_time: Optional[float] = None
     last_notify = 0.0
     was_seen_in_queue = False
     cb = progress_callback or _GLOBAL_PROGRESS_CALLBACK
-    max_queue_wait = 1800.0  # Max wait in queue (30 mins) behind other jobs
+    max_queue_wait = 1800.0
 
     while True:
         if _INTERRUPT_FLAG:
@@ -271,8 +261,6 @@ def wait_for_prompt(
                 log(msg)
 
         else:
-            # Not in pending, not in running.
-            # If it was in queue/running or initial grace period passed:
             if was_seen_in_queue or total_elapsed >= 5.0:
                 time.sleep(0.5)
                 try:
@@ -299,24 +287,43 @@ def download_output_file(filename: str, subfolder: str = "", file_type: str = "o
     return make_request(f"/view?{query}", raw=True)
 
 
-def upload_file_to_comfy(src_path: str, custom_filename: Optional[str] = None) -> str:
+def upload_file_to_comfy(
+    src_path: str,
+    custom_filename: Optional[str] = None,
+    run_prefix: Optional[str] = None,
+    suffix: str = "input"
+) -> str:
     """
-    Copies a local file into ComfyUI's input directory so nodes like LoadImage
-    or LoadLatent can access it.
-    Requires 'comfy_input_dir' to be configured and exist on disk.
-    Returns the filename.
+    Copies a local file into ComfyUI's input directory using the unified artifact naming convention
+    ({run_prefix}-{suffix}.{ext}) so all artifacts of a run remain traceable and collision-free.
     """
-    if not Path(src_path).is_file():
+    p_src = Path(src_path)
+    if not p_src.is_file():
         raise FileNotFoundError(f"Source file not found: {src_path}")
 
-    if not COMFY_INPUT_DIR or not Path(COMFY_INPUT_DIR).is_dir():
+    input_dir = config.COMFY_INPUT_DIR
+    if not input_dir or not Path(input_dir).is_dir():
         raise RuntimeError(
-            f"ComfyUI input directory is not configured or does not exist on disk: '{COMFY_INPUT_DIR}'. "
+            f"ComfyUI input directory is not configured or does not exist on disk: '{input_dir}'. "
             f"Please set a valid 'comfy_input_dir' in config.json."
         )
 
-    filename = custom_filename or Path(src_path).name
-    dest_path = (Path(COMFY_INPUT_DIR) / filename).as_posix()
+    ext = p_src.suffix or ".png"
+    if custom_filename:
+        filename = custom_filename
+    elif run_prefix:
+        clean_suffix = suffix.lstrip("-")
+        filename = f"{run_prefix}-{clean_suffix}{ext}"
+    elif _RUN_PREFIX_RGX.match(p_src.stem):
+        # Already carries a run_prefix (e.g. from temp/)
+        filename = p_src.name
+    else:
+        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        short_h = uuid.uuid4().hex[:6]
+        clean_suffix = suffix.lstrip("-")
+        filename = f"{ts}-{short_h}-{clean_suffix}{ext}"
+
+    dest_path = (Path(input_dir) / filename).as_posix()
     shutil.copy2(src_path, dest_path)
     return filename
 
@@ -330,13 +337,14 @@ def find_comfy_output_file(filename: str, subfolder: str = "") -> Optional[str]:
     Directly checks COMFY_OUTPUT_DIR for an output file.
     Requires 'comfy_output_dir' to be configured and exist on disk.
     """
-    if not COMFY_OUTPUT_DIR or not Path(COMFY_OUTPUT_DIR).is_dir():
+    output_dir = config.COMFY_OUTPUT_DIR
+    if not output_dir or not Path(output_dir).is_dir():
         raise RuntimeError(
-            f"ComfyUI output directory is not configured or does not exist on disk: '{COMFY_OUTPUT_DIR}'. "
+            f"ComfyUI output directory is not configured or does not exist on disk: '{output_dir}'. "
             f"Please set a valid 'comfy_output_dir' in config.json."
         )
 
-    p = (Path(COMFY_OUTPUT_DIR) / subfolder / filename) if subfolder else (Path(COMFY_OUTPUT_DIR) / filename)
+    p = (Path(output_dir) / subfolder / filename) if subfolder else (Path(output_dir) / filename)
     if p.is_file():
         return p.resolve().as_posix()
     return None

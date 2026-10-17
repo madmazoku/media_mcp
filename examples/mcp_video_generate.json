@@ -1,4 +1,3 @@
 {
-  "scenario_path": "examples/scenario.json",
-  "enable_hud": false
+  "scenario_path": "examples/scenario.json"
 }

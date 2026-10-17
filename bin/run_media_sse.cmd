@@ -7,4 +7,3 @@ set PYTHONUNBUFFERED=1
 set PYTHONIOENCODING=utf-8
 
 python src\mcp\media_mcp.py --sse %*
-pause

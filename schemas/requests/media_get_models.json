@@ -13,7 +13,8 @@
     },
     "engine": {
       "type": "string",
-      "description": "Optional filter by engine (e.g. 'sdxl', 'flux1', 'wan-fast')"
+      "enum": ["sdxl", "flux1", "flux2", "wan-fast", "wan-full", "ltx"],
+      "description": "Optional filter by engine ('sdxl', 'flux1', 'flux2', 'wan-fast', 'wan-full', 'ltx')"
     }
   }
 }

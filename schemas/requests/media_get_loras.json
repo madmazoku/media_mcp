@@ -9,8 +9,8 @@
   "properties": {
     "engine": {
       "type": "string",
-      "minLength": 1,
-      "description": "Engine name (e.g. 'sdxl', 'flux1', 'wan-fast')"
+      "enum": ["sdxl", "flux1", "flux2", "wan-fast", "wan-full", "ltx"],
+      "description": "Engine name ('sdxl', 'flux1', 'flux2', 'wan-fast', 'wan-full', 'ltx')"
     },
     "model": {
       "type": "string",

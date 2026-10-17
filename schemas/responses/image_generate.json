@@ -17,7 +17,7 @@
   "properties": {
     "run_prefix": {
       "type": "string",
-      "description": "Unique run prefix ({timestamp}-{hash})"
+      "description": "Unique run prefix (YYYYMMDD-HHMMSS-{hash})"
     },
     "image_path": {
       "type": "string",
@@ -29,6 +29,7 @@
     },
     "engine": {
       "type": "string",
+      "enum": ["sdxl", "flux1", "flux2"],
       "description": "Generation engine (sdxl, flux1, flux2)"
     },
     "model": {
@@ -46,6 +47,21 @@
     "height": {
       "type": "integer",
       "description": "Output height in pixels"
+    },
+    "native_width": {
+      "type": "integer",
+      "description": "Native diffusion generation width in pixels (~1 MP bucket)"
+    },
+    "native_height": {
+      "type": "integer",
+      "description": "Native diffusion generation height in pixels (~1 MP bucket)"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Optional non-fatal resolution or aspect ratio warnings"
     }
   }
 }

@@ -2,10 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "scenario.json",
   "title": "Media MCP Video Scenario",
-  "description": "Strict hierarchical Scene -> Blocks video scenario schema with unified naming conventions.",
+  "description": "Strict hierarchical Scene -> Blocks video scenario schema with technical parameters isolated in root .image and .video configs.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["scenes"],
+  "required": ["video", "scenes"],
   "properties": {
     "scenario_path": {
       "type": "string",
@@ -36,11 +36,11 @@
     "image_root_config": {
       "type": "object",
       "additionalProperties": false,
+      "required": ["engine", "model"],
       "properties": {
         "engine": {
           "type": "string",
           "enum": ["sdxl", "flux1", "flux2"],
-          "default": "sdxl",
           "description": "Anchor image generation engine"
         },
         "model": {
@@ -107,22 +107,53 @@
             "$ref": "#/$defs/lora_item"
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "engine": { "enum": ["flux1", "flux2"] }
+            },
+            "required": ["engine"]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["negative_prompt"] },
+                { "required": ["cfg"] }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "engine": { "const": "flux2" }
+            },
+            "required": ["engine"]
+          },
+          "then": {
+            "not": {
+              "required": ["loras"]
+            }
+          }
+        }
+      ]
     },
     "video_root_config": {
       "type": "object",
       "additionalProperties": false,
+      "required": ["engine", "model"],
       "properties": {
         "engine": {
           "type": "string",
           "enum": ["wan-fast", "wan-full", "ltx"],
-          "default": "wan-fast",
           "description": "Video generation engine"
         },
         "model": {
           "type": "string",
           "minLength": 1,
-          "description": "Video checkpoint model name"
+          "description": "Video model or bundle identifier"
         },
         "prompt": {
           "type": "string",
@@ -149,11 +180,47 @@
           "enum": [16, 24, 25, 30, 60],
           "default": 16
         },
+        "steps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Global video sampling steps"
+        },
+        "cfg": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 30.0,
+          "description": "Global video Classifier-Free Guidance scale"
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": -1,
+          "description": "Global video random seed (-1 for randomized)"
+        },
         "max_duration": {
           "type": "number",
           "minimum": 1.0,
           "maximum": 60.0,
-          "default": 15.0
+          "default": 10.0
+        },
+        "weight_dtype": {
+          "type": "string",
+          "enum": ["default", "fp8_e4m3fn", "fp8_e5m2"],
+          "description": "UNet weight precision mode"
+        },
+        "ramp_latents": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20,
+          "default": 3,
+          "description": "Number of temporal latents for CFG ramp-up after latent prefix"
+        },
+        "min_cfg": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 10.0,
+          "default": 1.0,
+          "description": "Initial CFG scale at prefix boundary during temporal CFG ramp-up"
         },
         "loras": {
           "type": "array",
@@ -205,11 +272,11 @@
             "prompt": {
               "type": "string",
               "minLength": 1,
-              "description": "Visual prompt text describing the scene appearance (inherited from global image.prompt if omitted)"
+              "description": "Visual prompt text describing the scene appearance (combined with global image.prompt)"
             },
             "negative_prompt": {
               "type": "string",
-              "description": "Negative prompt (SDXL only, concatenated with global negative_prompt)"
+              "description": "Negative prompt (SDXL only, combined with global negative_prompt)"
             },
             "image_path": {
               "type": "string",
@@ -226,11 +293,6 @@
               "minimum": 0.05,
               "maximum": 1.0,
               "description": "Denoising strength for img2img refinement of this scene's anchor frame (overrides global image.denoise)"
-            },
-            "seed": {
-              "type": "integer",
-              "minimum": -1,
-              "description": "Optional scene-specific random seed (-1 for randomized)"
             },
             "fit": {
               "type": "string",
@@ -281,49 +343,11 @@
           "type": "string",
           "description": "Block-specific negative prompt"
         },
-        "engine": {
-          "type": "string",
-          "enum": ["wan-fast", "wan-full", "ltx"],
-          "description": "Block-level video generator engine override"
-        },
-        "model": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Block-level model override"
-        },
-        "steps": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 100
-        },
-        "cfg": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 30.0
-        },
-        "seed": {
-          "type": "integer",
-          "minimum": -1
-        },
         "loras": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/lora_item"
           }
-        },
-        "weight_dtype": {
-          "type": "string",
-          "enum": ["default", "fp8_e4m3fn", "fp8_e5m2"]
-        },
-        "ramp_latents": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 20
-        },
-        "min_cfg": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 10.0
         }
       }
     },
@@ -336,16 +360,6 @@
           "type": "string",
           "minLength": 1,
           "description": "Descriptive scene title"
-        },
-        "engine": {
-          "type": "string",
-          "enum": ["wan-fast", "wan-full", "ltx"],
-          "description": "Scene-level default video engine"
-        },
-        "model": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Scene-level default model"
         },
         "negative_prompt": {
           "type": "string",

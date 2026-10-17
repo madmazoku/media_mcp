@@ -11,8 +11,10 @@ from .base import (
     VideoRequest,
     GenerationResult,
     BaseGenerator,
+    snap_to_step,
     snap_to_16,
     snap_to_32,
+    snap_to_64,
 )
 
 from .image_generators import (
@@ -44,8 +46,10 @@ __all__ = [
     "VideoRequest",
     "GenerationResult",
     "BaseGenerator",
+    "snap_to_step",
     "snap_to_16",
     "snap_to_32",
+    "snap_to_64",
     "BaseImageGenerator",
     "SdxlImageGenerator",
     "Flux1ImageGenerator",

@@ -1,5 +1,6 @@
 {
   "engine": "sdxl",
+  "model": "ponyDiffusionV6XL_v6StartWithThis.safetensors",
   "prompt": "score_9, score_8_up, score_7_up, 1girl, young Hermione Granger, bushy wavy brown hair, warm brown eyes, Hogwarts school uniform, inside cozy vintage train compartment, soft golden afternoon sunlight",
   "width": 832,
   "height": 480,

@@ -8,10 +8,8 @@ progress routing, and standardized MCP/CLI output formatting.
 """
 
 from __future__ import annotations
-import os
 import sys
 import json
-import time
 import threading
 import importlib
 from pathlib import Path
@@ -41,6 +39,26 @@ CANONICAL_TOOLS = [
     "media_get_status",
     "media_interrupt",
     "media_reload_modules",
+]
+
+TOPOLOGICAL_CORE_MODULES = [
+    "core.config",
+    "core.schema_validator",
+    "core.lora_inspector",
+    "core.comfy_client",
+    "core.a1111_client",
+    "core.ffmpeg_engine",
+    "core.discovery",
+    "core.generators.base",
+    "core.generators.image_generators",
+    "core.generators.video_generators",
+    "core.generators.factory",
+    "core.generators",
+    "core.image_engine",
+    "core.video_pipeline",
+    "core.schema_formatter",
+    "core.tools",
+    "core",
 ]
 
 
@@ -89,8 +107,8 @@ def load_spec_file(path_str: str) -> Dict[str, Any]:
 
 def reload_core_modules() -> List[str]:
     """
-    Dynamically reloads all loaded modules in sys.modules under 'core' in reverse dependency order,
-    ensuring code updates take effect immediately without restarting servers.
+    Dynamically reloads all loaded modules in sys.modules under 'core' in explicit
+    topological dependency order, preserving active runtime configuration and _GPU_LOCK.
     """
     saved_cfg = None
     if "core.config" in sys.modules:
@@ -98,20 +116,30 @@ def reload_core_modules() -> List[str]:
         if hasattr(cfg_mod, "cfg_json") and cfg_mod.cfg_json:
             saved_cfg = dict(cfg_mod.cfg_json)
 
-    core_mods = [k for k in list(sys.modules.keys()) if k == "core" or k.startswith("core.")]
-    core_mods.sort(key=lambda s: s.count("."), reverse=True)
-    reloaded = []
-    for mod_name in core_mods:
+    saved_gpu_lock = _GPU_LOCK
+
+    loaded_core_mods = [k for k in list(sys.modules.keys()) if k == "core" or k.startswith("core.")]
+    ordered_mods: List[str] = []
+    for mod_name in TOPOLOGICAL_CORE_MODULES:
+        if mod_name in loaded_core_mods:
+            ordered_mods.append(mod_name)
+    for mod_name in loaded_core_mods:
+        if mod_name not in ordered_mods:
+            ordered_mods.append(mod_name)
+
+    reloaded: List[str] = []
+    for mod_name in ordered_mods:
         m = sys.modules.get(mod_name)
         if m and hasattr(m, "__file__") and m.__file__:
             try:
                 importlib.reload(m)
+                if mod_name == "core.config" and saved_cfg:
+                    m.load_config_dict(saved_cfg)
+                elif mod_name == "core.tools":
+                    setattr(m, "_GPU_LOCK", saved_gpu_lock)
                 reloaded.append(mod_name)
             except Exception as e:
                 log(f"Warning: Failed to reload {mod_name}: {e}")
-
-    if saved_cfg and "core.config" in sys.modules:
-        sys.modules["core.config"].load_config_dict(saved_cfg)
 
     return reloaded
 
@@ -129,7 +157,7 @@ def execute_image_generate(args: Dict[str, Any], progress_cb: Optional[Callable]
         if progress_cb:
             image_engine.set_global_progress_callback(progress_cb)
 
-        success, img_path, b64_data, metadata = image_engine.generate_image(args)
+        success, img_path, _b64_data, metadata = image_engine.generate_image(args)
         if not success or not img_path:
             err_msg = metadata.get("error", "Image generation failed")
             return {
@@ -141,35 +169,27 @@ def execute_image_generate(args: Dict[str, Any], progress_cb: Optional[Callable]
 
         run_prefix = metadata.get("run_prefix", "")
         spec_path = metadata.get("spec_path", "")
-        seed = metadata.get("seed")
-        engine_name = metadata.get("engine", "image").upper()
-        width = metadata.get("width", "N/A")
-        height = metadata.get("height", "N/A")
-        model = metadata.get("model", "default")
-        file_uri = Path(img_path).resolve().as_uri()
+        seed = metadata.get("seed", 0)
+        width = int(metadata.get("width", 1024))
+        height = int(metadata.get("height", 1024))
+        native_width = int(metadata.get("native_width", width))
+        native_height = int(metadata.get("native_height", height))
 
-        summary_text = (
-            f"Image Generated Successfully ({engine_name}):\n"
-            f"- Run Prefix: `{run_prefix}`\n"
-            f"- Spec: `{spec_path}`\n"
-            f"- Output: `{img_path}`\n"
-            f"- Resolution: {width}x{height} | Seed: {seed} | Model: `{model}`\n\n"
-            f"File link: [Open Image]({file_uri})\n"
-        )
-
-        content: List[Dict[str, Any]] = [{"type": "text", "text": summary_text}]
-
-        return {
-            "content": content,
+        resp: Dict[str, Any] = {
             "run_prefix": run_prefix,
             "image_path": Path(img_path).resolve().as_posix() if img_path else "",
             "spec_path": Path(spec_path).resolve().as_posix() if spec_path else "",
             "engine": str(metadata.get("engine", "sdxl")).lower(),
             "model": str(metadata.get("model", "")),
             "seed": int(seed) if seed is not None else 0,
-            "width": int(width) if str(width).isdigit() else 1024,
-            "height": int(height) if str(height).isdigit() else 1024
+            "width": width,
+            "height": height,
+            "native_width": native_width,
+            "native_height": native_height,
         }
+        if metadata.get("warnings"):
+            resp["warnings"] = list(metadata["warnings"])
+        return resp
 
 
 def execute_video_generate(args: Dict[str, Any], progress_cb: Optional[Callable] = None) -> Dict[str, Any]:
@@ -178,17 +198,14 @@ def execute_video_generate(args: Dict[str, Any], progress_cb: Optional[Callable]
         if progress_cb:
             video_pipeline.set_global_progress_callback(progress_cb)
 
-        enable_hud = bool(args.get("enable_hud", False))
         res = video_pipeline.execute_scenario_pipeline(
             scenario_input=args,
-            enable_hud=enable_hud,
             progress_callback=progress_cb
         )
 
         run_prefix = res.get("run_prefix", "")
         final_path = res["video_path"]
         spec_path = res.get("spec_path", "")
-        hud_path = res.get("hud_video_path")
         poster_path = res.get("poster_path", "")
         dur = float(res.get("duration", 0.0))
         w = int(res.get("width", 832))
@@ -197,49 +214,33 @@ def execute_video_generate(args: Dict[str, Any], progress_cb: Optional[Callable]
         scenes_cnt = int(res.get("scenes_count", 1))
         blocks_cnt = int(res.get("blocks_count", 0))
 
-        file_uri = Path(final_path).resolve().as_uri()
-        hud_uri = Path(hud_path).resolve().as_uri() if hud_path else None
-
-        result_text = (
-            f"Multi-Scene Video Scenario Rendered Successfully:\n"
-            f"- Run Prefix: `{run_prefix}`\n"
-            f"- Spec: `{spec_path}`\n"
-            f"- Output: `{final_path}`\n"
-            f"- Poster: `{poster_path}`\n"
-            f"- Scenes: {scenes_cnt} | Total Duration: {dur:.2f}s\n"
-            f"- Resolution: {w}x{h} @ {fps} fps\n\n"
-            f"File link: [Open Final Video]({file_uri})\n"
-        )
-        if hud_path and hud_uri:
-            result_text += f"- Diagnostic HUD: [Open HUD Video]({hud_uri})\n"
-
-        content: List[Dict[str, Any]] = [{"type": "text", "text": result_text}]
-
-        return {
-            "content": content,
+        resp: Dict[str, Any] = {
             "run_prefix": run_prefix,
             "video_path": Path(final_path).resolve().as_posix() if final_path else "",
             "spec_path": Path(spec_path).resolve().as_posix() if spec_path else "",
             "poster_path": Path(poster_path).resolve().as_posix() if poster_path else "",
-            "hud_video_path": Path(hud_path).resolve().as_posix() if hud_path else None,
             "duration": dur,
             "width": w,
             "height": h,
             "fps": fps,
             "scenes_count": scenes_cnt,
-            "blocks_count": blocks_cnt
+            "blocks_count": blocks_cnt,
         }
+        if res.get("warnings"):
+            resp["warnings"] = list(res["warnings"])
+        return resp
 
 
 def execute_video_validate(args: Dict[str, Any]) -> Dict[str, Any]:
     from . import video_pipeline
-    errors = []
-    warnings = []
-    scene_summaries = []
+    errors: List[str] = []
+    warnings: List[str] = []
+    scene_summaries: List[Dict[str, Any]] = []
     total_projected_dur = 0.0
 
     try:
-        scenes = video_pipeline.normalize_scenario_structure(args)
+        scenario_dict = video_pipeline.resolve_scenario_dict(args)
+        scenes = video_pipeline.normalize_scenario_structure(scenario_dict)
     except Exception as ex:
         return {
             "content": [{"type": "text", "text": f"Scenario Normalization/Schema Error:\n{ex}"}],
@@ -249,10 +250,12 @@ def execute_video_validate(args: Dict[str, Any]) -> Dict[str, Any]:
             "scenes": []
         }
 
-    v_cfg = args.get("video", {})
+    v_cfg = scenario_dict.get("video", {})
     vid_w = int(v_cfg.get("width", 832))
     vid_h = int(v_cfg.get("height", 480))
-    timing_errors = video_pipeline.collect_scenario_timing_errors(scenes)
+    max_dur = float(v_cfg.get("max_duration", config.MAX_VIDEO_DURATION))
+
+    timing_errors = video_pipeline.collect_scenario_timing_errors(scenes, max_duration=max_dur)
     ar_errors = video_pipeline.collect_scenario_aspect_ratio_errors(scenes, video_width=vid_w, video_height=vid_h)
     errors.extend(timing_errors)
     errors.extend(ar_errors)
@@ -280,26 +283,9 @@ def execute_video_validate(args: Dict[str, Any]) -> Dict[str, Any]:
         })
 
     is_valid = (len(errors) == 0)
-    report = (
-        f"Scenario Validation Report:\n"
-        f"- Status: {'VALID [OK]' if is_valid else 'INVALID [ERRORS DETECTED]'}\n"
-        f"- Scenes count: {len(scenes)}\n"
-        f"- Projected total duration: ~{total_projected_dur:.2f} seconds\n"
-    )
-
-    if errors:
-        report += "\nErrors:\n" + "\n".join(f"  [X] {e}" for e in errors)
-    if warnings:
-        report += "\nWarnings:\n" + "\n".join(f"  [!] {w}" for w in warnings)
-
-    report += "\nScene Breakdown:\n"
-    for s in scene_summaries:
-        report += f"- **{s['name']}** ({s['blocks_count']} blocks, ~{s['projected_duration']}s) | Anchor: {s['anchor_type']}\n"
-
     return {
-        "content": [{"type": "text", "text": report}],
         "is_valid": is_valid,
-        "total_duration": total_projected_dur,
+        "total_duration": round(total_projected_dur, 2),
         "errors": errors,
         "warnings": warnings,
         "scenes": scene_summaries
@@ -309,21 +295,14 @@ def execute_video_validate(args: Dict[str, Any]) -> Dict[str, Any]:
 def execute_media_get_models(args: Dict[str, Any]) -> Dict[str, Any]:
     type_filter = args.get("type")
     engine_filter = args.get("engine")
-    tree = discovery.get_models_tree(type_filter=type_filter, engine_filter=engine_filter)
-    json_text = json.dumps(tree, indent=2, ensure_ascii=False)
-    return {
-        "content": [{"type": "text", "text": json_text}],
-        **tree
-    }
+    return discovery.get_models_tree(type_filter=type_filter, engine_filter=engine_filter)
 
 
 def execute_media_get_samplers(args: Dict[str, Any]) -> Dict[str, Any]:
     engine = args["engine"]
     model = args["model"]
     samplers = discovery.get_samplers_for_model(engine=engine, model=model)
-    json_text = json.dumps(samplers, indent=2, ensure_ascii=False)
     return {
-        "content": [{"type": "text", "text": json_text}],
         "samplers": samplers
     }
 
@@ -341,9 +320,7 @@ def execute_media_get_loras(args: Dict[str, Any]) -> Dict[str, Any]:
             "content": [{"type": "text", "text": f"Error: {ex}"}],
             "loras": []
         }
-    json_text = json.dumps(loras, indent=2, ensure_ascii=False)
     return {
-        "content": [{"type": "text", "text": json_text}],
         "loras": loras
     }
 
@@ -398,10 +375,8 @@ def execute_media_get_status(args: Dict[str, Any]) -> Dict[str, Any]:
 
     text_resp = "\n\n".join(status_lines)
     return {
-        "content": [{"type": "text", "text": text_resp}],
         "pipeline": pipe_st,
         "comfy_online": comfy_avail,
-        "comfyui_available": comfy_avail,
         "a1111_available": a1111_avail,
         "report": text_resp
     }
@@ -414,16 +389,14 @@ def execute_media_interrupt(args: Dict[str, Any]) -> Dict[str, Any]:
     video_pipeline.request_interrupt()
     msg = "Interrupt signals dispatched to ComfyUI, A1111 WebUI, and Active Video Pipelines."
     log(msg)
-    return {"content": [{"type": "text", "text": msg}], "interrupted": True, "message": msg}
+    return {"interrupted": True, "message": msg}
 
 
 def execute_media_reload_modules(args: Dict[str, Any]) -> Dict[str, Any]:
     reloaded = reload_core_modules()
-    msg = f"Hot-reloaded {len(reloaded)} core modules in reverse dependency order:\n" + "\n".join(f"- {m}" for m in reloaded)
+    msg = f"Hot-reloaded {len(reloaded)} core modules in topological order:\n" + "\n".join(f"- {m}" for m in reloaded)
     log(msg)
     return {
-        "content": [{"type": "text", "text": msg}],
-        "reloaded": reloaded,
         "reloaded_modules": reloaded,
         "count": len(reloaded)
     }
@@ -451,7 +424,7 @@ def get_tools_list() -> List[Dict[str, Any]]:
         },
         {
             "name": "video_generate",
-            "description": "Generate multi-scene or single-block videos using Wan 2.2 Fast/Full or LTX-2.3 with Latent-Chaining and True Forced Prefix continuity. Takes scenario_path and/or inline scenario scenes.",
+            "description": "Generate multi-scene or single-block videos using Wan 2.2 Fast (wan-fast), Wan 2.2 Full (wan-full), or LTX-Video (ltx) with 5D Latent-Chaining and True Forced Prefix continuity. Takes scenario_path and/or inline scenario scenes.",
             "inputSchema": schema_validator.get_mcp_tool_schema("video_generate")
         },
         {

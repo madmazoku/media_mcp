@@ -2,11 +2,13 @@
   "name": "Hermione Vintage Train Journey",
   "image": {
     "engine": "sdxl",
+    "model": "ponyDiffusionV6XL_v6StartWithThis.safetensors",
     "cfg": 5.5,
     "steps": 30
   },
   "video": {
     "engine": "wan-fast",
+    "model": "wan2.2_i2v_14B_fp8_scaled.safetensors",
     "width": 832,
     "height": 480,
     "fps": 16,

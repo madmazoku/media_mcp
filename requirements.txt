@@ -1,7 +1,10 @@
 # Python >= 3.10
 jsonschema>=4.20.0
+requests>=2.31.0
+urllib3>=2.0.0
+Pillow>=10.0.0
 
 # External runtime requirements:
 # - FFmpeg (with h264_nvenc or standard libx264)
-# - ComfyUI (running with Wan 2.2 / LTX-2.3 / FLUX nodes)
+# - ComfyUI (running with Wan 2.2 / LTX-Video / FLUX nodes)
 # - Automatic1111 Stable Diffusion WebUI (optional, for SDXL / Pony)

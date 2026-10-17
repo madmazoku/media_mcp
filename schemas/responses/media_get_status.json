@@ -19,10 +19,6 @@
       "type": "boolean",
       "description": "ComfyUI backend online availability"
     },
-    "comfyui_available": {
-      "type": "boolean",
-      "description": "Alias for ComfyUI backend online availability"
-    },
     "a1111_available": {
       "type": "boolean",
       "description": "A1111 WebUI backend online availability"

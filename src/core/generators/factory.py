@@ -19,7 +19,7 @@ IMAGE_GENERATOR_REGISTRY: Dict[str, Type[BaseImageGenerator]] = {
 
 VIDEO_GENERATOR_REGISTRY: Dict[str, Type[BaseVideoGenerator]] = {
     "wan-fast": WanFastVideoGenerator,
-    "wan": WanFullVideoGenerator,
+    "wan-full": WanFullVideoGenerator,
     "ltx": LtxVideoGenerator,
 }
 
@@ -39,7 +39,7 @@ def create_image_generator(engine_or_name: str = "sdxl", settings: Optional[Dict
 
 def create_video_generator(engine_or_name: str = "wan-fast", settings: Optional[Dict[str, Any]] = None) -> BaseVideoGenerator:
     """
-    Factory method to create a video generator matching canonical engine name ('wan-fast', 'wan', 'ltx').
+    Factory method to create a video generator matching canonical engine name ('wan-fast', 'wan-full', 'ltx').
     """
     key = str(engine_or_name or "wan-fast").strip().lower()
     cls = VIDEO_GENERATOR_REGISTRY.get(key)
