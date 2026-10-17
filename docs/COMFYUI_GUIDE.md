@@ -8,7 +8,7 @@
 
 Видеопайплайн оперирует трехуровневой структурой (`schemas/scenario.json`):
 1. **Корневые технические секции (`.image` и `.video`):**
-   - Задают обязательные `engine` и `model`, а также все технические настройки (`width`, `height`, `fps`, `steps`, `cfg`, `guidance`, `sampler`, `seed`, `max_duration`, `ramp_latents`, `min_cfg`, `weight_dtype`) и глобальные стилевые `prompt`, `negative_prompt`, `loras`.
+   - Задают обязательные `engine` и `model`, а также все технические настройки (`width`, `height`, `fps`, `steps`, `cfg`, `guidance`, `sampler`, `seed`, `ramp_latents`, `min_cfg`, `weight_dtype`) и глобальные стилевые `prompt`, `negative_prompt`, `loras`.
 2. **Сцена (`scenes[]`):** единая локация и состояние персонажа:
    - **`anchor_image`**: опорное изображение (`prompt`, либо `image_path` для img2img/inpaint/outpaint, либо готовый `keyframe_path`).
 3. **Блок (`scenes[].blocks[]`):** непрерывный отрезок видео (обычно 3–5 секунд):
@@ -34,8 +34,7 @@
     "model": "wan2.2_i2v_14B_fp8_scaled.safetensors",
     "width": 832,
     "height": 480,
-    "fps": 16,
-    "max_duration": 10.0
+    "fps": 16
   },
   "scenes": [
     {

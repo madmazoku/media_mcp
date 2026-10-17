@@ -140,7 +140,7 @@ bin/cli.cmd <tool_name> --help
 | :--- | :--- | :--- | :--- |
 | `image_generate` | Синтез изображений (txt2img, img2img, inpaint, outpaint). | `engine` (`sdxl`, `flux1`, `flux2`), `model`, `prompt`, `image_path`, `mask_path`, `fit` (`crop`, `outpaint`), `loras`. | Генерация в оптимальном ~1.0 MP (`native_width` x `native_height`) + Lanczos post-resize + `warnings`. |
 | `video_generate` | Рендеринг сценарных видеороликов. | `video` (`engine`: `wan-fast`, `wan-full`, `ltx`; `model`), `image`, `scenes`. | 5D латентное префиксное кондиционирование, 1-frame I2V, FFmpeg `-c copy`. |
-| `video_validate` | Сухая валидация сценария перед запуском. | Входные параметры аналогичны `video_generate`. | Проверяет схему, тайминги (`max_duration`) и пропорции кадров без запуска GPU. |
+| `video_validate` | Сухая валидация сценария перед запуском. | Входные параметры аналогичны `video_generate`. | Проверяет схему, тайминги (лимиты окон диффузии движков) и пропорции кадров без запуска GPU. |
 | `media_get_models` | Инспекция доступных чекпоинтов и бандлов. | `engine` (опционально), `type` (`image` или `video`, опционально). | Инвариантная структура `{"image": {...}, "video": {...}}` с группировкой бандлов Wan 2.2. |
 | `media_get_samplers`| Получение поддерживаемых сэмплеров. | `engine`, `model` (обязательны). | Возвращает список `samplers`, где индекс `[0]` — рекомендуемый по умолчанию. |
 | `media_get_loras` | Каталог совместимых LoRA с триггерами. | `engine`, `model` (обязательны), `pattern` (опционально). | Фильтрует LoRA по архитектуре `.safetensors` и regex-шаблону по имени и триггерам. |

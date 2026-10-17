@@ -113,6 +113,7 @@ class VideoRequest(GenerationRequest):
     fps: int = 16
     steps: Optional[int] = None
     cfg: Optional[float] = None
+    sampler: Optional[str] = None
     ramp_latents: int = 3
     min_cfg: float = 1.0
     weight_dtype: Optional[str] = None

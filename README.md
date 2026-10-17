@@ -237,8 +237,8 @@ media_mcp/
 Блок $i$ получает хвост предыдущего блока $\text{prefix\_duration} = \text{overlap}_{i-1}$ (для первого блока сцены $\text{prefix\_duration} = 0$), диффундирует суммарное окно $\text{prefix\_duration} + \text{clip\_duration}$, отсекает префикс через `ImageFromBatch` и отдаёт в финальную склейку ровно $\text{clip\_duration}$ чистого видео:
 1. **Хвост меньше самого клипа:**
    $$\text{overlap\_duration} < \text{clip\_duration}$$
-2. **Суммарное окно генерации меньше лимита модели (`max_duration`, по умолчанию 10.0 сек):**
-   $$\text{prefix\_duration} + \text{clip\_duration} < \text{max\_duration}$$
+2. **Суммарное окно генерации строго меньше лимита движка (6.0 сек для `wan-fast`/`wan-full` и 16.0 сек для `ltx`):**
+   $$\text{prefix\_duration} + \text{clip\_duration} < \text{engine\_max\_duration}$$
 3. **Итоговая длительность сцены:** равна чистой сумме $\sum \text{clip\_duration}$ всех блоков сцены.
 
 ---

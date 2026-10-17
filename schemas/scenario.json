@@ -197,12 +197,6 @@
           "minimum": -1,
           "description": "Global video random seed (-1 for randomized)"
         },
-        "max_duration": {
-          "type": "number",
-          "minimum": 1.0,
-          "maximum": 60.0,
-          "default": 10.0
-        },
         "weight_dtype": {
           "type": "string",
           "enum": ["default", "fp8_e4m3fn", "fp8_e5m2"],

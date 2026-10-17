@@ -40,10 +40,15 @@ These rules govern the development, testing, and operation of the `media_mcp` pi
 
 ## 3. Video Pipeline & Latent Chaining
 - Follow the hierarchy: `Root (.image, .video) -> Scene (anchor_image) -> Blocks (motion_prompt)`:
-  - Technical parameters (`engine`, `model`, `width`, `height`, `fps`, `steps`, `cfg`, `guidance`, `sampler`, `seed`, `max_duration`, `ramp_latents`, `min_cfg`, `weight_dtype`) belong strictly in root `.image` and `.video` sections.
+  - Technical parameters (`engine`, `model`, `width`, `height`, `fps`, `steps`, `cfg`, `guidance`, `sampler`, `seed`, `ramp_latents`, `min_cfg`, `weight_dtype`) belong strictly in root `.image` and `.video` sections.
   - `anchor_image` and `blocks[]` contain only narrative/framing parameters (`prompt`, `motion_prompt`, `negative_prompt`, `duration`, `overlap`, `loras`, `denoise`, `fit`, `image_path`, `keyframe_path`, `mask_path`).
-- Default to 1-frame I2V chaining (`overlap: 0.0s`) for clean production video without Causal VAE deconvolution artifacts.
+- Default to 1-frame I2V chaining (`overlap: 0.0s`) for clean production video without Causal VAE deconvolution artifacts. For LTX-2.3, 1-frame conditioning strictly uses `LTXVPreprocess(img_compression=33)` to eliminate high-frequency pixel sensor noise and `LTXVImgToVideoInplace(strength=0.9)` to avoid rigid initial frame freezing.
 - Use **True Forced Prefix Conditioning** (`WanLatentPrefixLock` + Stage1/Stage2 `LTXVAdainLatent` + `WanLatentPrefixRestore` for Wan 2.2; `LTXVAddLatentGuide` + `LTXVCropGuides` + `LTXVAdainLatent` for LTX) with Latent AdaIN color stabilization in 5D latent space between sequential blocks when `overlap > 0.0s`. Tail latents are always cut from `latent_for_decode` post-normalization.
+- **Engine Horizon & Immutable Window Limits**:
+  - Maximum block+prefix diffusion window is an **immutable per-engine constant** (not configurable in scenarios): **`6.0s`** for `wan-fast`/`wan-full` and **`16.0s`** for `ltx`.
+  - **Wan 2.2 (`wan-fast`, `wan-full`)**: Native training length is 81 frames ($5.06$s at 16 fps). Blocks must be kept $\le 5.0$s (window limit: 6.0s). Exceeding 5.5s causes temporal RoPE extrapolation and structural degradation on tail frames.
+  - **LTX-2.3 (`ltx`)**: $8\times$ temporal VAE compression allows long blocks (6.0–12.0s, window limit: 16.0s) with minimal temporal drift. Default CFG 1.0, 25 steps, `euler_ancestral`, with automatic Distilled LoRA strength scaling (0.7 for CFG $\le$ 1.5; 0.2 for full CFG > 1.5).
+- **Scenario Pacing & Block Limits**: Limit single continuous scenes to 2–3 blocks (6–10s). Avoid long continuous chains (>4 blocks) due to cumulative VAE spatial entropy and color variance; construct long movies (15–60+ seconds) via multi-scene montage (`scenes[]`) where each scene has its own crisp `anchor_image`, resetting latent entropy to zero.
 - Lossless Stream Copy (`-c copy`) for final multi-block FFmpeg assembly.
 - Before making changes to latent processing, padding, masking, or stride math in video pipelines, **ALWAYS** consult [`docs/MEDIA_MCP_KNOWLEDGE_BASE.md`](MEDIA_MCP_KNOWLEDGE_BASE.md) and [`docs/VIDEO_BLOCK_CHAINING_RESEARCH.md`](VIDEO_BLOCK_CHAINING_RESEARCH.md) to avoid repeating solved bugs.
 

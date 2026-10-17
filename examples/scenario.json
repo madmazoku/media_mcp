@@ -12,7 +12,6 @@
     "width": 832,
     "height": 480,
     "fps": 16,
-    "max_duration": 10.0,
     "negative_prompt": "blurry, low quality, jitter, static, deformed, extra limbs, bad anatomy, text, watermark"
   },
   "scenes": [

@@ -253,9 +253,9 @@ def execute_video_validate(args: Dict[str, Any]) -> Dict[str, Any]:
     v_cfg = scenario_dict.get("video", {})
     vid_w = int(v_cfg.get("width", 832))
     vid_h = int(v_cfg.get("height", 480))
-    max_dur = float(v_cfg.get("max_duration", config.MAX_VIDEO_DURATION))
+    v_engine = str(v_cfg.get("engine", "wan-fast")).lower()
 
-    timing_errors = video_pipeline.collect_scenario_timing_errors(scenes, max_duration=max_dur)
+    timing_errors = video_pipeline.collect_scenario_timing_errors(scenes, default_engine=v_engine)
     ar_errors = video_pipeline.collect_scenario_aspect_ratio_errors(scenes, video_width=vid_w, video_height=vid_h)
     errors.extend(timing_errors)
     errors.extend(ar_errors)

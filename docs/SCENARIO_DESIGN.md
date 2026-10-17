@@ -45,7 +45,7 @@ graph TD
 
 1. **Технические параметры (строго в корневых `.image` и `.video`):**
    - В `.image`: `engine` (обязателен), `model` (обязателен), `steps`, `cfg`, `guidance`, `sampler`, `seed`.
-   - В `.video`: `engine` (обязателен: `"wan-fast"`, `"wan-full"`, `"ltx"`), `model` (обязателен), `width`, `height`, `fps`, `max_duration`, `steps`, `cfg`, `sampler`, `seed`, `ramp_latents`, `min_cfg`, `weight_dtype`.
+   - В `.video`: `engine` (обязателен: `"wan-fast"`, `"wan-full"`, `"ltx"`), `model` (обязателен), `width`, `height`, `fps`, `steps`, `cfg`, `sampler`, `seed`, `ramp_latents`, `min_cfg`, `weight_dtype`. Лимиты окна диффузии зафиксированы аппаратно (6.0с для Wan, 16.0с для LTX).
    - Размеры опорных кадров (`anchor_image`) автоматически наследуют `width` и `height` из `.video` для гарантированного совпадения пропорций.
 2. **Нарративные параметры в `scenes[].anchor_image` и `scenes[].blocks[]`:**
    - В `anchor_image`: `prompt`, `negative_prompt`, `loras`, `image_path`, `keyframe_path`, `mask_path`, `fit`, `denoise`.

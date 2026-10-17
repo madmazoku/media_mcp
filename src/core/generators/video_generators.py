@@ -714,8 +714,8 @@ class LtxVideoGenerator(BaseVideoGenerator):
         height = snap_to_32(request.height or self.settings.get("height", 480))
         fps = request.fps or self.settings.get("fps", 24)
         seed = random.randint(1, 1_000_000_000) if request.seed in (-1, None) else int(request.seed)
-        steps = int(request.steps or self.settings.get("steps", 20))
-        default_cfg = 1.0 if steps <= 10 else 3.0
+        steps = int(request.steps or self.settings.get("steps", 25))
+        default_cfg = 1.0
         cfg = float(request.cfg if request.cfg is not None else self.settings.get("cfg", default_cfg))
         num_frames = request.num_frames
 
@@ -758,9 +758,9 @@ class LtxVideoGenerator(BaseVideoGenerator):
         if lora_setting is not None:
             lora_strength = float(lora_setting)
         else:
-            # Official LTX-2.3 workflow: full LTXVScheduler (steps > 10, CFG = 3.0) uses distilled-lora strength = 0.2;
-            # fast distilled mode (steps <= 10 or CFG <= 1.5) uses strength = 1.0.
-            lora_strength = 1.0 if (steps <= 10 or cfg <= 1.5) else 0.2
+            # Distilled mode (cfg <= 1.5): strength = 0.7 per official audio_to_video / Lightricks benchmark.
+            # Full CFG guidance mode (cfg > 1.5): strength = 0.2.
+            lora_strength = 0.7 if cfg <= 1.5 else 0.2
 
         wf: Dict[str, Any] = {
             "unet_loader": {
@@ -912,12 +912,19 @@ class LtxVideoGenerator(BaseVideoGenerator):
                 suffix="anchor"
             )
             wf["start_image"] = {"inputs": {"image": img_fn, "upload": "image"}, "class_type": "LoadImage"}
-            wf["inplace_cond"] = {
+            wf["preprocess_image"] = {
                 "inputs": {
                     "image": ["start_image", 0],
+                    "img_compression": 33
+                },
+                "class_type": "LTXVPreprocess"
+            }
+            wf["inplace_cond"] = {
+                "inputs": {
+                    "image": ["preprocess_image", 0],
                     "vae": ["vae_loader", 0],
                     "latent": ["empty_latent", 0],
-                    "strength": 1.0,
+                    "strength": 0.9,
                     "bypass": False
                 },
                 "class_type": "LTXVImgToVideoInplace"
@@ -926,6 +933,9 @@ class LtxVideoGenerator(BaseVideoGenerator):
             scheduler_latent_node = ["inplace_cond", 0]
         else:
             raise ValueError(f"No valid start input provided for LTX video generator: {request.image_path}")
+
+        default_sampler = "euler_ancestral" if cfg <= 1.5 else "euler"
+        actual_sampler = str(getattr(request, "sampler", None) or self.settings.get("sampler") or default_sampler).strip()
 
         wf.update({
             "guider": {
@@ -945,7 +955,7 @@ class LtxVideoGenerator(BaseVideoGenerator):
             },
             "sampler_select": {
                 "inputs": {
-                    "sampler_name": "euler"
+                    "sampler_name": actual_sampler
                 },
                 "class_type": "KSamplerSelect"
             },
