@@ -444,7 +444,8 @@ def execute_scenario_pipeline(
     v_model = effective_vid["model"]
     width = int(effective_vid.get("width", 832))
     height = int(effective_vid.get("height", 480))
-    fps = int(effective_vid.get("fps", 16))
+    default_fps = 24 if v_engine == "ltx" else 16
+    fps = int(effective_vid.get("fps", default_fps))
     max_duration = float(effective_vid.get("max_duration", config.MAX_VIDEO_DURATION))
 
     timing_errors = collect_scenario_timing_errors(scenes, max_duration=max_duration)

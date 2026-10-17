@@ -107,7 +107,7 @@ class TestVideoPipeline(unittest.TestCase):
             self.assertIn("user_lora_low_0", wf_full)
 
     def test_03_ltx_pure_5d_latent_prefix_lock_and_loras(self):
-        """Verify LtxVideoGenerator uses pure 5D WanLatentPrefixLock + WanLatentPrefixRestore without VAEDecode."""
+        """Verify LtxVideoGenerator uses pure 5D LTXVAddLatentGuide + LTXVCropGuides + LTXVAdainLatent and Wan uses Stage1/Stage2 AdaIN."""
         dummy_prefix = self.tmp_path / "dummy-prefix.latent"
         dummy_prefix.write_bytes(b"mocklatent")
 
@@ -116,9 +116,9 @@ class TestVideoPipeline(unittest.TestCase):
             model="ltx-video-2b-v0.9.5.safetensors",
             width=832,
             height=480,
-            fps=16,
+            fps=24,
             num_frames=65,
-            prefix_frames=16,
+            prefix_frames=17,
             prefix_latent_path=dummy_prefix.as_posix(),
             loras=[{"name": "ltx_cinematic", "strength": 0.75}],
             run_prefix="20261017-120000-abcdef-s001-b002"
@@ -130,13 +130,14 @@ class TestVideoPipeline(unittest.TestCase):
             captured_wfs.append(wf)
             return GenerationResult(success=True, file_path=dummy_prefix.as_posix())
 
-        with patch("core.comfy_client.upload_file_to_comfy", return_value="20261017-120000-abcdef-s001-b002-prefix.latent"):
+        with patch("core.comfy_client.upload_file_to_comfy", return_value="20261017-120000-abcdef-s001-b002-prefix.latent"), \
+             patch("core.discovery.resolve_wan_model_bundle", return_value=("high_model.safetensors", "low_model.safetensors")):
             ltx_gen = create_video_generator("ltx")
             with patch.object(ltx_gen, "_execute_comfy_workflow", side_effect=fake_exec):
                 ltx_gen.generate(req_prefix)
             wf = captured_wfs[-1]
 
-            # Must use LoadLatent + LTXVAddLatentGuide + LTXVCropGuides + WanLatentPrefixRestore
+            # Must use LoadLatent + LTXVAddLatentGuide + LTXVCropGuides + LTXVAdainLatent (without WanLatentPrefixRestore overwriting t=0)
             self.assertIn("load_prefix_latent", wf)
             self.assertEqual(wf["load_prefix_latent"]["class_type"], "LoadLatent")
             self.assertIn("ltx_latent_guide", wf)
@@ -144,18 +145,35 @@ class TestVideoPipeline(unittest.TestCase):
             self.assertEqual(wf["ltx_latent_guide"]["inputs"]["strength"], 1.0)
             self.assertIn("ltx_crop_guides", wf)
             self.assertEqual(wf["ltx_crop_guides"]["class_type"], "LTXVCropGuides")
-            self.assertIn("prefix_latent_restore", wf)
-            self.assertEqual(wf["prefix_latent_restore"]["class_type"], "WanLatentPrefixRestore")
+            self.assertIn("ltx_adain_latent", wf)
+            self.assertEqual(wf["ltx_adain_latent"]["class_type"], "LTXVAdainLatent")
+            self.assertNotIn("prefix_latent_restore", wf)
+
+            # Distilled LoRA must default to 0.2 when steps=20 and cfg=3.0
+            self.assertAlmostEqual(wf["lora_loader"]["inputs"]["strength_model"], 0.2)
 
             # Must NOT contain the old buggy prefix_latent_decode -> LTXVImgToVideoInplace path
             self.assertNotIn("prefix_latent_decode", wf)
             self.assertNotIn("inplace_cond", wf)
 
-            # Guider and Sampler must receive guided conditioning
+            # Guider and Sampler must receive guided conditioning, while LTXVScheduler receives empty_latent
             self.assertEqual(wf["guider"]["inputs"]["positive"], ["ltx_latent_guide", 0])
             self.assertEqual(wf["guider"]["inputs"]["negative"], ["ltx_latent_guide", 1])
+            self.assertEqual(wf["scheduler"]["inputs"]["latent"], ["empty_latent", 0])
             self.assertEqual(wf["sampler"]["inputs"]["latent_image"], ["ltx_latent_guide", 2])
-            self.assertEqual(wf["vae_decode"]["inputs"]["samples"], ["prefix_latent_restore", 0])
+            self.assertEqual(wf["vae_decode"]["inputs"]["samples"], ["ltx_adain_latent", 0])
+
+            # Also verify WanFast with prefix_latent_path wires Stage 1 and Stage 2 LTXVAdainLatent nodes
+            wan_gen = create_video_generator("wan-fast")
+            with patch.object(wan_gen, "_execute_comfy_workflow", side_effect=fake_exec):
+                wan_gen.generate(req_prefix)
+            wf_wan = captured_wfs[-1]
+            self.assertIn("stage1_adain_core", wf_wan)
+            self.assertEqual(wf_wan["stage1_adain_core"]["class_type"], "LTXVAdainLatent")
+            self.assertIn("stage2_adain_core", wf_wan)
+            self.assertEqual(wf_wan["stage2_adain_core"]["class_type"], "LTXVAdainLatent")
+            self.assertEqual(wf_wan["sampler_stage2"]["inputs"]["latent_image"], ["stage1_restored", 0])
+            self.assertEqual(wf_wan["prefix_latent_restore"]["inputs"]["samples"], ["stage2_concat", 0])
 
     def test_04_video_validate_respects_scenario_path_max_duration(self):
         """Verify execute_video_validate resolves scenario_path BEFORE reading .video.max_duration."""

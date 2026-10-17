@@ -172,6 +172,13 @@ class WanLatentPrefixLock:
             b = min(p_norm.shape[0], denoised.shape[0])
 
             out_denoised = denoised.clone()
+            if out_denoised.shape[2] > k and k > 0:
+                pref_mean = p_norm[:b, :, :k].mean(dim=(2, 3, 4), keepdim=True)
+                pref_std = p_norm[:b, :, :k].std(dim=(2, 3, 4), keepdim=True).clamp(min=1e-5)
+                core_mean = out_denoised[:b, :, k:].mean(dim=(2, 3, 4), keepdim=True)
+                core_std = out_denoised[:b, :, k:].std(dim=(2, 3, 4), keepdim=True).clamp(min=1e-5)
+                out_denoised[:b, :, k:] = (out_denoised[:b, :, k:] - core_mean) / core_std * pref_std + pref_mean
+
             out_denoised[:b, :, :k] = p_norm[:b, :, :k]
             return out_denoised
 

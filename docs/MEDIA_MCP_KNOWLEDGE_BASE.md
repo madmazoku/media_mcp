@@ -180,25 +180,24 @@ ffmpeg -y -f concat -safe 0 -i filelist.txt -c copy output.mp4
          return denoised
      ```
    - За счёт этого метод Эйлера на каждом шаге вычисляет шаг $d = (x - x_0) / \sigma$ строго по направлению к `prefix_norm`. Текстовый промпт нового блока не может сместить префикс, а DiT-внимание ядра получает идеальный неискаженный контекст.
-2. **`WanLatentPrefixRestore`** (Latent Splicer & AdaIN Color Lock Node):
-   - Принимает выход сэмплера `samples` (`LATENT`), `prefix_latent` (`LATENT`) и опциональный параметр `color_lock_strength` (по умолчанию `1.0`).
-   - Перед VAE Decode принудительно заменяет первые $k_{\text{lat}}$ латентов на исходный `tail.latent` из файла бит-в-бит:
-     ```python
-     s[:b, :, :k_lat] = prefix_latent["samples"][:, :, :k_lat]
-     ```
-   - **Latent AdaIN (защита от цветового дрейфа и раздувания контраста):**
-     Выравнивает поканальные средние $\mu_c$ и стандартные отклонения $\sigma_c$ сгенерированных кадров ядра ($t \ge k_{\text{lat}}$) по статистике `prefix_latent`:
-     $$\hat{s}_{:,:,k:} = \frac{s_{:,:,k:} - \mu_{\text{core}}}{\sigma_{\text{core}}} \cdot \sigma_{\text{pref}} + \mu_{\text{pref}}$$
-     Это гарантирует 100% стабильность цвета, контраста и яркости на протяжении авторегрессии любой длины без накопления дрейфа каналов LoRA.
+2. **Двухступенчатый Графовый Latent AdaIN (`LatentCut` + `LTXVAdainLatent` + `LatentConcat`) и `WanLatentPrefixRestore`**:
+   - В `wan-fast` 4-шаговая дистилляционная LoRA (`wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise`) на этапе `sampler_stage1` (шаги 0–2) сдвигает поканальные средние генерируемых кадров ядра ($t \ge k_{\text{lat}}$) по каналам 5, 6, 8, 9 ($\Delta\mu \approx \pm 1.17$) и раздувает дисперсию в $1.31\times$.
+   - Чтобы этот сдвиг не запекался во втором сэмплере (`sampler_stage2`, Low-Noise UNet) и работал даже без перезапуска ComfyUI, граф выполняет поканальный **Latent AdaIN дважды** через нативные ноды `LatentCut` + `LTXVAdainLatent` + `LatentConcat`:
+     1. **Между `sampler_stage1` и `sampler_stage2`** (на уровне шума $\sigma(\text{split\_step})$): ядро `stage1_cut_core` ($t \ge k_{\text{lat}}$) выравнивается по префиксу `stage1_cut_prefix` ($t < k_{\text{lat}}$).
+     2. **После `sampler_stage2` перед `VAEDecode`**: чистое ядро `stage2_cut_core` выравнивается по эталонному `load_prefix_latent`, склеивается с `load_prefix_latent` через `LatentConcat` и проходит через `WanLatentPrefixRestore`:
+        $$\hat{s}_{:,:,k:} = \frac{s_{:,:,k:} - \mu_{\text{core}}}{\sigma_{\text{core}}} \cdot \sigma_{\text{pref}} + \mu_{\text{pref}}$$
    - **Отбор хвостового латента (`cut_tail_latent`):**
-     Нода `LatentCut` берёт сэмплы строго **после** `WanLatentPrefixRestore`, гарантируя, что сохранённый `*-tail.latent` передаётся в следующий блок уже нормализованным.
+     Нода `LatentCut` берёт сэмплы строго **после** нормализации (`latent_for_decode`), гарантируя, что сохранённый `*-tail.latent` передаётся в следующий блок со 100% сохранением цветового профиля сцены.
 
-### В. Архитектура 5D-латентного префикса в LTX-Video: `LTXVAddLatentGuide` + `LTXVCropGuides`
-У модели LTX-2.3 22B (`class LTXV` в ComfyUI) нет отдельного потока `concat_latent_image`, а кондиционирование основано на per-token `timestep = 0` и `noise_mask = 0.0`.
-- В LTX префикс подключается через нативную пару ComfyUI-нод:
-  1. **`LTXVAddLatentGuide`**: принимает `guiding_latent`, нативно выставляет `noise_mask = 0.0` (благодаря чему `LTXV.process_timestep` передаёт `timestep = 0.0` для префикса, а `KSamplerX0Inpaint` оставляет его незашумлённым) и прописывает 3D RoPE-координаты `keyframe_idxs`.
-  2. **`LTXVCropGuides`**: срезает служебные guide-токены после `SamplerCustomAdvanced` перед передачей в `WanLatentPrefixRestore` (Latent AdaIN) и `VAEDecode`.
-- Это исключает генерацию LTX с нуля и обеспечивает непрерывность сцены.
+### В. Архитектура 5D-латентного префикса в LTX-2.3: `LTXVAddLatentGuide` + `LTXVCropGuides` + `LTXVAdainLatent` (и каузальная асимметрия $t=0$)
+1. **Каузальная асимметрия слота $t=0$ в LTX-2.3 (`CausalVideoAutoencoder` и `LTXVModel`):**
+   - В LTX-2.3 **первый латентный кадр ($t=0$) кодирует ровно 1 пиксельный кадр ($[0, 1)$)** (в энкодере `SpaceToDepthDownsample` действует `pad_first=True`, дублирующий кадр 0 восемь раз; в декодере `DepthToSpaceUpsample` действует `drop_first_conv=True`, отбрасывающий 7 из 8 подкадров; а в DiT `LTXVModel` к токенам с `temporal_start == 0` прибавляется `keyframes_abs_pos_embedding`).
+   - Все последующие латентные кадры ($t \ge 1$) кодируют **по 8 движущихся пиксельных кадров** ($[1, 9), [9, 17), \dots$).
+   - Поэтому **ЗАПРЕЩЕНО** перезаписывать слот $t=0$ выхода `LTXVCropGuides` сырым хвостовым латентом предыдущего блока через `WanLatentPrefixRestore`: хвостовой латент $t=4$ Блока 1 является 8-кадровым латентом движения, и его принудительная подстановка в 1-кадровый слот $t=0$ ломает каузальный буфер `CausalVideoAutoencoder.Decoder` и создаёт скачок на стыке.
+   - **Правильная цепочка для LTX (`overlap > 0`):** `LoadLatent` $\to$ `LTXVAddLatentGuide(latent_idx=0, strength=1.0)` $\to$ `SamplerCustomAdvanced` (при этом `LTXVScheduler` принимает чистый `empty_latent` для расчёта числа токенов) $\to$ `LTXVCropGuides` $\to$ `LTXVAdainLatent(reference=load_prefix_latent, factor=1.0)` $\to$ `VAEDecode`.
+2. **Согласование `distilled-lora` и `CFGGuider` в LTX-2.3:**
+   - В официальном пайплайне Lightricks LTX-2.3 (`LTX-2.3_T2V_I2V_Single_Stage_Distilled_Full.json`) при полном сэмплинге (`steps = 15..20`, `CFG = 3.0`) дистиллированная LoRA (`ltx-2.3-22b-distilled-lora-1.1`) подключается со **слабой силой `strength_model = 0.2`**, тогда как `strength_model = 1.0` предназначена только для быстрого 8-шагового режима с `CFG = 1.0`. Использование `strength_model = 1.0` одновременно с `CFG = 3.0` на 20 шагах приводит к тройному переусилению градиентов скорости (эффект «странной/пережаренной» генерации).
+   - Нативная частота кадров LTX-2.3 составляет **24 fps** (`default_fps = 24`).
 
 ---
 

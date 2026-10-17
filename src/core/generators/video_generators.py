@@ -18,6 +18,7 @@ from typing import Any, Dict, Optional, List
 from .. import config
 from .. import comfy_client
 from .. import discovery
+from .. import lora_inspector
 from .base import BaseGenerator, VideoRequest, GenerationResult, snap_to_16, snap_to_32
 
 
@@ -346,6 +347,7 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
 
         model_high = ["sampling_high", 0]
         model_low = ["sampling_low", 0]
+        stage2_latent_input = ["sampler_stage1", 0]
         latent_for_decode = ["sampler_stage2", 0]
 
         if request.prefix_latent_path and Path(request.prefix_latent_path).is_file():
@@ -354,7 +356,18 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
             min_c = getattr(request, "min_cfg", 1.0)
             min_c = 1.0 if min_c is None else float(min_c)
 
-            log(f"Enabling WanLatentPrefixLock (Option B): ramp_latents={ramp_l}, min_cfg={min_c} + WanLatentPrefixRestore")
+            t_latents = ((num_frames - 1) // 4) + 1
+            k_lat = lora_inspector.read_latent_temporal_frames(request.prefix_latent_path, default=0)
+            if k_lat <= 0:
+                pref_px = max(1, int(request.prefix_frames or 17))
+                k_lat = max(1, ((pref_px - 1) // 4) + 1)
+            k_lat = min(k_lat, t_latents)
+            core_lat = t_latents - k_lat
+
+            log(
+                f"Enabling WanLatentPrefixLock (Option B): ramp_latents={ramp_l}, min_cfg={min_c}, "
+                f"k_lat={k_lat}, core_lat={core_lat} + Stage1/Stage2 Latent AdaIN + WanLatentPrefixRestore"
+            )
             wf["prefix_lock_stage1"] = {
                 "inputs": {
                     "model": model_high,
@@ -376,9 +389,78 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
             model_high = ["prefix_lock_stage1", 0]
             model_low = ["prefix_lock_stage2", 0]
 
+            if core_lat > 0:
+                # 1. Mid-diffusion (Stage 1 -> Stage 2) per-channel AdaIN at noise level sigma(split_step)
+                # Eliminates channel mean shift (-1.17/+1.01) injected by High-Noise Lightx2v LoRA before Low-Noise UNet runs
+                wf["stage1_cut_prefix"] = {
+                    "inputs": {
+                        "samples": ["sampler_stage1", 0],
+                        "dim": "t",
+                        "index": 0,
+                        "amount": int(k_lat)
+                    },
+                    "class_type": "LatentCut"
+                }
+                wf["stage1_cut_core"] = {
+                    "inputs": {
+                        "samples": ["sampler_stage1", 0],
+                        "dim": "t",
+                        "index": int(k_lat),
+                        "amount": int(core_lat)
+                    },
+                    "class_type": "LatentCut"
+                }
+                wf["stage1_adain_core"] = {
+                    "inputs": {
+                        "latents": ["stage1_cut_core", 0],
+                        "reference": ["stage1_cut_prefix", 0],
+                        "factor": 1.0
+                    },
+                    "class_type": "LTXVAdainLatent"
+                }
+                wf["stage1_restored"] = {
+                    "inputs": {
+                        "samples1": ["stage1_cut_prefix", 0],
+                        "samples2": ["stage1_adain_core", 0],
+                        "dim": "t"
+                    },
+                    "class_type": "LatentConcat"
+                }
+                stage2_latent_input = ["stage1_restored", 0]
+
+                # 2. Post-diffusion (Stage 2 -> VAEDecode) per-channel AdaIN against pristine prefix_latent
+                wf["stage2_cut_core"] = {
+                    "inputs": {
+                        "samples": ["sampler_stage2", 0],
+                        "dim": "t",
+                        "index": int(k_lat),
+                        "amount": int(core_lat)
+                    },
+                    "class_type": "LatentCut"
+                }
+                wf["stage2_adain_core"] = {
+                    "inputs": {
+                        "latents": ["stage2_cut_core", 0],
+                        "reference": ["load_prefix_latent", 0],
+                        "factor": 1.0
+                    },
+                    "class_type": "LTXVAdainLatent"
+                }
+                wf["stage2_concat"] = {
+                    "inputs": {
+                        "samples1": ["load_prefix_latent", 0],
+                        "samples2": ["stage2_adain_core", 0],
+                        "dim": "t"
+                    },
+                    "class_type": "LatentConcat"
+                }
+                restore_samples_input = ["stage2_concat", 0]
+            else:
+                restore_samples_input = ["sampler_stage2", 0]
+
             wf["prefix_latent_restore"] = {
                 "inputs": {
-                    "samples": ["sampler_stage2", 0],
+                    "samples": restore_samples_input,
                     "prefix_latent": ["load_prefix_latent", 0],
                 },
                 "class_type": "WanLatentPrefixRestore"
@@ -409,7 +491,7 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
                     "model": model_low,
                     "positive": cond_positive,
                     "negative": cond_negative,
-                    "latent_image": ["sampler_stage1", 0],
+                    "latent_image": stage2_latent_input,
                     "add_noise": "disable",
                     "noise_seed": seed,
                     "steps": actual_steps,
@@ -618,9 +700,10 @@ class WanFullVideoGenerator(BaseWanVideoGenerator):
 class LtxVideoGenerator(BaseVideoGenerator):
     """
     LTX-2.3 22B Video Generator via ComfyUI.
-    Uses 20 steps, CFG 3.0, Distilled LoRA 1.1, and LTXVConditioning.
-    Supports pure 5D tail latent prefix conditioning via WanLatentPrefixLock + WanLatentPrefixRestore
-    without intermediate VAEDecode/VAEEncode degradation.
+    Uses 20 steps, CFG 3.0, Distilled LoRA 1.1 (strength 0.2 for full 20-step CFG=3.0 mode, 1.0 for <=10-step CFG=1.0 mode),
+    and LTXVConditioning.
+    Supports pure 5D tail latent prefix conditioning via LTXVAddLatentGuide + LTXVCropGuides + LTXVAdainLatent
+    without intermediate VAEDecode/VAEEncode degradation or t=0 causal slot corruption.
     """
 
     temporal_stride = 8
@@ -631,8 +714,9 @@ class LtxVideoGenerator(BaseVideoGenerator):
         height = snap_to_32(request.height or self.settings.get("height", 480))
         fps = request.fps or self.settings.get("fps", 24)
         seed = random.randint(1, 1_000_000_000) if request.seed in (-1, None) else int(request.seed)
-        cfg = float(request.cfg if request.cfg is not None else self.settings.get("cfg", 3.0))
         steps = int(request.steps or self.settings.get("steps", 20))
+        default_cfg = 1.0 if steps <= 10 else 3.0
+        cfg = float(request.cfg if request.cfg is not None else self.settings.get("cfg", default_cfg))
         num_frames = request.num_frames
 
         if request.out_video_name:
@@ -671,7 +755,12 @@ class LtxVideoGenerator(BaseVideoGenerator):
 
         weight_dtype = str(request.weight_dtype or self.settings.get("weight_dtype") or "default").strip()
         lora_setting = self.settings.get("lora_strength")
-        lora_strength = float(lora_setting) if lora_setting is not None else 1.0
+        if lora_setting is not None:
+            lora_strength = float(lora_setting)
+        else:
+            # Official LTX-2.3 workflow: full LTXVScheduler (steps > 10, CFG = 3.0) uses distilled-lora strength = 0.2;
+            # fast distilled mode (steps <= 10 or CFG <= 1.5) uses strength = 1.0.
+            lora_strength = 1.0 if (steps <= 10 or cfg <= 1.5) else 0.2
 
         wf: Dict[str, Any] = {
             "unet_loader": {
@@ -763,9 +852,10 @@ class LtxVideoGenerator(BaseVideoGenerator):
                 }
                 guider_model = [u_key, 0]
 
-        # Conditioning Setup: Pure 5D Latent Prefix via LTXVAddLatentGuide/LTXVCropGuides vs 1-Frame Image-to-Video
+        # Conditioning Setup: Pure 5D Latent Prefix via LTXVAddLatentGuide/LTXVCropGuides/LTXVAdainLatent vs 1-Frame Image-to-Video
         active_positive = ["ltxv_cond", 0]
         active_negative = ["ltxv_cond", 1]
+        scheduler_latent_node = ["empty_latent", 0]
         latent_for_decode = ["sampler", 0]
 
         if request.prefix_latent_path and Path(request.prefix_latent_path).is_file():
@@ -777,7 +867,7 @@ class LtxVideoGenerator(BaseVideoGenerator):
                 suffix="prefix"
             )
 
-            log(f"Configuring NATIVE 5D LATENT PREFIX for LTX via LTXVAddLatentGuide + LTXVCropGuides: {prefix_fn}")
+            log(f"Configuring NATIVE 5D LATENT PREFIX for LTX via LTXVAddLatentGuide + LTXVCropGuides + LTXVAdainLatent: {prefix_fn}")
             wf["load_prefix_latent"] = {
                 "inputs": {"latent": prefix_fn},
                 "class_type": "LoadLatent"
@@ -806,14 +896,15 @@ class LtxVideoGenerator(BaseVideoGenerator):
                 },
                 "class_type": "LTXVCropGuides"
             }
-            wf["prefix_latent_restore"] = {
+            wf["ltx_adain_latent"] = {
                 "inputs": {
-                    "samples": ["ltx_crop_guides", 2],
-                    "prefix_latent": ["load_prefix_latent", 0]
+                    "latents": ["ltx_crop_guides", 2],
+                    "reference": ["load_prefix_latent", 0],
+                    "factor": 1.0
                 },
-                "class_type": "WanLatentPrefixRestore"
+                "class_type": "LTXVAdainLatent"
             }
-            latent_for_decode = ["prefix_latent_restore", 0]
+            latent_for_decode = ["ltx_adain_latent", 0]
         elif request.image_path and Path(str(request.image_path)).is_file():
             img_fn = comfy_client.upload_file_to_comfy(
                 str(request.image_path),
@@ -832,6 +923,7 @@ class LtxVideoGenerator(BaseVideoGenerator):
                 "class_type": "LTXVImgToVideoInplace"
             }
             active_latent_node = ["inplace_cond", 0]
+            scheduler_latent_node = ["inplace_cond", 0]
         else:
             raise ValueError(f"No valid start input provided for LTX video generator: {request.image_path}")
 
@@ -864,7 +956,7 @@ class LtxVideoGenerator(BaseVideoGenerator):
                     "base_shift": 0.95,
                     "stretch": True,
                     "terminal": 0.1,
-                    "latent": active_latent_node
+                    "latent": scheduler_latent_node
                 },
                 "class_type": "LTXVScheduler"
             },
