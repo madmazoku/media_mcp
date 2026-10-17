@@ -1,5 +1,6 @@
 {
   "engine": "flux1",
+  "model": "persephoneFlux1Dev_v10FP8.safetensors",
   "prompt": "young Hermione Granger wearing an elegant emerald green knitted sweater, smiling warmly",
   "image_path": "media_mcp/images/example_anchor.png",
   "mask_path": "media_mcp/images/example_sweater_mask.png",

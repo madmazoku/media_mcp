@@ -7,7 +7,7 @@
   "additionalProperties": false,
   "anyOf": [
     { "required": ["scenario_path"] },
-    { "required": ["scenes"] }
+    { "required": ["video", "scenes"] }
   ],
   "properties": {
     "scenario_path": {

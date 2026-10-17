@@ -5,14 +5,12 @@ Automatic1111 WebUI HTTP client for SD 1.5, SDXL, and Pony models.
 """
 
 import sys
-import json
 from typing import Dict, Any, Optional, List
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from . import config
-from .config import SD_WEBUI_URL
 
 
 def log(msg: str):
@@ -39,7 +37,7 @@ def get_session() -> requests.Session:
 
 
 def _format_url(endpoint: str) -> str:
-    base = (config.SD_WEBUI_URL or SD_WEBUI_URL or "").strip()
+    base = (config.SD_WEBUI_URL or "").strip()
     if not base:
         raise ValueError("Automatic1111 WebUI URL is not configured. Please set 'sd_webui_url' in config.json.")
     if not base.startswith(("http://", "https://")):

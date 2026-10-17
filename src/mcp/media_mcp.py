@@ -2,41 +2,28 @@
 # -*- coding: utf-8 -*-
 """
 Unified Media MCP Server for media_mcp.
-Single production-grade server combining Image and Video generation into a canonical 8-tool suite.
+Single production-grade server combining Image and Video generation into a canonical 9-tool suite.
 Supports Stdio (Antigravity / Claude / Cursor) and SSE HTTP (Open-WebUI).
 """
 
 from __future__ import annotations
-import os
 import sys
 import json
 import uuid
 import queue
 import threading
-import shutil
-import base64
 import urllib.parse
-import contextlib
-import importlib
-import datetime
+import contextvars
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 # Ensure package import from src/
 SRC_DIR = Path(__file__).resolve().parent.parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from core import (
-    config,
-    comfy_client,
-    a1111_client,
-    discovery,
-    image_engine,
-    video_pipeline,
-    schema_validator,
-)
+from core import config
 from core.tools import (
     execute_tool,
     CANONICAL_TOOLS,
@@ -50,25 +37,6 @@ def log(msg: str):
     sys.stderr.flush()
 
 
-def reload_core_modules() -> List[str]:
-    """
-    Dynamically reloads all loaded modules in sys.modules under 'core' in reverse dependency order,
-    ensuring code updates take effect immediately without restarting the server.
-    """
-    core_mods = [k for k in list(sys.modules.keys()) if k == "core" or k.startswith("core.")]
-    core_mods.sort(key=lambda s: s.count("."), reverse=True)
-    reloaded = []
-    for mod_name in core_mods:
-        m = sys.modules.get(mod_name)
-        if m and hasattr(m, "__file__") and m.__file__:
-            try:
-                importlib.reload(m)
-                reloaded.append(mod_name)
-            except Exception as e:
-                log(f"Warning: Failed to reload {mod_name}: {e}")
-    return reloaded
-
-
 if hasattr(sys.stdin, "reconfigure"):
     try:
         sys.stdin.reconfigure(encoding="utf-8", errors="replace")
@@ -80,7 +48,10 @@ if hasattr(sys.stdin, "reconfigure"):
 _REAL_STDOUT = sys.stdout
 _STDOUT_LOCK = threading.Lock()
 _SSE_CLIENTS: Dict[str, queue.Queue] = {}
-_CURRENT_PROGRESS_TOKEN = None
+_IS_SSE_MODE: bool = False
+_CURRENT_PROGRESS_TOKEN: contextvars.ContextVar[Optional[Any]] = contextvars.ContextVar(
+    "_CURRENT_PROGRESS_TOKEN", default=None
+)
 
 
 def send_response(resp: dict):
@@ -100,37 +71,34 @@ def broadcast_mcp_progress(message: str, progress: Optional[float] = None, total
             "data": message
         }
     }
-    send_response(log_notif)
+    if not _IS_SSE_MODE:
+        send_response(log_notif)
 
-    if _CURRENT_PROGRESS_TOKEN is not None:
+    progress_notif = None
+    token = _CURRENT_PROGRESS_TOKEN.get()
+    if token is not None:
         p_params: Dict[str, Any] = {
-            "progressToken": _CURRENT_PROGRESS_TOKEN,
+            "progressToken": token,
             "progress": float(progress) if progress is not None else 0.0,
             "message": message
         }
         if total is not None:
             p_params["total"] = float(total)
-        send_response({
+        progress_notif = {
             "jsonrpc": "2.0",
             "method": "notifications/progress",
             "params": p_params
-        })
+        }
+        if not _IS_SSE_MODE:
+            send_response(progress_notif)
 
-    for s_id, q in list(_SSE_CLIENTS.items()):
+    for _s_id, q in list(_SSE_CLIENTS.items()):
         try:
             q.put_nowait(log_notif)
+            if progress_notif is not None:
+                q.put_nowait(progress_notif)
         except Exception:
             pass
-
-
-@contextlib.contextmanager
-def redirect_stdout_to_stderr():
-    old_stdout = sys.stdout
-    sys.stdout = sys.stderr
-    try:
-        yield
-    finally:
-        sys.stdout = old_stdout
 
 
 # ---------------------------------------------------------------------------
@@ -175,29 +143,28 @@ def handle_jsonrpc(req: dict) -> Optional[dict]:
     elif method == "tools/call":
         tool_name = params.get("name")
         tool_args = params.get("arguments") or {}
-        global _CURRENT_PROGRESS_TOKEN
-        _CURRENT_PROGRESS_TOKEN = params.get("_meta", {}).get("progressToken")
+        progress_token = params.get("_meta", {}).get("progressToken")
+        ctx_token = _CURRENT_PROGRESS_TOKEN.set(progress_token)
 
         try:
-            with redirect_stdout_to_stderr():
-                res = execute_tool(tool_name, tool_args, progress_callback=broadcast_mcp_progress)
-            if res.get("isError"):
-                return {
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "result": res,
-                    "isError": True
-                }
-            return {"jsonrpc": "2.0", "id": msg_id, "result": res}
+            res = execute_tool(tool_name, tool_args, progress_callback=broadcast_mcp_progress)
+            return {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": res
+            }
         except Exception as ex:
             log(f"Tool execution exception: {ex}")
             return {
                 "jsonrpc": "2.0",
                 "id": msg_id,
-                "result": {"content": [{"type": "text", "text": f"Execution error: {str(ex)}"}], "isError": True}
+                "result": {
+                    "content": [{"type": "text", "text": f"Execution error: {str(ex)}"}],
+                    "isError": True
+                }
             }
         finally:
-            _CURRENT_PROGRESS_TOKEN = None
+            _CURRENT_PROGRESS_TOKEN.reset(ctx_token)
     else:
         if msg_id is not None:
             return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": f"Method '{method}' not implemented"}}
@@ -364,10 +331,12 @@ class MediaSseHandler(BaseHTTPRequestHandler):
 
 
 def run_sse_server(host: str = "0.0.0.0", port: int = 7865):
+    global _IS_SSE_MODE
+    _IS_SSE_MODE = True
+    sys.stdout = sys.stderr
     server = ThreadingHTTPServer((host, port), MediaSseHandler)
     log(f"Media MCP Unified SSE Server listening on http://{host}:{port}/sse")
-    print(f"[*] Media MCP SSE Server running on http://{host}:{port}/sse")
-    print(f"[*] For Open-WebUI URL: http://host.docker.internal:{port}/sse")
+    log(f"For Open-WebUI URL: http://host.docker.internal:{port}/sse")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -381,6 +350,9 @@ def _async_tool_worker(req: dict):
 
 
 def run_stdio_server():
+    global _IS_SSE_MODE
+    _IS_SSE_MODE = False
+    sys.stdout = sys.stderr
     log("Starting Unified Media MCP Server over stdio...")
     while True:
         try:

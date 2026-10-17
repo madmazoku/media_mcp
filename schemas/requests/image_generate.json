@@ -5,7 +5,7 @@
   "description": "Generate high-quality images via SDXL/Pony (Automatic1111) or FLUX.1/FLUX.2 (ComfyUI).",
   "type": "object",
   "additionalProperties": false,
-  "required": ["prompt"],
+  "required": ["engine", "model", "prompt"],
   "properties": {
     "prompt": {
       "type": "string",
@@ -145,19 +145,6 @@
             { "required": ["negative_prompt"] },
             { "required": ["cfg"] }
           ]
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "engine": { "const": "flux2" }
-        },
-        "required": ["engine"]
-      },
-      "then": {
-        "not": {
-          "required": ["loras"]
         }
       }
     }

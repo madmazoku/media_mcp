@@ -63,9 +63,10 @@ def main() -> int:
         print(schema_formatter.format_tool_help(tool_name))
         return 0
 
+    launcher = schema_formatter.get_launcher_cmd()
     if tool_name not in CANONICAL_TOOLS:
         sys.stderr.write(f"Error: Unknown tool '{tool_name}'. Available tools: {CANONICAL_TOOLS}\n")
-        sys.stderr.write("Run 'cmd\\cli.cmd --help' to view documentation.\n")
+        sys.stderr.write(f"Run '{launcher} --help' to view documentation.\n")
         return 1
 
     # 3. Explicit configuration check (Fail-Fast: required for all tool executions)
@@ -73,7 +74,7 @@ def main() -> int:
         sys.stderr.write(
             f"Error: Tool '{tool_name}' requires a configuration file.\n"
             f"Specify --config <path_to_config.json> or set the MEDIA_CONFIG environment variable.\n"
-            f"Run 'cmd\\cli.cmd {tool_name} --help' to view parameter requirements.\n"
+            f"Run '{launcher} {tool_name} --help' to view parameter requirements.\n"
         )
         return 1
 

@@ -4,17 +4,12 @@
   "title": "Media Reload Modules Response Schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["reloaded", "count"],
+  "required": ["reloaded_modules", "count"],
   "properties": {
-    "reloaded": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "List of core module names reloaded in reverse dependency order"
-    },
     "reloaded_modules": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "Alias for reloaded list of modules"
+      "description": "List of core module names reloaded in topological dependency order"
     },
     "count": {
       "type": "integer",

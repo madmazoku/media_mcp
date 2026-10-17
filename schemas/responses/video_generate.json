@@ -19,7 +19,7 @@
   "properties": {
     "run_prefix": {
       "type": "string",
-      "description": "Unique run prefix ({timestamp}-{hash})"
+      "description": "Unique run prefix (YYYYMMDD-HHMMSS-{hash})"
     },
     "video_path": {
       "type": "string",
@@ -28,10 +28,6 @@
     "poster_path": {
       "type": "string",
       "description": "Absolute path to the video poster / first keyframe image file (.png)"
-    },
-    "hud_video_path": {
-      "type": ["string", "null"],
-      "description": "Optional path to HUD diagnostic video with burned-in overlays"
     },
     "spec_path": {
       "type": "string",
@@ -60,6 +56,13 @@
     "blocks_count": {
       "type": "integer",
       "description": "Total number of continuous motion blocks rendered"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Optional non-fatal warnings collected during anchor image or video generation"
     }
   }
 }

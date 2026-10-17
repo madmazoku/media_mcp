@@ -10,20 +10,26 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 
-def snap_to_16(dim: int, default: int = 1024) -> int:
+def snap_to_step(dim: int, step: int = 16, default: int = 1024) -> int:
     try:
         val = int(dim)
-        return max(64, (val // 16) * 16)
+        s = max(1, int(step))
+        return max(64, (val // s) * s)
     except Exception:
         return default
+
+
+def snap_to_16(dim: int, default: int = 1024) -> int:
+    return snap_to_step(dim, step=16, default=default)
 
 
 def snap_to_32(dim: int, default: int = 832) -> int:
-    try:
-        val = int(dim)
-        return max(64, (val // 32) * 32)
-    except Exception:
-        return default
+    return snap_to_step(dim, step=32, default=default)
+
+
+def snap_to_64(dim: int, default: int = 1024) -> int:
+    return snap_to_step(dim, step=64, default=default)
+
 
 
 @dataclass
@@ -44,10 +50,12 @@ class ImageRequest(GenerationRequest):
     loras: Optional[List[Dict[str, Any]]] = None
     model: Optional[str] = None
     custom_filename: Optional[str] = None
+    run_prefix: Optional[str] = None
     image_path: Optional[str] = None
     mask_path: Optional[str] = None
     fit: Optional[str] = None
     denoise: float = 0.65
+    progress_callback: Optional[Any] = None
 
     def __post_init__(self):
         if not self.image_path:
@@ -107,9 +115,11 @@ class VideoRequest(GenerationRequest):
     cfg: Optional[float] = None
     ramp_latents: int = 3
     min_cfg: float = 1.0
+    weight_dtype: Optional[str] = None
     model: Optional[str] = None
     loras: Optional[List[Dict[str, Any]]] = None
     out_video_name: Optional[str] = None
+    run_prefix: Optional[str] = None
     progress_callback: Optional[Any] = None
 
 
@@ -119,7 +129,6 @@ class GenerationResult:
     image_path: Optional[str] = None
     video_path: Optional[str] = None
     file_path: Optional[str] = None
-    base64_data: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     tail_latent_path: Optional[str] = None
     tail_image_path: Optional[str] = None

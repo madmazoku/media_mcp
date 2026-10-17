@@ -7,18 +7,13 @@
   "additionalProperties": false,
   "anyOf": [
     { "required": ["scenario_path"] },
-    { "required": ["scenes"] }
+    { "required": ["video", "scenes"] }
   ],
   "properties": {
     "scenario_path": {
       "type": "string",
       "minLength": 1,
       "description": "Path to a base scenario file on disk to execute or overlay onto"
-    },
-    "enable_hud": {
-      "type": "boolean",
-      "default": false,
-      "description": "Generate dynamic diagnostic countdown HUD overlay"
     },
     "name": {
       "type": "string",

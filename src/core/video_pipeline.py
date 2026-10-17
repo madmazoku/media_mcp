@@ -4,31 +4,29 @@
 Hierarchical Scene-based Video Pipeline with True Forced Prefix Continuity.
 Routes block rendering through the polymorphic Generator Strategy & Factory pattern.
 Supports Wan 2.2 Fast Mode (4-step LoRA), Wan 2.2 Full (20-step UNet), and LTX-2.3 22B.
-Seamless FFmpeg stream copy assembly + dynamic countdown HUD.
+Seamless FFmpeg stream copy assembly with zero-torch safetensors header inspection.
 """
 
-import os
 import sys
 import json
 import time
 import math
 import shutil
-import base64
+import random
 import datetime
 import uuid
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from . import config
-from .config import MAX_VIDEO_DURATION, get_temp_dir
 from .schema_validator import validate_scenario
 from . import ffmpeg_engine
 from . import comfy_client
 from . import image_engine as img_engine_mod
+from .lora_inspector import read_latent_temporal_frames
 from .generators import (
     create_video_generator,
     VideoRequest,
-    LtxVideoGenerator,
 )
 
 
@@ -108,7 +106,7 @@ def deep_merge(base: Any, overlay: Any) -> Any:
 
 
 def combine_prompts(base: Optional[str], local: Optional[str]) -> str:
-    """Combines local prompt with base prompt (local first, base last, separated by newline)."""
+    """Combines local prompt with base prompt (local first for block/scene specificity, base last, separated by newline)."""
     b = str(base).strip() if base else ""
     l = str(local).strip() if local else ""
     if b and l:
@@ -135,6 +133,22 @@ def combine_negative_prompts(base: Optional[str], local: Optional[str]) -> str:
     return b or l
 
 
+def _merge_loras(global_loras: Optional[List[Dict[str, Any]]], local_loras: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Merges global and local LoRA lists, with local strength overriding global on matching name."""
+    merged: Dict[str, float] = {}
+    for l in (global_loras or []):
+        if isinstance(l, dict) and l.get("name"):
+            merged[str(l["name"]).strip()] = float(l.get("strength", 0.8))
+    for l in (local_loras or []):
+        if isinstance(l, dict) and l.get("name"):
+            merged[str(l["name"]).strip()] = float(l.get("strength", 0.8))
+    return [{"name": k, "strength": v} for k, v in merged.items()]
+
+
+merge_lora_lists = _merge_loras
+
+
+
 # ---------------------------------------------------------------------------
 # Hierarchical Scene Normalizer & Timing Validator
 # ---------------------------------------------------------------------------
@@ -145,21 +159,20 @@ def resolve_scenario_dict(raw_data: Any, request_overrides: Optional[Dict[str, A
     and returns a pure scenario dictionary matching schemas/scenario.json.
     Consumes 'scenario_path' immediately to prevent reference leaks and recursion.
     """
-    import json
-    scenario_dict = {}
+    scenario_dict: Dict[str, Any] = {}
     base_file_path = None
 
     if isinstance(raw_data, str):
         base_file_path = raw_data
     elif isinstance(raw_data, dict):
-        scenario_dict = dict(raw_data)
+        scenario_dict = json.loads(json.dumps(raw_data))
         base_file_path = scenario_dict.pop("scenario_path", None)
 
     if base_file_path:
         p = Path(base_file_path)
         if not p.is_file():
             found = False
-            for parent_cand in [Path(config.WORKFLOWS_DIR), Path(config.REPO_DIR)]:
+            for parent_cand in [Path.cwd(), Path(config.WORKFLOWS_DIR), Path(config.REPO_DIR)]:
                 cand = parent_cand / base_file_path
                 if cand.is_file():
                     p = cand
@@ -180,7 +193,6 @@ def resolve_scenario_dict(raw_data: Any, request_overrides: Optional[Dict[str, A
     if not isinstance(scenario_dict, dict) or "scenes" not in scenario_dict:
         raise ValueError("Scenario must be a JSON object matching schemas/scenario.json containing 'scenes' list")
 
-    # Validate merged scenario against centralized JSON Schema
     validate_scenario(scenario_dict)
     return scenario_dict
 
@@ -188,50 +200,47 @@ def resolve_scenario_dict(raw_data: Any, request_overrides: Optional[Dict[str, A
 def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """
     Validates scenario against schemas/scenario.json and normalizes it into a list of Scene objects.
-    Supports base loading via 'scenario_path', top-level 'image' and 'video' sections,
-    prompt inheritance, and deep merge.
+    Preserves strict separation: technical parameters come from root .image and .video,
+    while local anchor_image and block settings override narrative/framing fields without
+    corrupting the schema-valid scenario dict.
     """
     scenario_dict = resolve_scenario_dict(raw_data, request_overrides)
 
     image_cfg = scenario_dict.get("image", {})
     video_cfg = scenario_dict.get("video", {})
 
-    root_video_engine = video_cfg.get("engine", "wan-fast")
-    root_video_model = video_cfg.get("model") or video_cfg.get("checkpoint")
+    root_video_engine = video_cfg["engine"]
+    root_video_model = video_cfg["model"]
     root_video_negative = video_cfg.get("negative_prompt", "")
     root_video_prompt = video_cfg.get("prompt", "")
+    root_video_loras = video_cfg.get("loras", [])
 
     root_image_engine = image_cfg.get("engine", "sdxl")
+    root_image_model = image_cfg.get("model", "")
     root_image_negative = image_cfg.get("negative_prompt", "")
     root_image_prompt = image_cfg.get("prompt", "")
+    root_image_loras = image_cfg.get("loras", [])
 
     raw_scenes = scenario_dict["scenes"]
 
     normalized_scenes = []
     for s_idx, sc in enumerate(raw_scenes):
-        sc_engine = sc.get("engine") or root_video_engine
         sc_negative = combine_negative_prompts(root_video_negative, sc.get("negative_prompt"))
-        sc_model = sc.get("model") or sc.get("checkpoint") or root_video_model
-        sc_name = sc.get("name") or sc.get("scene_name", f"Scene #{s_idx + 1}")
+        sc_name = sc.get("name") or f"Scene #{s_idx + 1}"
 
         raw_anchor = sc["anchor_image"]
         if isinstance(raw_anchor, dict) and raw_anchor.get("keyframe_path"):
-            # Ready keyframe on disk: completely isolated from image generation pipeline.
             anchor = {"keyframe_path": raw_anchor["keyframe_path"]}
         else:
             anchor = dict(raw_anchor)
             anchor["engine"] = root_image_engine
-            for k in ("model", "width", "height", "steps", "cfg", "guidance", "sampler", "fit"):
-                if k in image_cfg:
+            anchor["model"] = root_image_model
+
+            # Inherit global image technical parameters only if not already set on local anchor
+            for k in ("width", "height", "steps", "cfg", "guidance", "sampler", "seed", "fit"):
+                if k not in anchor and k in image_cfg:
                     anchor[k] = image_cfg[k]
-            if "model" not in anchor and "checkpoint" in image_cfg:
-                anchor["model"] = image_cfg["checkpoint"]
 
-            # Seed: scene-specific seed has priority, otherwise global seed
-            if "seed" not in anchor and "seed" in image_cfg:
-                anchor["seed"] = image_cfg["seed"]
-
-            # Denoise: scene-specific denoise has priority, otherwise global denoise, default 0.65 (only for img2img)
             if anchor.get("image_path"):
                 if "denoise" not in anchor and "denoise" in image_cfg:
                     anchor["denoise"] = image_cfg["denoise"]
@@ -240,18 +249,7 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
             else:
                 anchor["denoise"] = 1.0
 
-            # LoRAs: merge global image.loras with scene-specific anchor.loras
-            merged_loras = {}
-            for l in image_cfg.get("loras", []):
-                if isinstance(l, dict) and l.get("name"):
-                    merged_loras[l["name"]] = float(l.get("strength", 0.8))
-            for l in anchor.get("loras", []):
-                if isinstance(l, dict) and l.get("name"):
-                    merged_loras[l["name"]] = float(l.get("strength", 0.8))
-            if merged_loras:
-                anchor["loras"] = [{"name": k, "strength": v} for k, v in merged_loras.items()]
-            else:
-                anchor["loras"] = []
+            anchor["loras"] = _merge_loras(root_image_loras, anchor.get("loras"))
 
             if anchor.get("prompt") or root_image_prompt:
                 anchor["prompt"] = combine_prompts(root_image_prompt, anchor.get("prompt"))
@@ -261,11 +259,9 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
         raw_blocks = sc["blocks"]
         norm_blocks = []
         for b_idx, blk in enumerate(raw_blocks):
-            b_engine = blk.get("engine") or sc_engine
             b_prompt = combine_prompts(root_video_prompt, blk["motion_prompt"])
             b_neg = combine_negative_prompts(sc_negative, blk.get("negative_prompt"))
-            b_model = blk.get("model") or blk.get("checkpoint") or sc_model
-            b_loras = blk.get("loras") or sc.get("loras") or video_cfg.get("loras")
+            b_loras = _merge_loras(root_video_loras, blk.get("loras"))
 
             norm_blocks.append({
                 "name": blk.get("name", f"Block #{b_idx + 1}"),
@@ -273,21 +269,22 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
                 "overlap": float(blk.get("overlap") or 0.0) if b_idx < len(raw_blocks) - 1 else 0.0,
                 "motion_prompt": b_prompt,
                 "negative_prompt": b_neg,
-                "engine": b_engine,
-                "model": b_model,
-                "steps": blk.get("steps"),
-                "cfg": blk.get("cfg"),
-                "seed": blk.get("seed"),
+                "engine": root_video_engine,
+                "model": root_video_model,
+                "steps": video_cfg.get("steps"),
+                "cfg": video_cfg.get("cfg"),
+                "seed": video_cfg.get("seed"),
                 "loras": b_loras,
-                "weight_dtype": blk.get("weight_dtype"),
-                "ramp_latents": blk.get("ramp_latents"),
-                "min_cfg": blk.get("min_cfg"),
+                "weight_dtype": video_cfg.get("weight_dtype"),
+                "ramp_latents": video_cfg.get("ramp_latents"),
+                "min_cfg": video_cfg.get("min_cfg"),
             })
 
         normalized_scenes.append({
             "name": sc_name,
             "scene_name": sc_name,
-            "engine": sc_engine,
+            "engine": root_video_engine,
+            "model": root_video_model,
             "negative_prompt": sc_negative,
             "anchor_image": anchor,
             "blocks": norm_blocks
@@ -296,13 +293,14 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
     return normalized_scenes
 
 
-def collect_scenario_timing_errors(scenes: List[Dict[str, Any]], max_duration: float = MAX_VIDEO_DURATION) -> List[str]:
+def collect_scenario_timing_errors(scenes: List[Dict[str, Any]], max_duration: Optional[float] = None) -> List[str]:
     """
     Validates dynamic block merging timing constraints inside each scene (montage):
     1. overlap_duration < clip_duration
     2. prefix_duration + clip_duration < max_duration
     Returns a list of human-readable error messages.
     """
+    limit = float(max_duration if max_duration is not None else config.MAX_VIDEO_DURATION)
     errors: List[str] = []
     for s_idx, sc in enumerate(scenes):
         sc_name = sc.get("scene_name", f"Scene #{s_idx + 1}")
@@ -319,11 +317,11 @@ def collect_scenario_timing_errors(scenes: List[Dict[str, Any]], max_duration: f
                     f"clip_duration ({clip_duration}s). Condition 'overlap_duration < clip_duration' is required."
                 )
 
-            if prefix_duration + clip_duration >= max_duration:
+            if prefix_duration + clip_duration >= limit:
                 errors.append(
                     f"[{sc_name} : {b_name}] Generation window exceeded: prefix_duration ({prefix_duration}s) + "
                     f"clip_duration ({clip_duration}s) = {prefix_duration + clip_duration:.2f}s >= "
-                    f"max_duration ({max_duration}s). Condition 'prefix_duration + clip_duration < max_duration' is required."
+                    f"max_duration ({limit}s). Condition 'prefix_duration + clip_duration < max_duration' is required."
                 )
     return errors
 
@@ -337,7 +335,6 @@ def collect_scenario_aspect_ratio_errors(
     """
     Validates that anchor images (keyframe_path, image_path, or explicit txt2img resolution)
     have an aspect ratio matching the target video resolution within the given tolerance (default 5%).
-    Prevents geometry distortion and unnatural stretching/squishing in video models.
     """
     from PIL import Image
     errors: List[str] = []
@@ -349,11 +346,9 @@ def collect_scenario_aspect_ratio_errors(
     for s_idx, sc in enumerate(scenes):
         sc_name = sc.get("scene_name") or sc.get("name", f"Scene #{s_idx + 1}")
         anchor = sc.get("anchor_image", {})
-        # If fit is specified (e.g. crop or outpaint), image_engine adapts the aspect ratio automatically
         if anchor.get("fit"):
             continue
 
-        # 1. Ready keyframe or img2img source image check
         img_ref = anchor.get("keyframe_path") or anchor.get("image_path")
         if img_ref:
             p = Path(img_ref)
@@ -382,7 +377,6 @@ def collect_scenario_aspect_ratio_errors(
             else:
                 errors.append(f"[{sc_name}] Anchor image file not found on disk: {img_ref}")
 
-        # 2. Explicit txt2img resolution check (if width/height were explicitly configured)
         elif anchor.get("width") and anchor.get("height"):
             w = int(anchor["width"])
             h = int(anchor["height"])
@@ -406,7 +400,6 @@ def collect_scenario_aspect_ratio_errors(
 def execute_scenario_pipeline(
     scenario_input: Any = None,
     scenario_path: Optional[str] = None,
-    enable_hud: bool = False,
     progress_callback: Optional[Any] = None,
     image: Optional[Dict[str, Any]] = None,
     video: Optional[Dict[str, Any]] = None,
@@ -414,13 +407,13 @@ def execute_scenario_pipeline(
     **extra_kwargs
 ) -> Dict[str, Any]:
     """
-    Executes a multi-scene video scenario using polymorphic generator dispatch and Latent-Chaining.
+    Executes a multi-scene video scenario using polymorphic generator dispatch and 5D Latent-Chaining.
     Supports base loading via scenario_path, top-level 'image' and 'video' structured parameters and Deep Merge.
-    Returns structured results including video paths, duration, and poster base64.
     """
     if scenario_input is None and scenario_path:
         scenario_input = {"scenario_path": scenario_path}
     elif isinstance(scenario_input, dict) and scenario_path and "scenario_path" not in scenario_input:
+        scenario_input = dict(scenario_input)
         scenario_input["scenario_path"] = scenario_path
 
     req_ov = dict(request_overrides or {})
@@ -432,14 +425,27 @@ def execute_scenario_pipeline(
         req_ov["video"] = deep_merge(req_ov.get("video", {}), video)
 
     resolved_scenario_dict = resolve_scenario_dict(scenario_input, request_overrides=req_ov)
+
+    # Resolve concrete global seeds up front so *-spec.json is 100% deterministic and schema-valid
+    if "image" in resolved_scenario_dict and isinstance(resolved_scenario_dict["image"], dict):
+        img_seed = resolved_scenario_dict["image"].get("seed", -1)
+        if img_seed in (-1, None):
+            resolved_scenario_dict["image"]["seed"] = random.randint(1, 10**14)
+
+    if "video" in resolved_scenario_dict and isinstance(resolved_scenario_dict["video"], dict):
+        vid_seed = resolved_scenario_dict["video"].get("seed", -1)
+        if vid_seed in (-1, None):
+            resolved_scenario_dict["video"]["seed"] = random.randint(1, 1_000_000_000)
+
     scenes = normalize_scenario_structure(resolved_scenario_dict)
 
     effective_vid = resolved_scenario_dict.get("video", {})
-    v_engine = effective_vid.get("engine", "wan-fast").lower()
+    v_engine = effective_vid["engine"].lower()
+    v_model = effective_vid["model"]
     width = int(effective_vid.get("width", 832))
     height = int(effective_vid.get("height", 480))
     fps = int(effective_vid.get("fps", 16))
-    max_duration = float(effective_vid.get("max_duration", MAX_VIDEO_DURATION))
+    max_duration = float(effective_vid.get("max_duration", config.MAX_VIDEO_DURATION))
 
     timing_errors = collect_scenario_timing_errors(scenes, max_duration=max_duration)
     ar_errors = collect_scenario_aspect_ratio_errors(scenes, video_width=width, video_height=height)
@@ -447,15 +453,17 @@ def execute_scenario_pipeline(
     if combined_errors:
         raise ValueError("; ".join(combined_errors))
 
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     run_hash = uuid.uuid4().hex[:6]
     run_prefix = f"{timestamp}-{run_hash}"
-    log(f"Executing scenario pipeline with {len(scenes)} scenes (run_id={run_prefix}, video_engine={v_engine}, {width}x{height} @ {fps}fps, max_duration={max_duration}s)...")
+    log(
+        f"Executing scenario pipeline with {len(scenes)} scenes "
+        f"(run_id={run_prefix}, video_engine={v_engine}, model={v_model}, {width}x{height} @ {fps}fps, max_duration={max_duration}s)..."
+    )
 
-    all_block_cores = []
-    generated_block_metadata = []
-    first_poster_b64 = None
-    first_poster_path = None
+    all_block_cores: List[str] = []
+    pipeline_warnings: List[str] = []
+    first_poster_path: Optional[str] = None
 
     total_scenes = len(scenes)
     total_blocks = sum(len(sc.get("blocks", [])) for sc in scenes)
@@ -473,6 +481,8 @@ def execute_scenario_pipeline(
     _PIPELINE_STATUS["started_at"] = time.time()
     _PIPELINE_STATUS["phase"] = "starting"
 
+    temp_dir = config.get_temp_dir()
+
     try:
         for s_idx, sc in enumerate(scenes):
             if is_interrupted():
@@ -480,7 +490,7 @@ def execute_scenario_pipeline(
 
             scene_idx = s_idx + 1
             scene_name = sc.get("scene_name", f"Scene #{scene_idx}")
-            anchor_meta = sc.get("anchor_image", {})
+            anchor_meta = dict(sc.get("anchor_image", {}))
             blocks = sc.get("blocks", [])
 
             log("\n==========================================")
@@ -498,11 +508,13 @@ def execute_scenario_pipeline(
                 cb=progress_callback
             )
 
-            scene_anchor_filename = f"{run_prefix}-s{scene_idx:03d}-anchor.png"
+            scene_anchor_prefix = f"{run_prefix}-s{scene_idx:03d}"
+            scene_anchor_filename = f"{scene_anchor_prefix}-anchor.png"
+            anchor_meta["run_prefix"] = scene_anchor_prefix
             if not anchor_meta.get("custom_filename"):
-                anchor_meta["custom_filename"] = (get_temp_dir() / scene_anchor_filename).resolve().as_posix()
+                anchor_meta["custom_filename"] = (temp_dir / scene_anchor_filename).resolve().as_posix()
 
-            ok, anchor_img_path, anchor_b64 = img_engine_mod.generate_anchor_frame(
+            ok, anchor_img_path, _, anchor_res_meta = img_engine_mod.generate_anchor_frame(
                 anchor_meta=anchor_meta,
                 width=width,
                 height=height
@@ -510,15 +522,17 @@ def execute_scenario_pipeline(
             if not ok:
                 raise RuntimeError(f"Failed to obtain anchor keyframe for {scene_name}: {anchor_img_path}")
 
-            if s_idx == 0:
-                first_poster_b64 = anchor_b64
-                first_poster_path = anchor_img_path
-                if resolved_scenario_dict.get("scenes") and len(resolved_scenario_dict["scenes"]) > s_idx:
-                    resolved_scenario_dict["scenes"][s_idx]["anchor_image"]["image_path"] = anchor_img_path
+            if isinstance(anchor_res_meta, dict) and anchor_res_meta.get("warnings"):
+                for w in anchor_res_meta["warnings"]:
+                    if w not in pipeline_warnings:
+                        pipeline_warnings.append(w)
 
-            next_tail_latent = None
+            if s_idx == 0:
+                first_poster_path = anchor_img_path
+
+            next_tail_latent: Optional[str] = None
             next_tail_latent_count = 0
-            next_tail_image = None
+            next_tail_image: Optional[str] = None
 
             for b_idx, blk in enumerate(blocks):
                 if is_interrupted():
@@ -527,23 +541,21 @@ def execute_scenario_pipeline(
                 block_idx = b_idx + 1
                 b_name = blk.get("name", f"Block {block_idx}")
                 dur = float(blk.get("duration", 5.0))
-                overlap = float(blk.get("overlap") or 0.0) if b_idx < len(blocks) - 1 else 0.0
+                is_last = (b_idx == len(blocks) - 1)
+                overlap = float(blk.get("overlap") or 0.0) if not is_last else 0.0
 
                 motion_prompt = blk["motion_prompt"]
                 b_neg = blk.get("negative_prompt") or ""
                 b_engine_raw = (blk.get("engine") or v_engine).lower()
+                b_model = blk.get("model") or v_model
 
-                # Instantiate the generator strategy with scenario and block overrides
                 b_settings = dict(effective_vid)
-                for override_key in ("checkpoint", "model", "lora_strength", "weight_dtype"):
-                    if blk.get(override_key) is not None:
-                        b_settings[override_key] = blk[override_key]
+                b_settings["model"] = b_model
+                if blk.get("loras"):
+                    b_settings["loras"] = blk["loras"]
 
                 generator = create_video_generator(b_engine_raw, settings=b_settings)
-                is_ltx = isinstance(generator, LtxVideoGenerator)
-
-                is_last = (b_idx == len(blocks) - 1)
-                stride = 8 if is_ltx else 4
+                stride = int(getattr(generator, "temporal_stride", 4))
 
                 block_prefix = f"{run_prefix}-s{scene_idx:03d}-b{block_idx:03d}"
                 out_core_name = f"{block_prefix}-core.mp4"
@@ -562,233 +574,117 @@ def execute_scenario_pipeline(
                 blk_steps = blk.get("steps") or effective_vid.get("steps")
                 blk_cfg = blk.get("cfg") if blk.get("cfg") is not None else effective_vid.get("cfg")
                 blk_seed = blk.get("seed") if blk.get("seed") is not None else effective_vid.get("seed", -1)
+                blk_ramp = blk.get("ramp_latents") if blk.get("ramp_latents") is not None else effective_vid.get("ramp_latents", 3)
+                blk_min_cfg = blk.get("min_cfg") if blk.get("min_cfg") is not None else effective_vid.get("min_cfg", 1.0)
+                blk_weight_dtype = blk.get("weight_dtype") or effective_vid.get("weight_dtype")
 
-                if is_ltx:
-                    if not is_last and overlap > 0:
-                        overlap_pixels = max(1, int(round(overlap * fps)))
-                        # LTX temporal stride: 1 latent past first = 8 pixel frames
-                        k_tail_lat = max(2, math.ceil((overlap_pixels - 1) / stride) + 1)
-                        save_tail = True
-                        tail_frames = k_tail_lat
-                    else:
-                        k_tail_lat = 0
-                        save_tail = False
-                        tail_frames = 0
-
-                    if b_idx == 0:
-                        ltx_start_img = anchor_img_path
-                        ltx_pref_latent = None
-                        ltx_pref_pixel_frames = 0
-                        k_core = max(1, round(dur * fps / stride))
-                        ltx_core_frames = stride * k_core + 1
-                        ltx_num_frames = ltx_core_frames
-                    elif next_tail_latent and Path(next_tail_latent).is_file():
-                        # Mode A: Latent prefix (previous block had overlap > 0)
-                        ltx_start_img = None
-                        ltx_pref_latent = next_tail_latent
-                        try:
-                            import safetensors.torch
-                            _t_dict = safetensors.torch.load_file(ltx_pref_latent, device="cpu")
-                            _t_val = _t_dict.get("latent_tensor", _t_dict.get("samples"))
-                            k_pref_lat = int(_t_val.shape[2])
-                            log(f"Verified LTX prefix latent shape from safetensors: {_t_val.shape} (latents={k_pref_lat})")
-                        except Exception as e:
-                            k_pref_lat = next_tail_latent_count
-                            log(f"Using tracked LTX prefix latents={k_pref_lat} (safetensors read note: {e})")
-
-                        ltx_pref_pixel_frames = (k_pref_lat - 1) * stride + 1
-                        k_core = max(1, round(dur * fps / stride))
-                        ltx_core_frames = stride * k_core
-                        ltx_num_frames = ltx_pref_pixel_frames + ltx_core_frames
-                    elif next_tail_image and Path(next_tail_image).is_file():
-                        # Mode B: 1-frame Image Chaining (previous block had overlap == 0)
-                        ltx_start_img = next_tail_image
-                        ltx_pref_latent = None
-                        k_core = max(1, round(dur * fps / stride))
-                        ltx_pref_pixel_frames = 1
-                        ltx_core_frames = stride * k_core
-                        ltx_num_frames = stride * k_core + 1
-                        log(f"Configuring LTX 1-frame I2V chaining: {Path(next_tail_image).name} (core={ltx_core_frames})")
-                    else:
-                        ltx_start_img = anchor_img_path
-                        ltx_pref_latent = None
-                        ltx_pref_pixel_frames = 0
-                        k_core = max(1, round(dur * fps / stride))
-                        ltx_core_frames = stride * k_core + 1
-                        ltx_num_frames = ltx_core_frames
-
-                    log(f"\n[{scene_name} : {b_name}] Engine: {generator.name.upper()}, Duration: {dur}s, Overlap: {overlap}s")
-                    log(f"LTX quantized frames: total={ltx_num_frames}, core={ltx_core_frames}, prefix_pixel={ltx_pref_pixel_frames}, tail_latents={tail_frames}")
-                    log(f"Motion prompt: '{motion_prompt[:60]}...'")
-
-                    save_tail_image = (not is_last and overlap == 0)
-
-                    req = VideoRequest(
-                        image_path=ltx_start_img,
-                        prefix_latent_path=ltx_pref_latent,
-                        prefix_frames=ltx_pref_pixel_frames,
-                        prompt=motion_prompt,
-                        negative_prompt=b_neg,
-                        width=width,
-                        height=height,
-                        num_frames=ltx_num_frames,
-                        core_frames=ltx_core_frames,
-                        tail_frames=tail_frames,
-                        save_tail=save_tail,
-                        save_tail_image=save_tail_image,
-                        fps=fps,
-                        steps=blk_steps,
-                        cfg=blk_cfg,
-                        seed=blk_seed,
-                        out_video_name=out_core_name,
-                        progress_callback=progress_callback
-                    )
-                    res = generator.generate(req)
-                    if not res.success or not res.file_path:
-                        raise RuntimeError(f"Block generation failed [{scene_name} : {b_name}]: {res.error}")
-
-                    if not is_last:
-                        if overlap > 0 and save_tail and res.tail_latent_path and Path(res.tail_latent_path).is_file():
-                            next_tail_latent = res.tail_latent_path
-                            next_tail_latent_count = tail_frames
-                            next_tail_image = None
-                            log(f"Received pristine workflow tail latent for next block (LTX): {Path(next_tail_latent).name} ({tail_frames} latents)")
-                        elif res.tail_image_path and Path(res.tail_image_path).is_file():
-                            next_tail_latent = None
-                            next_tail_latent_count = 0
-                            next_tail_image = res.tail_image_path
-                            log(f"Received pristine workflow tail image for next block: {Path(next_tail_image).name}")
-                        else:
-                            next_tail_latent = None
-                            next_tail_latent_count = 0
-                            next_tail_image = None
-                    else:
-                        next_tail_latent = None
-                        next_tail_latent_count = 0
-                        next_tail_image = None
-                    block_core_frames = ltx_core_frames
+                # Calculate tail latents needed for the NEXT block from overlap duration
+                if not is_last and overlap > 0:
+                    overlap_pixels = max(1, int(round(overlap * fps)))
+                    k_tail_lat = max(2, math.ceil((overlap_pixels - 1) / stride) + 1)
+                    save_tail = True
+                    tail_frames = k_tail_lat
                 else:
-                    # Calculate tail latents needed for the NEXT block from overlap duration
-                    if not is_last and overlap > 0:
-                        overlap_pixels = max(1, int(round(overlap * fps)))
-                        # Wan 2.2 temporal stride: 1 latent past first = 4 pixel frames
-                        k_tail_lat = max(2, math.ceil((overlap_pixels - 1) / 4) + 1)
-                        save_tail = True
-                        tail_frames = k_tail_lat
-                    else:
-                        k_tail_lat = 0
-                        save_tail = False
-                        tail_frames = 0
+                    k_tail_lat = 0
+                    save_tail = False
+                    tail_frames = 0
 
-                    if b_idx == 0:
-                        wan_start_img = anchor_img_path
-                        wan_pref_latent = None
-                        wan_pref_pixel_frames = 0
-                        k_core = max(1, round(dur * fps / 4))
-                        wan_core_frames = 4 * k_core + 1
-                        wan_num_frames = wan_core_frames
-                    elif next_tail_latent and Path(next_tail_latent).is_file():
-                        # Mode A: Latent prefix (previous block had overlap > 0)
-                        wan_start_img = None
-                        wan_pref_latent = next_tail_latent
-                        try:
-                            import safetensors.torch
-                            _t_dict = safetensors.torch.load_file(wan_pref_latent, device="cpu")
-                            _t_val = _t_dict.get("latent_tensor", _t_dict.get("samples"))
-                            k_pref_lat = int(_t_val.shape[2])
-                            log(f"Verified prefix latent shape from safetensors: {_t_val.shape} (latents={k_pref_lat})")
-                        except Exception as e:
-                            k_pref_lat = next_tail_latent_count
-                            log(f"Using tracked prefix latents={k_pref_lat} (safetensors read note: {e})")
+                if b_idx == 0:
+                    start_img = anchor_img_path
+                    pref_latent = None
+                    pref_pixel_frames = 0
+                    k_core = max(1, round(dur * fps / stride))
+                    core_frames = stride * k_core + 1
+                    num_frames = core_frames
+                elif next_tail_latent and Path(next_tail_latent).is_file():
+                    # Mode A: Pure 5D Latent prefix (previous block had overlap > 0)
+                    start_img = None
+                    pref_latent = next_tail_latent
+                    k_pref_lat = read_latent_temporal_frames(pref_latent, default=next_tail_latent_count)
+                    if k_pref_lat <= 0:
+                        k_pref_lat = max(2, next_tail_latent_count)
+                    log(f"Verified prefix latent temporal frames from header: latents={k_pref_lat}")
 
-                        wan_pref_pixel_frames = (k_pref_lat - 1) * 4 + 1
-                        k_core = max(1, round(dur * fps / 4))
-                        wan_core_frames = 4 * k_core
-                        wan_num_frames = wan_pref_pixel_frames + wan_core_frames
-                    elif next_tail_image and Path(next_tail_image).is_file():
-                        # Mode B: 1-frame Image Chaining (previous block had overlap == 0)
-                        wan_start_img = next_tail_image
-                        wan_pref_latent = None
-                        k_core = max(1, round(dur * fps / 4))
-                        wan_pref_pixel_frames = 1
-                        wan_core_frames = 4 * k_core
-                        wan_num_frames = 4 * k_core + 1
-                        log(f"Configuring 1-frame I2V chaining from previous block: {Path(next_tail_image).name} (diffusing {wan_num_frames} frames, slicing core 1..{wan_core_frames})")
-                    else:
-                        wan_start_img = anchor_img_path
-                        wan_pref_latent = None
-                        wan_pref_pixel_frames = 0
-                        k_core = max(1, round(dur * fps / 4))
-                        wan_core_frames = 4 * k_core + 1
-                        wan_num_frames = wan_core_frames
+                    pref_pixel_frames = (k_pref_lat - 1) * stride + 1
+                    k_core = max(1, round(dur * fps / stride))
+                    core_frames = stride * k_core
+                    num_frames = pref_pixel_frames + core_frames
+                elif next_tail_image and Path(next_tail_image).is_file():
+                    # Mode B: 1-frame Image Chaining (previous block had overlap == 0)
+                    start_img = next_tail_image
+                    pref_latent = None
+                    k_core = max(1, round(dur * fps / stride))
+                    pref_pixel_frames = 1
+                    core_frames = stride * k_core
+                    num_frames = stride * k_core + 1
+                    log(f"Configuring 1-frame I2V chaining from previous block: {Path(next_tail_image).name} (diffusing {num_frames} frames, slicing core 1..{core_frames})")
+                else:
+                    start_img = anchor_img_path
+                    pref_latent = None
+                    pref_pixel_frames = 0
+                    k_core = max(1, round(dur * fps / stride))
+                    core_frames = stride * k_core + 1
+                    num_frames = core_frames
 
-                    blk_ramp = blk.get("ramp_latents") if blk.get("ramp_latents") is not None else effective_vid.get("ramp_latents", 3)
-                    blk_min_cfg = blk.get("min_cfg") if blk.get("min_cfg") is not None else effective_vid.get("min_cfg", 1.0)
+                log(f"\n[{scene_name} : {b_name}] Engine: {generator.name.upper()}, Duration: {dur}s, Overlap: {overlap}s")
+                log(f"Quantized frames (stride={stride}): total={num_frames}, prefix={pref_pixel_frames}, core={core_frames}, next_tail_latents={tail_frames}")
+                log(f"Motion prompt: '{motion_prompt[:60]}...'")
 
-                    log(f"\n[{scene_name} : {b_name}] Engine: {generator.name.upper()}, Duration: {dur}s, Overlap: {overlap}s")
-                    log(f"Wan frames: total={wan_num_frames}, prefix={wan_pref_pixel_frames} ({k_pref_lat if (b_idx > 0 and wan_pref_latent) else 0} latents), core={wan_core_frames}, next_tail={tail_frames} latents")
-                    log(f"Ramp latents: {blk_ramp}, min_cfg: {blk_min_cfg}")
-                    if wan_pref_latent:
-                        log(f"Input prefix latent: {Path(wan_pref_latent).name}")
-                    else:
-                        log(f"Start anchor image: {Path(wan_start_img).name if wan_start_img else 'None'}")
-                    log(f"Motion prompt: '{motion_prompt[:60]}...'")
+                save_tail_image = (not is_last and overlap == 0)
 
-                    wan_save_tail_image = (not is_last and overlap == 0)
+                req = VideoRequest(
+                    image_path=start_img,
+                    prefix_latent_path=pref_latent,
+                    prefix_frames=pref_pixel_frames,
+                    core_frames=core_frames,
+                    tail_frames=tail_frames,
+                    save_tail=save_tail,
+                    save_tail_image=save_tail_image,
+                    prompt=motion_prompt,
+                    negative_prompt=b_neg,
+                    width=width,
+                    height=height,
+                    num_frames=num_frames,
+                    fps=fps,
+                    steps=blk_steps,
+                    cfg=blk_cfg,
+                    seed=blk_seed,
+                    ramp_latents=int(blk_ramp),
+                    min_cfg=float(blk_min_cfg),
+                    weight_dtype=blk_weight_dtype,
+                    model=b_model,
+                    loras=blk.get("loras") or [],
+                    out_video_name=out_core_name,
+                    run_prefix=block_prefix,
+                    progress_callback=progress_callback
+                )
+                res = generator.generate(req)
+                if not res.success or not res.file_path:
+                    raise RuntimeError(f"Block generation failed [{scene_name} : {b_name}]: {res.error}")
 
-                    req = VideoRequest(
-                        image_path=wan_start_img,
-                        prefix_latent_path=wan_pref_latent,
-                        prefix_frames=wan_pref_pixel_frames,
-                        core_frames=wan_core_frames,
-                        tail_frames=tail_frames,
-                        save_tail=save_tail,
-                        save_tail_image=wan_save_tail_image,
-                        prompt=motion_prompt,
-                        negative_prompt=b_neg,
-                        width=width,
-                        height=height,
-                        num_frames=wan_num_frames,
-                        fps=fps,
-                        steps=blk_steps,
-                        cfg=blk_cfg,
-                        seed=blk_seed,
-                        ramp_latents=int(blk_ramp),
-                        min_cfg=float(blk_min_cfg),
-                        out_video_name=out_core_name,
-                        progress_callback=progress_callback
-                    )
-                    res = generator.generate(req)
-                    if not res.success or not res.file_path:
-                        raise RuntimeError(f"Block generation failed [{scene_name} : {b_name}]: {res.error}")
-
-                    if not is_last:
-                        if overlap > 0 and res.tail_latent_path and Path(res.tail_latent_path).is_file():
-                            next_tail_latent = res.tail_latent_path
-                            next_tail_latent_count = k_tail_lat
-                            next_tail_image = None
-                            log(f"Captured tail latent for next block (overlap={overlap}s): {Path(next_tail_latent).name} ({k_tail_lat} latents)")
-                        elif res.tail_image_path and Path(res.tail_image_path).is_file():
-                            next_tail_latent = None
-                            next_tail_latent_count = 0
-                            next_tail_image = res.tail_image_path
-                            log(f"Received pristine workflow tail image for next block: {Path(next_tail_image).name}")
-                        else:
-                            next_tail_latent = None
-                            next_tail_latent_count = 0
-                            next_tail_image = None
+                if not is_last:
+                    if overlap > 0 and save_tail and res.tail_latent_path and Path(res.tail_latent_path).is_file():
+                        next_tail_latent = res.tail_latent_path
+                        next_tail_latent_count = k_tail_lat
+                        next_tail_image = None
+                        log(f"Captured tail latent for next block (overlap={overlap}s): {Path(next_tail_latent).name} ({k_tail_lat} latents)")
+                    elif res.tail_image_path and Path(res.tail_image_path).is_file():
+                        next_tail_latent = None
+                        next_tail_latent_count = 0
+                        next_tail_image = res.tail_image_path
+                        log(f"Received pristine workflow tail image for next block: {Path(next_tail_image).name}")
                     else:
                         next_tail_latent = None
                         next_tail_latent_count = 0
                         next_tail_image = None
-                    block_core_frames = wan_core_frames
+                else:
+                    next_tail_latent = None
+                    next_tail_latent_count = 0
+                    next_tail_image = None
 
                 processed_blocks += 1
                 _PIPELINE_STATUS["processed_blocks"] = processed_blocks
-
                 all_block_cores.append(res.file_path)
-                actual_core_dur = block_core_frames / fps
-                generated_block_metadata.append((res.file_path, actual_core_dur, overlap if not is_last else 0.0))
 
         _PIPELINE_STATUS["phase"] = "ffmpeg_final_assembly"
         notify_progress(
@@ -800,7 +696,7 @@ def execute_scenario_pipeline(
 
         # Final movie assembly across all blocks in a single lossless Stream Copy (-c copy) pass
         final_name = f"{run_prefix}-final.mp4"
-        out_vid_dir = Path(config.OUTPUT_VID_DIR) if config.OUTPUT_VID_DIR and Path(config.OUTPUT_VID_DIR).is_dir() else (get_temp_dir() / "videos")
+        out_vid_dir = Path(config.OUTPUT_VID_DIR) if config.OUTPUT_VID_DIR and Path(config.OUTPUT_VID_DIR).is_dir() else (temp_dir / "videos")
         out_vid_dir.mkdir(parents=True, exist_ok=True)
         final_path = (out_vid_dir / final_name).resolve().as_posix()
         ffmpeg_engine.concat_videos(all_block_cores, final_path)
@@ -808,7 +704,7 @@ def execute_scenario_pipeline(
 
         # Poster handling: prioritize pristine anchor keyframe from Scene 1
         poster_filename = f"{run_prefix}-poster.png"
-        out_img_dir = Path(config.OUTPUT_IMG_DIR) if config.OUTPUT_IMG_DIR and Path(config.OUTPUT_IMG_DIR).is_dir() else (get_temp_dir() / "images")
+        out_img_dir = Path(config.OUTPUT_IMG_DIR) if config.OUTPUT_IMG_DIR and Path(config.OUTPUT_IMG_DIR).is_dir() else (temp_dir / "images")
         out_img_dir.mkdir(parents=True, exist_ok=True)
         poster_path = (out_img_dir / poster_filename).resolve().as_posix()
         if first_poster_path and Path(first_poster_path).is_file():
@@ -816,29 +712,11 @@ def execute_scenario_pipeline(
                 shutil.copy2(first_poster_path, poster_path)
             except Exception as e:
                 log(f"Warning: Failed to copy anchor image to poster: {e}")
-            poster_b64 = first_poster_b64
-            if not poster_b64:
-                try:
-                    with open(poster_path, "rb") as f:
-                        poster_b64 = base64.b64encode(f.read()).decode("utf-8")
-                except Exception:
-                    pass
         else:
-            poster_path, poster_b64 = ffmpeg_engine.extract_poster(final_path, poster_path)
+            poster_path = ffmpeg_engine.extract_poster(final_path, poster_path)
             poster_path = Path(poster_path).resolve().as_posix()
 
-        # Optional HUD generation
-        hud_path = None
-        if enable_hud and generated_block_metadata:
-            hud_name = f"{run_prefix}-hud.mp4"
-            hud_final = (out_vid_dir / hud_name).resolve().as_posix()
-            try:
-                ffmpeg_engine.generate_hud_overlay(final_path, generated_block_metadata, hud_final)
-                hud_path = hud_final
-            except Exception as ex:
-                log(f"Warning: HUD generation failed: {ex}")
-
-        # Save resolved scenario spec artifact for replay/audit
+        # Save resolved scenario spec artifact for replay/audit (preserving schema validity)
         spec_filename = f"{run_prefix}-spec.json"
         workflows_dir = Path(config.WORKFLOWS_DIR) if config.WORKFLOWS_DIR and Path(config.WORKFLOWS_DIR).is_dir() else out_vid_dir
         spec_path = (workflows_dir / spec_filename).resolve().as_posix()
@@ -849,20 +727,21 @@ def execute_scenario_pipeline(
         except Exception as ex:
             log(f"Warning: Failed to save resolved scenario spec to {spec_path}: {ex}")
 
-        return {
+        result_payload: Dict[str, Any] = {
             "run_prefix": run_prefix,
             "video_path": final_path,
             "spec_path": spec_path,
             "poster_path": poster_path,
-            "poster_base64": poster_b64,
             "duration": total_duration,
             "width": width,
             "height": height,
             "fps": fps,
             "scenes_count": len(scenes),
-            "blocks_count": total_blocks,
-            "hud_video_path": hud_path
+            "blocks_count": total_blocks
         }
+        if pipeline_warnings:
+            result_payload["warnings"] = pipeline_warnings
+        return result_payload
     finally:
         if comfy_client.is_interrupted():
             comfy_client.reset_interrupt()

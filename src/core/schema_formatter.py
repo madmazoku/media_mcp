@@ -36,8 +36,9 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
 
 TOOL_EXAMPLES_INPUT: Dict[str, Dict[str, Any]] = {
     "image_generate": {
-        "prompt": "detailed 3D character render, cute blonde mechanic girl in workshop, 8k",
         "engine": "flux2",
+        "model": "flux2-klein-9b.safetensors",
+        "prompt": "detailed 3D character render, cute blonde mechanic girl in workshop, 8k",
         "width": 1280,
         "height": 720
     },
@@ -67,20 +68,22 @@ TOOL_EXAMPLES_INPUT: Dict[str, Dict[str, Any]] = {
 
 TOOL_EXAMPLES_OUTPUT: Dict[str, Dict[str, Any]] = {
     "image_generate": {
-        "run_prefix": "20261017_002500-a1b2c3",
-        "image_path": "G:/Git/Gemini/media_mcp/images/20261017_002500-a1b2c3-final.png",
-        "spec_path": "G:/Git/Gemini/media_mcp/workflows/20261017_002500-a1b2c3-spec.json",
+        "run_prefix": "20261017-002500-a1b2c3",
+        "image_path": "./workspace/images/20261017-002500-a1b2c3-final.png",
+        "spec_path": "./workspace/workflows/20261017-002500-a1b2c3-spec.json",
         "engine": "flux2",
         "model": "flux2-klein-9b.safetensors",
         "seed": 79192059900392,
         "width": 1280,
-        "height": 720
+        "height": 720,
+        "native_width": 1344,
+        "native_height": 768
     },
     "video_generate": {
-        "run_prefix": "20261017_002600-d4e5f6",
-        "video_path": "G:/Git/Gemini/media_mcp/videos/20261017_002600-d4e5f6-final.mp4",
-        "spec_path": "G:/Git/Gemini/media_mcp/workflows/20261017_002600-d4e5f6-spec.json",
-        "poster_path": "G:/Git/Gemini/media_mcp/images/20261017_002600-d4e5f6-poster.png",
+        "run_prefix": "20261017-002600-d4e5f6",
+        "video_path": "./workspace/videos/20261017-002600-d4e5f6-final.mp4",
+        "spec_path": "./workspace/workflows/20261017-002600-d4e5f6-spec.json",
+        "poster_path": "./workspace/images/20261017-002600-d4e5f6-poster.png",
         "duration": 9.8,
         "width": 832,
         "height": 480,
@@ -104,7 +107,7 @@ TOOL_EXAMPLES_OUTPUT: Dict[str, Dict[str, Any]] = {
     },
     "media_get_models": {
         "image": {
-            "flux2": ["aishaNSFWFlux2Klein_betaV88.safetensors"]
+            "flux2": ["flux2-klein-9b.safetensors"]
         }
     },
     "media_get_samplers": {
@@ -118,29 +121,31 @@ TOOL_EXAMPLES_OUTPUT: Dict[str, Dict[str, Any]] = {
     "media_get_status": {
         "pipeline": {"is_running": False},
         "comfy_online": True,
-        "a1111_available": True
+        "a1111_available": True,
+        "report": "ComfyUI: ONLINE | A1111: ONLINE"
     },
     "media_interrupt": {
         "interrupted": True,
         "message": "Interrupt signals dispatched to ComfyUI, A1111 WebUI, and Active Video Pipelines."
     },
     "media_reload_modules": {
-        "reloaded": ["core.config", "core.tools"],
+        "reloaded_modules": ["core.config", "core.tools"],
         "count": 2
     }
 }
 
 TOOL_CONSTRAINTS: Dict[str, List[str]] = {
     "image_generate": [
+        "Parameters 'engine', 'model', and 'prompt' are REQUIRED.",
         "Parameter 'fit' ('crop' or 'outpaint') requires 'image_path', 'width', and 'height'.",
-        "When 'image_path' is specified without 'fit', 'width' and 'height' must NOT be provided (native auto-resolution ~1.0 MP is calculated).",
+        "When 'image_path' is specified without 'fit', 'width' and 'height' must NOT be provided.",
         "Parameters 'denoise' and 'mask_path' are only allowed when 'image_path' is specified.",
         "Engine 'flux2' does NOT support 'loras'.",
         "Engines 'flux1' and 'flux2' do NOT accept 'cfg' or 'negative_prompt' (use 'guidance' instead)."
     ],
     "video_generate": [
-        "Requires either 'scenario_path' or inline 'scenes' (or both for overlay merges).",
-        "Aspect ratio difference between anchor image and target video must not exceed 5% (unless 'fit' is specified).",
+        "Requires either 'scenario_path' or inline 'video' and 'scenes' (or both for overlay merges).",
+        "Technical parameters ('engine', 'model', 'steps', 'cfg', 'seed', 'ramp_latents', 'min_cfg', 'weight_dtype') must be placed in root '.image' and '.video' sections.",
         "Multi-block scenes require sequential duration constraints (prefix_duration + clip_duration < max_video_duration)."
     ],
     "video_validate": [
@@ -148,7 +153,7 @@ TOOL_CONSTRAINTS: Dict[str, List[str]] = {
     ],
     "media_get_models": [
         "Filter 'type' allows: 'image' or 'video'.",
-        "Filter 'engine' allows: 'sdxl', 'flux1', 'flux2', 'wan-fast', 'wan', 'ltx'."
+        "Filter 'engine' allows: 'sdxl', 'flux1', 'flux2', 'wan-fast', 'wan-full', 'ltx'."
     ],
     "media_get_samplers": [
         "Both 'engine' and 'model' parameters are REQUIRED."
