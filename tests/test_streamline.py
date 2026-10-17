@@ -1188,6 +1188,70 @@ class TestStreamlineArchitecture(unittest.TestCase):
                 config.WORKFLOWS_DIR = orig_wf
                 config.TEMP_DIR = orig_tmp
 
+    def test_25_comfy_client_queue_tracking_and_keep_alive(self):
+        """Verify comfy_client active queue tracking, fast fail on dropped prompt, and Keep-Alive session."""
+        from core import comfy_client, a1111_client
+        from unittest.mock import patch
+
+        # 1. Verify Keep-Alive session properties
+        c_sess = comfy_client.get_session()
+        self.assertFalse(c_sess.trust_env, "ComfyUI session must not read system proxy env vars")
+        a_sess = a1111_client.get_session()
+        self.assertFalse(a_sess.trust_env, "A1111 session must not read system proxy env vars")
+
+        # 2. Test wait_for_prompt transitioning: queue_pending -> queue_running -> history
+        call_seq = {"step": 0}
+
+        def mock_make_req(endpoint, data=None, method="GET", raw=False, timeout=30):
+            if endpoint.startswith("/history"):
+                if call_seq["step"] >= 2:
+                    return {"test_pid": {"status": {"completed": True}, "outputs": {"9": {"images": ["ok.png"]}}}}
+                return {}
+            elif endpoint == "/queue":
+                if call_seq["step"] == 0:
+                    call_seq["step"] = 1
+                    return {"queue_running": [], "queue_pending": [[1, "test_pid"]]}
+                elif call_seq["step"] == 1:
+                    call_seq["step"] = 2
+                    return {"queue_running": [[1, "test_pid"]], "queue_pending": []}
+                return {"queue_running": [], "queue_pending": []}
+            return {}
+
+        notifs = []
+
+        def mock_cb(msg, prog, tot):
+            notifs.append(msg)
+
+        with patch("core.comfy_client.make_request", side_effect=mock_make_req):
+            ok, hist = comfy_client.wait_for_prompt("test_pid", timeout=10, poll_interval=0.01, progress_callback=mock_cb)
+            self.assertTrue(ok)
+            self.assertIn("outputs", hist)
+
+        # 3. Test prompt dropped from queue without history (fail-fast)
+        def mock_dropped_req(endpoint, data=None, method="GET", raw=False, timeout=30):
+            if endpoint.startswith("/history") or endpoint == "/queue":
+                return {}
+            return {}
+
+        with patch("core.comfy_client.make_request", side_effect=mock_dropped_req), \
+             patch("time.time", side_effect=[0.0, 6.0, 7.0, 8.0, 9.0]):
+            ok, err = comfy_client.wait_for_prompt("dropped_pid", timeout=10, poll_interval=0.01)
+            self.assertFalse(ok)
+            self.assertIn("disappeared from queue", err["error"])
+
+    def test_26_gpu_serialization_lock(self):
+        """Verify _GPU_LOCK serializes concurrent generations and reports status in media_get_status."""
+        from core.tools import _GPU_LOCK, execute_tool
+
+        # When GPU lock is free
+        status_idle = execute_tool("media_get_status", {})
+        self.assertIn("IDLE", status_idle["report"])
+
+        # When GPU lock is held
+        with _GPU_LOCK:
+            status_busy = execute_tool("media_get_status", {})
+            self.assertIn("BUSY", status_busy["report"])
+
 
 if __name__ == "__main__":
     unittest.main()

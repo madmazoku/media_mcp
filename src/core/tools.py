@@ -12,6 +12,7 @@ import os
 import sys
 import json
 import time
+import threading
 import importlib
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable
@@ -116,113 +117,118 @@ def reload_core_modules() -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# Individual Tool Executors
+# Individual Tool Executors & GPU Serialization
 # ---------------------------------------------------------------------------
 
+_GPU_LOCK = threading.Lock()
+
+
 def execute_image_generate(args: Dict[str, Any], progress_cb: Optional[Callable] = None) -> Dict[str, Any]:
-    from . import image_engine
-    if progress_cb:
-        image_engine.set_global_progress_callback(progress_cb)
+    with _GPU_LOCK:
+        from . import image_engine
+        if progress_cb:
+            image_engine.set_global_progress_callback(progress_cb)
 
-    success, img_path, b64_data, metadata = image_engine.generate_image(args)
-    if not success or not img_path:
-        err_msg = metadata.get("error", "Image generation failed")
+        success, img_path, b64_data, metadata = image_engine.generate_image(args)
+        if not success or not img_path:
+            err_msg = metadata.get("error", "Image generation failed")
+            return {
+                "content": [{"type": "text", "text": f"Error: {err_msg}"}],
+                "error": err_msg,
+                "isError": True,
+                "metadata": metadata
+            }
+
+        run_prefix = metadata.get("run_prefix", "")
+        spec_path = metadata.get("spec_path", "")
+        seed = metadata.get("seed")
+        engine_name = metadata.get("engine", "image").upper()
+        width = metadata.get("width", "N/A")
+        height = metadata.get("height", "N/A")
+        model = metadata.get("model", "default")
+        file_uri = Path(img_path).resolve().as_uri()
+
+        summary_text = (
+            f"Image Generated Successfully ({engine_name}):\n"
+            f"- Run Prefix: `{run_prefix}`\n"
+            f"- Spec: `{spec_path}`\n"
+            f"- Output: `{img_path}`\n"
+            f"- Resolution: {width}x{height} | Seed: {seed} | Model: `{model}`\n\n"
+            f"File link: [Open Image]({file_uri})\n"
+        )
+
+        content: List[Dict[str, Any]] = [{"type": "text", "text": summary_text}]
+
         return {
-            "content": [{"type": "text", "text": f"Error: {err_msg}"}],
-            "error": err_msg,
-            "isError": True,
-            "metadata": metadata
+            "content": content,
+            "run_prefix": run_prefix,
+            "image_path": Path(img_path).resolve().as_posix() if img_path else "",
+            "spec_path": Path(spec_path).resolve().as_posix() if spec_path else "",
+            "engine": str(metadata.get("engine", "sdxl")).lower(),
+            "model": str(metadata.get("model", "")),
+            "seed": int(seed) if seed is not None else 0,
+            "width": int(width) if str(width).isdigit() else 1024,
+            "height": int(height) if str(height).isdigit() else 1024
         }
-
-    run_prefix = metadata.get("run_prefix", "")
-    spec_path = metadata.get("spec_path", "")
-    seed = metadata.get("seed")
-    engine_name = metadata.get("engine", "image").upper()
-    width = metadata.get("width", "N/A")
-    height = metadata.get("height", "N/A")
-    model = metadata.get("model", "default")
-    file_uri = Path(img_path).resolve().as_uri()
-
-    summary_text = (
-        f"Image Generated Successfully ({engine_name}):\n"
-        f"- Run Prefix: `{run_prefix}`\n"
-        f"- Spec: `{spec_path}`\n"
-        f"- Output: `{img_path}`\n"
-        f"- Resolution: {width}x{height} | Seed: {seed} | Model: `{model}`\n\n"
-        f"File link: [Open Image]({file_uri})\n"
-    )
-
-    content: List[Dict[str, Any]] = [{"type": "text", "text": summary_text}]
-
-    return {
-        "content": content,
-        "run_prefix": run_prefix,
-        "image_path": Path(img_path).resolve().as_posix() if img_path else "",
-        "spec_path": Path(spec_path).resolve().as_posix() if spec_path else "",
-        "engine": str(metadata.get("engine", "sdxl")).lower(),
-        "model": str(metadata.get("model", "")),
-        "seed": int(seed) if seed is not None else 0,
-        "width": int(width) if str(width).isdigit() else 1024,
-        "height": int(height) if str(height).isdigit() else 1024
-    }
 
 
 def execute_video_generate(args: Dict[str, Any], progress_cb: Optional[Callable] = None) -> Dict[str, Any]:
-    from . import video_pipeline
-    if progress_cb:
-        video_pipeline.set_global_progress_callback(progress_cb)
+    with _GPU_LOCK:
+        from . import video_pipeline
+        if progress_cb:
+            video_pipeline.set_global_progress_callback(progress_cb)
 
-    enable_hud = bool(args.get("enable_hud", False))
-    res = video_pipeline.execute_scenario_pipeline(
-        scenario_input=args,
-        enable_hud=enable_hud,
-        progress_callback=progress_cb
-    )
+        enable_hud = bool(args.get("enable_hud", False))
+        res = video_pipeline.execute_scenario_pipeline(
+            scenario_input=args,
+            enable_hud=enable_hud,
+            progress_callback=progress_cb
+        )
 
-    run_prefix = res.get("run_prefix", "")
-    final_path = res["video_path"]
-    spec_path = res.get("spec_path", "")
-    hud_path = res.get("hud_video_path")
-    poster_path = res.get("poster_path", "")
-    dur = float(res.get("duration", 0.0))
-    w = int(res.get("width", 832))
-    h = int(res.get("height", 480))
-    fps = int(res.get("fps", 16))
-    scenes_cnt = int(res.get("scenes_count", 1))
-    blocks_cnt = int(res.get("blocks_count", 0))
+        run_prefix = res.get("run_prefix", "")
+        final_path = res["video_path"]
+        spec_path = res.get("spec_path", "")
+        hud_path = res.get("hud_video_path")
+        poster_path = res.get("poster_path", "")
+        dur = float(res.get("duration", 0.0))
+        w = int(res.get("width", 832))
+        h = int(res.get("height", 480))
+        fps = int(res.get("fps", 16))
+        scenes_cnt = int(res.get("scenes_count", 1))
+        blocks_cnt = int(res.get("blocks_count", 0))
 
-    file_uri = Path(final_path).resolve().as_uri()
-    hud_uri = Path(hud_path).resolve().as_uri() if hud_path else None
+        file_uri = Path(final_path).resolve().as_uri()
+        hud_uri = Path(hud_path).resolve().as_uri() if hud_path else None
 
-    result_text = (
-        f"Multi-Scene Video Scenario Rendered Successfully:\n"
-        f"- Run Prefix: `{run_prefix}`\n"
-        f"- Spec: `{spec_path}`\n"
-        f"- Output: `{final_path}`\n"
-        f"- Poster: `{poster_path}`\n"
-        f"- Scenes: {scenes_cnt} | Total Duration: {dur:.2f}s\n"
-        f"- Resolution: {w}x{h} @ {fps} fps\n\n"
-        f"File link: [Open Final Video]({file_uri})\n"
-    )
-    if hud_path and hud_uri:
-        result_text += f"- Diagnostic HUD: [Open HUD Video]({hud_uri})\n"
+        result_text = (
+            f"Multi-Scene Video Scenario Rendered Successfully:\n"
+            f"- Run Prefix: `{run_prefix}`\n"
+            f"- Spec: `{spec_path}`\n"
+            f"- Output: `{final_path}`\n"
+            f"- Poster: `{poster_path}`\n"
+            f"- Scenes: {scenes_cnt} | Total Duration: {dur:.2f}s\n"
+            f"- Resolution: {w}x{h} @ {fps} fps\n\n"
+            f"File link: [Open Final Video]({file_uri})\n"
+        )
+        if hud_path and hud_uri:
+            result_text += f"- Diagnostic HUD: [Open HUD Video]({hud_uri})\n"
 
-    content: List[Dict[str, Any]] = [{"type": "text", "text": result_text}]
+        content: List[Dict[str, Any]] = [{"type": "text", "text": result_text}]
 
-    return {
-        "content": content,
-        "run_prefix": run_prefix,
-        "video_path": Path(final_path).resolve().as_posix() if final_path else "",
-        "spec_path": Path(spec_path).resolve().as_posix() if spec_path else "",
-        "poster_path": Path(poster_path).resolve().as_posix() if poster_path else "",
-        "hud_video_path": Path(hud_path).resolve().as_posix() if hud_path else None,
-        "duration": dur,
-        "width": w,
-        "height": h,
-        "fps": fps,
-        "scenes_count": scenes_cnt,
-        "blocks_count": blocks_cnt
-    }
+        return {
+            "content": content,
+            "run_prefix": run_prefix,
+            "video_path": Path(final_path).resolve().as_posix() if final_path else "",
+            "spec_path": Path(spec_path).resolve().as_posix() if spec_path else "",
+            "poster_path": Path(poster_path).resolve().as_posix() if poster_path else "",
+            "hud_video_path": Path(hud_path).resolve().as_posix() if hud_path else None,
+            "duration": dur,
+            "width": w,
+            "height": h,
+            "fps": fps,
+            "scenes_count": scenes_cnt,
+            "blocks_count": blocks_cnt
+        }
 
 
 def execute_video_validate(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -346,6 +352,11 @@ def execute_media_get_status(args: Dict[str, Any]) -> Dict[str, Any]:
     from . import video_pipeline
     status_lines = []
 
+    gpu_busy = _GPU_LOCK.locked()
+    status_lines.append(
+        f"🔒 GPU Lock: {'BUSY (active generation in progress)' if gpu_busy else 'IDLE (ready for generation)'}"
+    )
+
     pipe_st = video_pipeline.get_pipeline_status()
     if pipe_st.get("is_running"):
         status_lines.append(
@@ -376,7 +387,7 @@ def execute_media_get_status(args: Dict[str, Any]) -> Dict[str, Any]:
     comfy_avail = comfy_client.is_available()
     if comfy_avail:
         q_data = comfy_client.get_queue_status()
-        exec_info = q_data.get("queue_executing", [])
+        exec_info = q_data.get("queue_running", q_data.get("queue_executing", []))
         pending = q_data.get("queue_pending", [])
         status_lines.append(
             f"⚡ ComfyUI: ONLINE ({config.COMFY_URL})\n"

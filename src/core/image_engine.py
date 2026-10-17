@@ -339,55 +339,60 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
         custom_filename=custom_fn
     )
 
-    res = generator.generate(req)
-    if not res.success:
-        return False, None, None, {"error": res.error or f"{engine_name.upper()} generation failed"}
-
-    # Extract run_prefix from image_path filename: {timestamp}-{hash}-final.png -> {timestamp}-{hash}
-    p_img = Path(res.image_path)
-    image_basename = p_img.name
-    if "-" in image_basename:
-        run_prefix = image_basename.rsplit("-", 1)[0]
-    else:
-        run_prefix = p_img.stem
-
-    actual_seed = res.metadata.get("seed", seed)
-    actual_width = res.metadata.get("target_width", res.metadata.get("width", width))
-    actual_height = res.metadata.get("target_height", res.metadata.get("height", height))
-
-    resolved_spec = dict(params)
-    resolved_spec["seed"] = actual_seed
-    resolved_spec["width"] = actual_width
-    resolved_spec["height"] = actual_height
-    if fit_mode:
-        resolved_spec["fit"] = fit_mode
-    if original_source_path or source_img_path:
-        resolved_spec["image_path"] = original_source_path or source_img_path
-        resolved_spec["denoise"] = denoise_val
-    if original_mask_path:
-        resolved_spec["mask_path"] = original_mask_path
-    elif prepared_mask_path and fit_mode == "outpaint":
-        resolved_spec["mask_path"] = prepared_mask_path
-    if res.metadata.get("model") and "model" not in resolved_spec:
-        resolved_spec["model"] = res.metadata["model"]
-
-    spec_filename = f"{run_prefix}-spec.json"
-    workflows_dir = Path(config.WORKFLOWS_DIR) if config.WORKFLOWS_DIR and Path(config.WORKFLOWS_DIR).is_dir() else p_img.parent
-    spec_path = (workflows_dir / spec_filename).resolve().as_posix()
     try:
-        with open(spec_path, "w", encoding="utf-8") as f:
-            json.dump(resolved_spec, f, indent=2, ensure_ascii=False)
-        log(f"Saved resolved image specification: {spec_path}")
-    except Exception as ex:
-        log(f"Warning: Failed to save image spec to {spec_path}: {ex}")
+        res = generator.generate(req)
+        if not res.success:
+            return False, None, None, {"error": res.error or f"{engine_name.upper()} generation failed"}
 
-    res.metadata["run_prefix"] = run_prefix
-    res.metadata["spec_path"] = spec_path
-    res.metadata["seed"] = actual_seed
-    res.metadata["width"] = actual_width
-    res.metadata["height"] = actual_height
+        # Extract run_prefix from image_path filename: {timestamp}-{hash}-final.png -> {timestamp}-{hash}
+        p_img = Path(res.image_path)
+        image_basename = p_img.name
+        if "-" in image_basename:
+            run_prefix = image_basename.rsplit("-", 1)[0]
+        else:
+            run_prefix = p_img.stem
 
-    return True, res.image_path, res.base64_data, res.metadata
+        actual_seed = res.metadata.get("seed", seed)
+        actual_width = res.metadata.get("target_width", res.metadata.get("width", width))
+        actual_height = res.metadata.get("target_height", res.metadata.get("height", height))
+
+        resolved_spec = dict(params)
+        resolved_spec["seed"] = actual_seed
+        resolved_spec["width"] = actual_width
+        resolved_spec["height"] = actual_height
+        if fit_mode:
+            resolved_spec["fit"] = fit_mode
+        if original_source_path or source_img_path:
+            resolved_spec["image_path"] = original_source_path or source_img_path
+            resolved_spec["denoise"] = denoise_val
+        if original_mask_path:
+            resolved_spec["mask_path"] = original_mask_path
+        elif prepared_mask_path and fit_mode == "outpaint":
+            resolved_spec["mask_path"] = prepared_mask_path
+        if res.metadata.get("model") and "model" not in resolved_spec:
+            resolved_spec["model"] = res.metadata["model"]
+
+        spec_filename = f"{run_prefix}-spec.json"
+        workflows_dir = Path(config.WORKFLOWS_DIR) if config.WORKFLOWS_DIR and Path(config.WORKFLOWS_DIR).is_dir() else p_img.parent
+        spec_path = (workflows_dir / spec_filename).resolve().as_posix()
+        try:
+            with open(spec_path, "w", encoding="utf-8") as f:
+                json.dump(resolved_spec, f, indent=2, ensure_ascii=False)
+            log(f"Saved resolved image specification: {spec_path}")
+        except Exception as ex:
+            log(f"Warning: Failed to save image spec to {spec_path}: {ex}")
+
+        res.metadata["run_prefix"] = run_prefix
+        res.metadata["spec_path"] = spec_path
+        res.metadata["seed"] = actual_seed
+        res.metadata["width"] = actual_width
+        res.metadata["height"] = actual_height
+
+        return True, res.image_path, res.base64_data, res.metadata
+    finally:
+        from . import comfy_client
+        if comfy_client.is_interrupted():
+            comfy_client.reset_interrupt()
 
 
 def generate_anchor_frame(

@@ -9,11 +9,15 @@ import json
 import time
 import os
 import shutil
-import urllib.request
 import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+from . import config
 from .config import COMFY_URL, COMFY_INPUT_DIR, COMFY_OUTPUT_DIR
 
 
@@ -22,22 +26,52 @@ def log(msg: str):
     sys.stderr.flush()
 
 
-def make_request(endpoint: str, data: dict = None, method: str = "GET", raw: bool = False, timeout: int = 300):
-    url = f"{COMFY_URL}{endpoint}"
-    req = urllib.request.Request(url, method=method)
-    if not raw and data is not None:
-        req.add_header("Content-Type", "application/json")
-    req.add_header("User-Agent", "media-mcp/1.0")
+_SESSION: Optional[requests.Session] = None
 
-    body = json.dumps(data).encode("utf-8") if (data is not None and not raw) else None
-    with urllib.request.urlopen(req, data=body, timeout=timeout) as resp:
-        if raw:
-            return resp.read()
-        return json.loads(resp.read().decode("utf-8"))
+
+def get_session() -> requests.Session:
+    """Returns a singleton requests.Session with HTTP Keep-Alive connection pooling."""
+    global _SESSION
+    if _SESSION is None:
+        s = requests.Session()
+        s.trust_env = False
+        retries = Retry(total=1, backoff_factor=0.1, status_forcelist=[502, 503, 504], raise_on_status=False)
+        adapter = HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=retries)
+        s.mount("http://", adapter)
+        s.mount("https://", adapter)
+        s.headers.update({"User-Agent": "media-mcp/1.0"})
+        _SESSION = s
+    return _SESSION
+
+
+def _format_url(endpoint: str) -> str:
+    base = (config.COMFY_URL or COMFY_URL or "").strip()
+    if not base:
+        raise ValueError("ComfyUI URL is not configured. Please set 'comfy_url' in config.json.")
+    if not base.startswith(("http://", "https://")):
+        base = f"http://{base}"
+    ep = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+    return f"{base.rstrip('/')}{ep}"
+
+
+def make_request(endpoint: str, data: dict = None, method: str = "GET", raw: bool = False, timeout: int = 30):
+    url = _format_url(endpoint)
+    s = get_session()
+    m = method.upper()
+    if m == "GET":
+        resp = s.get(url, timeout=timeout)
+    elif m == "POST":
+        resp = s.post(url, json=data if not raw else None, data=data if raw else None, timeout=timeout)
+    else:
+        resp = s.request(m, url, json=data if not raw else None, data=data if raw else None, timeout=timeout)
+    resp.raise_for_status()
+    if raw:
+        return resp.content
+    return resp.json()
 
 
 def get_queue() -> Dict[str, Any]:
-    return make_request("/queue")
+    return make_request("/queue", timeout=5)
 
 
 def get_queue_status() -> Dict[str, Any]:
@@ -49,7 +83,7 @@ def get_queue_status() -> Dict[str, Any]:
 
 def is_available() -> bool:
     try:
-        make_request("/system_stats", timeout=2)
+        make_request("/system_stats", timeout=3)
         return True
     except Exception:
         return False
@@ -91,7 +125,7 @@ def interrupt() -> bool:
     global _INTERRUPT_FLAG
     _INTERRUPT_FLAG = True
     try:
-        make_request("/interrupt", data={}, method="POST")
+        make_request("/interrupt", data={}, method="POST", timeout=5)
         return True
     except Exception as ex:
         log(f"Interrupt error: {ex}")
@@ -109,20 +143,15 @@ def is_interrupted() -> bool:
 
 def queue_prompt(workflow: Dict[str, Any]) -> Tuple[bool, str]:
     payload = {"prompt": workflow}
-    data_bytes = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(f"{COMFY_URL}/prompt", data=data_bytes, method="POST")
-    req.add_header("Content-Type", "application/json")
-
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            res = json.loads(resp.read().decode("utf-8"))
-            prompt_id = res.get("prompt_id")
-            if not prompt_id:
-                return False, f"No prompt_id returned: {res}"
-            return True, prompt_id
-    except urllib.error.HTTPError as e:
-        err_msg = e.read().decode("utf-8", errors="replace")
-        return False, f"ComfyUI HTTP {e.code} error: {err_msg}"
+        res = make_request("/prompt", data=payload, method="POST", timeout=30)
+        prompt_id = res.get("prompt_id")
+        if not prompt_id:
+            return False, f"No prompt_id returned: {res}"
+        return True, prompt_id
+    except requests.exceptions.HTTPError as e:
+        err_msg = e.response.text if e.response is not None else str(e)
+        return False, f"ComfyUI HTTP {e.response.status_code if e.response else 'error'}: {err_msg}"
     except Exception as e:
         return False, f"Failed to queue prompt: {e}"
 
@@ -138,31 +167,40 @@ def set_global_progress_callback(cb):
 def wait_for_prompt(
     prompt_id: str,
     timeout: int = 600,
-    poll_interval: float = 1.0,
+    poll_interval: float = 0.5,
     progress_callback: Optional[Any] = None
 ) -> Tuple[bool, Dict[str, Any]]:
-    start_time = time.time()
-    last_notify = 0.0
-    cb = progress_callback or _GLOBAL_PROGRESS_CALLBACK
+    """
+    Monitors prompt execution in ComfyUI with active queue tracking and HTTP Keep-Alive.
 
-    while time.time() - start_time < timeout:
+    Phases:
+    1. Pending in Queue:
+       Prompt is in 'queue_pending'. Position is tracked and execution timeout does NOT tick down.
+    2. Running on GPU:
+       Prompt is in 'queue_running'. Active GPU diffusion phase. Execution timeout applies.
+    3. Completed:
+       Prompt appears in '/history/{prompt_id}'.
+    4. Disappeared / Cancelled:
+       Fails fast if prompt disappears from queue without appearing in history.
+    """
+    start_time = time.time()
+    execution_start_time: Optional[float] = None
+    last_notify = 0.0
+    was_seen_in_queue = False
+    cb = progress_callback or _GLOBAL_PROGRESS_CALLBACK
+    max_queue_wait = 1800.0  # Max wait in queue (30 mins) behind other jobs
+
+    while True:
         if _INTERRUPT_FLAG:
             log(f"Aborting wait_for_prompt for {prompt_id} due to interrupt.")
             return False, {"error": "Execution interrupted by user request"}
 
-        elapsed = time.time() - start_time
-        if elapsed - last_notify >= 5.0:
-            last_notify = elapsed
-            msg = f"ComfyUI prompt {prompt_id[:8]} executing (elapsed: {int(elapsed)}s)"
-            if cb:
-                try:
-                    cb(msg, None, None)
-                except Exception:
-                    pass
-            log(msg)
+        now = time.time()
+        total_elapsed = now - start_time
 
+        # 1. Fast history check
         try:
-            history = make_request(f"/history/{prompt_id}")
+            history = make_request(f"/history/{prompt_id}", timeout=5)
             if prompt_id in history:
                 prompt_hist = history[prompt_id]
                 status = prompt_hist.get("status", {})
@@ -172,8 +210,88 @@ def wait_for_prompt(
                     return True, prompt_hist
         except Exception:
             pass
+
+        # 2. Check position in ComfyUI queue
+        in_pending = False
+        in_running = False
+        queue_pos = None
+
+        try:
+            q_data = make_request("/queue", timeout=5)
+            running_list = q_data.get("queue_running", [])
+            for item in running_list:
+                if len(item) > 1 and item[1] == prompt_id:
+                    in_running = True
+                    break
+
+            if not in_running:
+                pending_list = q_data.get("queue_pending", [])
+                for idx, item in enumerate(pending_list):
+                    if len(item) > 1 and item[1] == prompt_id:
+                        in_pending = True
+                        queue_pos = idx + 1
+                        break
+        except Exception:
+            pass
+
+        if in_pending or in_running:
+            was_seen_in_queue = True
+
+        if in_pending:
+            if total_elapsed > max_queue_wait:
+                return False, {"error": f"Queue wait timeout after {int(max_queue_wait)}s waiting for prompt {prompt_id}"}
+
+            if total_elapsed - last_notify >= 3.0:
+                last_notify = total_elapsed
+                msg = f"ComfyUI prompt {prompt_id[:8]} waiting in queue (position: {queue_pos}, wait: {int(total_elapsed)}s)"
+                if cb:
+                    try:
+                        cb(msg, None, None)
+                    except Exception:
+                        pass
+                log(msg)
+
+        elif in_running:
+            if execution_start_time is None:
+                execution_start_time = now
+                log(f"ComfyUI prompt {prompt_id[:8]} started execution on GPU.")
+
+            exec_elapsed = now - execution_start_time
+            if exec_elapsed > timeout:
+                return False, {"error": f"Execution timeout after {timeout}s diffusing prompt {prompt_id}"}
+
+            if total_elapsed - last_notify >= 3.0:
+                last_notify = total_elapsed
+                msg = f"ComfyUI prompt {prompt_id[:8]} diffusing on GPU (elapsed: {int(exec_elapsed)}s)"
+                if cb:
+                    try:
+                        cb(msg, None, None)
+                    except Exception:
+                        pass
+                log(msg)
+
+        else:
+            # Not in pending, not in running.
+            # If it was in queue/running or initial grace period passed:
+            if was_seen_in_queue or total_elapsed >= 5.0:
+                time.sleep(0.5)
+                try:
+                    history = make_request(f"/history/{prompt_id}", timeout=5)
+                    if prompt_id in history:
+                        prompt_hist = history[prompt_id]
+                        status = prompt_hist.get("status", {})
+                        if status.get("status_str") == "error":
+                            return False, {"error": status.get("messages", "ComfyUI reported execution error")}
+                        if status.get("completed", False) or (prompt_hist.get("outputs") and len(prompt_hist["outputs"]) > 0):
+                            return True, prompt_hist
+                except Exception:
+                    pass
+
+                return False, {
+                    "error": f"ComfyUI prompt {prompt_id[:8]} disappeared from queue without completing (possible crash, CUDA error, or manual cancellation)."
+                }
+
         time.sleep(poll_interval)
-    return False, {"error": f"Timeout after {timeout}s waiting for prompt {prompt_id}"}
 
 
 def download_output_file(filename: str, subfolder: str = "", file_type: str = "output") -> bytes:

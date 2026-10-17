@@ -864,5 +864,7 @@ def execute_scenario_pipeline(
             "hud_video_path": hud_path
         }
     finally:
+        if comfy_client.is_interrupted():
+            comfy_client.reset_interrupt()
         _PIPELINE_STATUS["is_running"] = False
         _PIPELINE_STATUS["phase"] = "idle"
