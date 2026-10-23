@@ -47,8 +47,8 @@ class TestSchemasAndContracts(unittest.TestCase):
         config.cfg_json = {}
 
     def test_01_request_and_response_schemas_symmetry(self):
-        """Verify strict 1-to-1 symmetry between requests/<tool>.json and responses/<tool>.json for all 9 tools."""
-        self.assertEqual(len(CANONICAL_TOOLS), 9)
+        """Verify strict 1-to-1 symmetry between requests/<tool>.json and responses/<tool>.json for all 10 tools."""
+        self.assertEqual(len(CANONICAL_TOOLS), 10)
         for tool in CANONICAL_TOOLS:
             req_schema = schema_validator.get_mcp_tool_schema(tool)
             self.assertIsInstance(req_schema, dict)
@@ -60,7 +60,7 @@ class TestSchemasAndContracts(unittest.TestCase):
 
     def test_02_all_repository_examples_validate(self):
         """Verify every example file in examples/ passes strict JSON Schema validation."""
-        examples_dir = Path(config.REPO_DIR) / "examples"
+        examples_dir = Path(__file__).resolve().parent.parent / "examples"
         schema_validator.validate_config(
             json.loads((examples_dir / "config.json").read_text(encoding="utf-8"))
         )
@@ -73,7 +73,8 @@ class TestSchemasAndContracts(unittest.TestCase):
             ("image_generate", "mcp_image_generate_inpaint.json"),
             ("image_generate", "mcp_image_generate_outpaint.json"),
             ("video_generate", "mcp_video_generate.json"),
-            ("video_validate", "mcp_video_validate.json"),
+            ("media_get_job", "mcp_media_get_job.json"),
+            ("media_remove_job", "mcp_media_remove_job.json"),
             ("media_get_models", "mcp_media_get_models.json"),
             ("media_get_samplers", "mcp_media_get_samplers.json"),
             ("media_get_loras", "mcp_media_get_loras.json"),
@@ -238,22 +239,88 @@ class TestSchemasAndContracts(unittest.TestCase):
 
         valid_vid_res = {
             "run_prefix": "20261017-123456-abcdef",
-            "video_path": "G:/media_mcp/videos/20261017-123456-abcdef-final.mp4",
-            "poster_path": "G:/media_mcp/images/20261017-123456-abcdef-poster.png",
+            "status": "queued",
             "spec_path": "G:/media_mcp/workflows/20261017-123456-abcdef-spec.json",
-            "duration": 9.0,
-            "width": 832,
-            "height": 480,
-            "fps": 16,
-            "scenes_count": 1,
-            "blocks_count": 2
+            "warnings": ["Sample warning"]
         }
         schema_validator.validate_mcp_response("video_generate", valid_vid_res)
 
-        # Obsolete hud_video_path must be rejected by strict response schema
-        invalid_vid_hud = {**valid_vid_res, "hud_video_path": None}
+        valid_dryrun_res = {
+            "run_prefix": "20261017-123456-abcdef",
+            "status": "validated",
+            "spec_path": "G:/media_mcp/workflows/20261017-123456-abcdef-spec.json",
+            "is_valid": True,
+            "total_duration": 4.5,
+            "scenes_count": 1,
+            "blocks_count": 2,
+            "warnings": ["Dry run warning"]
+        }
+        schema_validator.validate_mcp_response("video_generate", valid_dryrun_res)
+
+        # Obsolete fields or unknown properties must be rejected
+        invalid_vid = {**valid_vid_res, "video_path": "not_allowed_in_queued"}
         with self.assertRaises(schema_validator.SchemaValidationError):
-            schema_validator.validate_mcp_response("video_generate", invalid_vid_hud)
+            schema_validator.validate_mcp_response("video_generate", invalid_vid)
+
+        valid_job_res = {
+            "run_prefix": "20261017-123456-abcdef",
+            "status": "completed",
+            "spec_path": "G:/media_mcp/workflows/20261017-123456-abcdef-spec.json",
+            "timestamps": {
+                "created_at": 1729700000.0,
+                "started_at": 1729700001.0,
+                "completed_at": 1729700065.0,
+                "elapsed_seconds": 64.0
+            },
+            "progress": {
+                "phase": "completed",
+                "percent": 100,
+                "scene_index": 1,
+                "total_scenes": 1,
+                "block_index": 2,
+                "total_blocks": 2,
+                "message": "Done"
+            },
+            "video": {
+                "video_path": "G:/media_mcp/videos/final.mp4",
+                "duration": 9.0,
+                "width": 832,
+                "height": 480,
+                "fps": 16,
+                "scenes_count": 1,
+                "blocks_count": 2
+            },
+            "image": {
+                "image_path": "G:/media_mcp/images/poster.png",
+                "seed": 123,
+                "width": 832,
+                "height": 480,
+                "native_width": 1280,
+                "native_height": 720
+            }
+        }
+        schema_validator.validate_mcp_response("media_get_job", valid_job_res)
+
+        valid_job_notfound = {
+            "run_prefix": "20261017-123456-abcdef",
+            "status": "not_found",
+            "error": "Job not found"
+        }
+        schema_validator.validate_mcp_response("media_get_job", valid_job_notfound)
+
+        valid_remove_res = {
+            "run_prefix": "20261017-123456-abcdef",
+            "status": "removed",
+            "message": "Job removed"
+        }
+        schema_validator.validate_mcp_response("media_remove_job", valid_remove_res)
+
+        valid_cancel_res = {
+            "run_prefix": "20261017-123456-abcdef",
+            "status": "cancelled",
+            "message": "Job cancelled"
+        }
+        schema_validator.validate_mcp_response("media_remove_job", valid_cancel_res)
 
     def test_07_schema_formatter_help(self):
         """Verify schema_formatter renders general help and per-tool help cleanly."""

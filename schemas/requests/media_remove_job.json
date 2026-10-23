@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "media_remove_job.json",
+  "title": "Media Remove Job Request Schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_prefix"
+  ],
+  "properties": {
+    "run_prefix": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-zA-Z0-9_-]+$",
+      "description": "Unique run prefix of the video generation job to cancel or purge"
+    }
+  }
+}

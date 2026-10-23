@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "media_get_job.json",
+  "title": "Media Get Job Response Schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_prefix",
+    "status"
+  ],
+  "properties": {
+    "run_prefix": {
+      "type": "string",
+      "description": "Unique run prefix of the queried video generation job"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "running",
+        "completed",
+        "failed",
+        "cancelled",
+        "not_found"
+      ],
+      "description": "Current lifecycle status of the video generation job"
+    },
+    "spec_path": {
+      "type": "string",
+      "description": "Absolute POSIX path to the resolved scenario specification file (.json)"
+    },
+    "timestamps": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "created_at"
+      ],
+      "properties": {
+        "created_at": {
+          "type": "number",
+          "description": "UNIX timestamp when job was queued"
+        },
+        "started_at": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "UNIX timestamp when GPU execution started (null if still queued)"
+        },
+        "completed_at": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "UNIX timestamp when job reached terminal state (null if active)"
+        },
+        "elapsed_seconds": {
+          "type": "number",
+          "description": "Total elapsed execution seconds on GPU"
+        }
+      }
+    },
+    "progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "percent",
+        "scene_index",
+        "total_scenes",
+        "block_index",
+        "total_blocks"
+      ],
+      "properties": {
+        "phase": {
+          "type": "string",
+          "description": "Current rendering phase identifier"
+        },
+        "percent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Overall estimated progress percentage (0-100)"
+        },
+        "scene_index": {
+          "type": "integer",
+          "description": "Index of current scene being processed (1-based)"
+        },
+        "total_scenes": {
+          "type": "integer",
+          "description": "Total number of scenes in scenario"
+        },
+        "block_index": {
+          "type": "integer",
+          "description": "Index of current block being diffused (1-based)"
+        },
+        "total_blocks": {
+          "type": "integer",
+          "description": "Total number of blocks across all scenes"
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable progress notification string"
+        }
+      }
+    },
+    "video": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "video_path",
+        "duration",
+        "width",
+        "height",
+        "fps",
+        "scenes_count",
+        "blocks_count"
+      ],
+      "properties": {
+        "video_path": {
+          "type": "string",
+          "description": "Absolute POSIX path to final assembled video file (.mp4)"
+        },
+        "duration": {
+          "type": "number",
+          "description": "Total video duration in seconds"
+        },
+        "width": {
+          "type": "integer",
+          "description": "Video frame width in pixels"
+        },
+        "height": {
+          "type": "integer",
+          "description": "Video frame height in pixels"
+        },
+        "fps": {
+          "type": "integer",
+          "description": "Video frame rate (fps)"
+        },
+        "scenes_count": {
+          "type": "integer",
+          "description": "Number of montage scenes rendered"
+        },
+        "blocks_count": {
+          "type": "integer",
+          "description": "Total number of continuous motion blocks rendered"
+        }
+      }
+    },
+    "image": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "image_path",
+        "seed",
+        "width",
+        "height",
+        "native_width",
+        "native_height"
+      ],
+      "properties": {
+        "image_path": {
+          "type": "string",
+          "description": "Absolute POSIX path to video poster / first scene anchor frame (.png)"
+        },
+        "seed": {
+          "type": "integer",
+          "description": "Seed used for first anchor image generation"
+        },
+        "width": {
+          "type": "integer",
+          "description": "Poster width in pixels"
+        },
+        "height": {
+          "type": "integer",
+          "description": "Poster height in pixels"
+        },
+        "native_width": {
+          "type": "integer",
+          "description": "Native diffusion width before potential fit adjustments"
+        },
+        "native_height": {
+          "type": "integer",
+          "description": "Native diffusion height before potential fit adjustments"
+        }
+      }
+    },
+    "error": {
+      "type": "string",
+      "description": "Error message if job failed or was cancelled"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Non-fatal warnings emitted during generation"
+    }
+  }
+}

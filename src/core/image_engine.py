@@ -231,7 +231,7 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
         p = Path(raw_src)
         if not p.is_file():
             found = False
-            for parent_cand in [Path.cwd(), Path(config.OUTPUT_IMG_DIR), Path(config.WORKFLOWS_DIR), Path(config.REPO_DIR)]:
+            for parent_cand in [Path.cwd(), Path(config.OUTPUT_IMG_DIR), Path(config.WORKFLOWS_DIR)]:
                 cand = parent_cand / raw_src
                 if cand.is_file():
                     p = cand
@@ -249,7 +249,7 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
             p_mask = Path(raw_user_mask)
             if not p_mask.is_file():
                 found_m = False
-                for parent_cand in [Path.cwd(), Path(config.OUTPUT_IMG_DIR), Path(config.WORKFLOWS_DIR), Path(config.REPO_DIR)]:
+                for parent_cand in [Path.cwd(), Path(config.OUTPUT_IMG_DIR), Path(config.WORKFLOWS_DIR)]:
                     cand_m = parent_cand / raw_user_mask
                     if cand_m.is_file():
                         p_mask = cand_m
@@ -495,7 +495,7 @@ def generate_anchor_frame(
     if keyframe_path:
         p = Path(keyframe_path)
         if not p.is_file():
-            for base in [Path.cwd(), Path(config.OUTPUT_IMG_DIR), Path(config.WORKFLOWS_DIR), Path(config.REPO_DIR)]:
+            for base in [Path.cwd(), Path(config.OUTPUT_IMG_DIR), Path(config.WORKFLOWS_DIR)]:
                 cand = base / keyframe_path
                 if cand.is_file():
                     p = cand

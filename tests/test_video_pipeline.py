@@ -218,8 +218,8 @@ class TestVideoPipeline(unittest.TestCase):
             self.assertEqual(wf_wan["sampler_stage2"]["inputs"]["latent_image"], ["stage1_restored", 0])
             self.assertEqual(wf_wan["prefix_latent_restore"]["inputs"]["samples"], ["stage2_concat", 0])
 
-    def test_04_video_validate_respects_engine_duration_limits(self):
-        """Verify execute_video_validate resolves scenario_path and enforces immutable per-engine duration limits."""
+    def test_04_video_generate_synchronous_validation_and_job_lifecycle(self):
+        """Verify video_generate pre-flight validation rejects timing errors synchronously, supports dry_run, and queues valid jobs."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             scen_file = Path(tmp_dir) / "custom_engine_dur.json"
             scen_data = {
@@ -241,20 +241,48 @@ class TestVideoPipeline(unittest.TestCase):
             }
             scen_file.write_text(json.dumps(scen_data), encoding="utf-8")
 
-            # Wan-fast: 6.5s >= 6.0s -> invalid
-            res = execute_tool("video_validate", {"scenario_path": str(scen_file)})
-            self.assertFalse(res["is_valid"])
-            self.assertTrue(any("engine limit (6.0s for engine 'wan-fast')" in e for e in res["errors"]))
+            # Wan-fast: 6.5s >= 6.0s -> pre-flight synchronously fails with isError=True
+            res = execute_tool("video_generate", {"scenario_path": str(scen_file)})
+            self.assertTrue(res.get("isError"))
+            self.assertIn("engine limit (6.0s for engine 'wan-fast')", res.get("error", ""))
 
-            # LTX: 6.5s < 16.0s -> valid (assuming hero.png exists)
+            # LTX: 6.5s < 16.0s
             hero_path = Path(tmp_dir) / "hero.png"
             Image.new("RGB", (832, 480), color=(0, 0, 0)).save(hero_path)
             scen_data["video"]["engine"] = "ltx"
             scen_data["scenes"][0]["anchor_image"]["keyframe_path"] = hero_path.as_posix()
             scen_file.write_text(json.dumps(scen_data), encoding="utf-8")
 
-            res_ltx = execute_tool("video_validate", {"scenario_path": str(scen_file)})
-            self.assertTrue(res_ltx["is_valid"])
+            # Dry-run validation only (instant, no GPU job queued)
+            res_dry = execute_tool("video_generate", {"scenario_path": str(scen_file), "dry_run": True})
+            self.assertFalse(res_dry.get("isError", False))
+            self.assertEqual(res_dry["status"], "validated")
+            self.assertTrue(res_dry["is_valid"])
+            self.assertEqual(res_dry["total_duration"], 7.0)
+            self.assertEqual(res_dry["scenes_count"], 1)
+            self.assertEqual(res_dry["blocks_count"], 2)
+
+            def fake_exec(prepared_pipeline_data=None, progress_callback=None, **kw):
+                return {
+                    "video_path": "mock.mp4", "poster_path": "mock.png", "width": 832, "height": 480,
+                    "duration": 6.5, "fps": 16, "scenes_count": 1, "blocks_count": 2, "anchor_metadata": {}
+                }
+
+            with patch("core.video_pipeline.execute_scenario_pipeline", side_effect=fake_exec), \
+                 patch("core.comfy_client.interrupt", return_value=None):
+                res_ltx = execute_tool("video_generate", {"scenario_path": str(scen_file)})
+                self.assertFalse(res_ltx.get("isError", False))
+                self.assertEqual(res_ltx["status"], "queued")
+                self.assertTrue(bool(res_ltx["run_prefix"]))
+
+                # Verify media_get_job retrieves queued job
+                job_info = execute_tool("media_get_job", {"run_prefix": res_ltx["run_prefix"], "wait": 0})
+                self.assertIn(job_info["status"], ("queued", "running", "completed"))
+                self.assertEqual(job_info["run_prefix"], res_ltx["run_prefix"])
+
+                # Verify media_remove_job purges or cancels the job
+                del_info = execute_tool("media_remove_job", {"run_prefix": res_ltx["run_prefix"]})
+                self.assertIn(del_info["status"], ("cancelled", "removed"))
 
     def test_05_execute_scenario_pipeline_saves_replayable_spec_and_reads_5d_latent(self):
         """Verify execute_scenario_pipeline saves a schema-valid *-spec.json and reads 5D latent without torch."""

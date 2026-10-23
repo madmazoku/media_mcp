@@ -167,12 +167,13 @@ def resolve_scenario_dict(raw_data: Any, request_overrides: Optional[Dict[str, A
     elif isinstance(raw_data, dict):
         scenario_dict = json.loads(json.dumps(raw_data))
         base_file_path = scenario_dict.pop("scenario_path", None)
+        scenario_dict.pop("dry_run", None)
 
     if base_file_path:
         p = Path(base_file_path)
         if not p.is_file():
             found = False
-            for parent_cand in [Path.cwd(), Path(config.WORKFLOWS_DIR), Path(config.REPO_DIR)]:
+            for parent_cand in [Path.cwd(), Path(config.WORKFLOWS_DIR)]:
                 cand = parent_cand / base_file_path
                 if cand.is_file():
                     p = cand
@@ -183,11 +184,13 @@ def resolve_scenario_dict(raw_data: Any, request_overrides: Optional[Dict[str, A
         with open(p, "r", encoding="utf-8") as f:
             base_dict = json.load(f)
         base_dict.pop("scenario_path", None)
+        base_dict.pop("dry_run", None)
         scenario_dict = deep_merge(base_dict, scenario_dict)
 
     if request_overrides:
         clean_overrides = dict(request_overrides)
         clean_overrides.pop("scenario_path", None)
+        clean_overrides.pop("dry_run", None)
         scenario_dict = deep_merge(scenario_dict, clean_overrides)
 
     if not isinstance(scenario_dict, dict) or "scenes" not in scenario_dict:
@@ -362,7 +365,7 @@ def collect_scenario_aspect_ratio_errors(
         if img_ref:
             p = Path(img_ref)
             if not p.is_file():
-                for base in [Path.cwd(), Path(config.OUTPUT_IMG_DIR), Path(config.WORKFLOWS_DIR), Path(config.REPO_DIR)]:
+                for base in [Path.cwd(), Path(config.OUTPUT_IMG_DIR), Path(config.WORKFLOWS_DIR)]:
                     cand = base / img_ref
                     if cand.is_file():
                         p = cand
@@ -406,18 +409,18 @@ def collect_scenario_aspect_ratio_errors(
 # Main Pipeline Executor
 # ---------------------------------------------------------------------------
 
-def execute_scenario_pipeline(
+def prepare_scenario_pipeline(
     scenario_input: Any = None,
     scenario_path: Optional[str] = None,
-    progress_callback: Optional[Any] = None,
     image: Optional[Dict[str, Any]] = None,
     video: Optional[Dict[str, Any]] = None,
-    request_overrides: Optional[Dict[str, Any]] = None,
-    **extra_kwargs
+    request_overrides: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
-    Executes a multi-scene video scenario using polymorphic generator dispatch and 5D Latent-Chaining.
-    Supports base loading via scenario_path, top-level 'image' and 'video' structured parameters and Deep Merge.
+    Performs fast synchronous pre-flight preparation and validation of a video scenario.
+    Validates JSON schema, timing laws, aspect ratios, resolves seeds, assigns canonical run_prefix,
+    and immediately writes {run_prefix}-spec.json to disk.
+    Returns prepared pipeline dictionary ready for queued background execution.
     """
     if scenario_input is None and scenario_path:
         scenario_input = {"scenario_path": scenario_path}
@@ -464,17 +467,82 @@ def execute_scenario_pipeline(
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     run_hash = uuid.uuid4().hex[:6]
     run_prefix = f"{timestamp}-{run_hash}"
+
+    # Write specification file immediately to disk
+    spec_filename = f"{run_prefix}-spec.json"
+    workflows_dir = Path(config.WORKFLOWS_DIR) if config.WORKFLOWS_DIR else Path(config.OUTPUT_DIR) / 'workflows'
+    workflows_dir.mkdir(parents=True, exist_ok=True)
+    spec_path = (workflows_dir / spec_filename).resolve().as_posix()
+    with open(spec_path, "w", encoding="utf-8") as f:
+        json.dump(resolved_scenario_dict, f, indent=2, ensure_ascii=False)
+    log(f"Pre-flight: Saved resolved scenario specification: {spec_path}")
+
+    total_scenes = len(scenes)
+    total_blocks = sum(len(sc.get("blocks", [])) for sc in scenes)
+
+    return {
+        "run_prefix": run_prefix,
+        "spec_path": spec_path,
+        "resolved_scenario_dict": resolved_scenario_dict,
+        "scenes": scenes,
+        "effective_vid": effective_vid,
+        "v_engine": v_engine,
+        "v_model": v_model,
+        "width": width,
+        "height": height,
+        "fps": fps,
+        "total_scenes": total_scenes,
+        "total_blocks": total_blocks,
+    }
+
+
+def execute_scenario_pipeline(
+    scenario_input: Any = None,
+    scenario_path: Optional[str] = None,
+    progress_callback: Optional[Any] = None,
+    image: Optional[Dict[str, Any]] = None,
+    video: Optional[Dict[str, Any]] = None,
+    request_overrides: Optional[Dict[str, Any]] = None,
+    prepared_pipeline_data: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """
+    Executes a multi-scene video scenario using polymorphic generator dispatch and 5D Latent-Chaining.
+    Supports base loading via scenario_path, top-level 'image' and 'video' structured parameters and Deep Merge.
+    Can accept pre-validated prepared_pipeline_data from prepare_scenario_pipeline.
+    """
+    if prepared_pipeline_data:
+        prep = prepared_pipeline_data
+    else:
+        prep = prepare_scenario_pipeline(
+            scenario_input=scenario_input,
+            scenario_path=scenario_path,
+            image=image,
+            video=video,
+            request_overrides=request_overrides
+        )
+
+    run_prefix = prep["run_prefix"]
+    spec_path = prep["spec_path"]
+    resolved_scenario_dict = prep["resolved_scenario_dict"]
+    scenes = prep["scenes"]
+    effective_vid = prep["effective_vid"]
+    v_engine = prep["v_engine"]
+    v_model = prep["v_model"]
+    width = prep["width"]
+    height = prep["height"]
+    fps = prep["fps"]
+    total_scenes = prep["total_scenes"]
+    total_blocks = prep["total_blocks"]
+
     log(
-        f"Executing scenario pipeline with {len(scenes)} scenes "
+        f"Executing scenario pipeline with {total_scenes} scenes "
         f"(run_id={run_prefix}, video_engine={v_engine}, model={v_model}, {width}x{height} @ {fps}fps)..."
     )
 
     all_block_cores: List[str] = []
     pipeline_warnings: List[str] = []
     first_poster_path: Optional[str] = None
-
-    total_scenes = len(scenes)
-    total_blocks = sum(len(sc.get("blocks", [])) for sc in scenes)
+    first_anchor_res_meta: Dict[str, Any] = {}
     processed_blocks = 0
 
     global _INTERRUPT_REQUESTED
@@ -537,6 +605,7 @@ def execute_scenario_pipeline(
 
             if s_idx == 0:
                 first_poster_path = anchor_img_path
+                first_anchor_res_meta = anchor_res_meta or {}
 
             next_tail_latent: Optional[str] = None
             next_tail_latent_count = 0
@@ -730,17 +799,6 @@ def execute_scenario_pipeline(
             poster_path = ffmpeg_engine.extract_poster(final_path, poster_path)
             poster_path = Path(poster_path).resolve().as_posix()
 
-        # Save resolved scenario spec artifact for replay/audit (preserving schema validity)
-        spec_filename = f"{run_prefix}-spec.json"
-        workflows_dir = Path(config.WORKFLOWS_DIR) if config.WORKFLOWS_DIR and Path(config.WORKFLOWS_DIR).is_dir() else out_vid_dir
-        spec_path = (workflows_dir / spec_filename).resolve().as_posix()
-        try:
-            with open(spec_path, "w", encoding="utf-8") as f:
-                json.dump(resolved_scenario_dict, f, indent=2, ensure_ascii=False)
-            log(f"Saved resolved scenario specification: {spec_path}")
-        except Exception as ex:
-            log(f"Warning: Failed to save resolved scenario spec to {spec_path}: {ex}")
-
         result_payload: Dict[str, Any] = {
             "run_prefix": run_prefix,
             "video_path": final_path,
@@ -751,12 +809,14 @@ def execute_scenario_pipeline(
             "height": height,
             "fps": fps,
             "scenes_count": len(scenes),
-            "blocks_count": total_blocks
+            "blocks_count": total_blocks,
+            "anchor_metadata": first_anchor_res_meta
         }
         if pipeline_warnings:
             result_payload["warnings"] = pipeline_warnings
         return result_payload
     finally:
+        _INTERRUPT_REQUESTED = False
         if comfy_client.is_interrupted():
             comfy_client.reset_interrupt()
         _PIPELINE_STATUS["is_running"] = False

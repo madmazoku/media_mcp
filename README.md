@@ -14,7 +14,7 @@
    - `src/mcp/media_mcp.py` — единый сервер MCP (Stdio + SSE `:7865`) с поддержкой Range-запросов (HTTP 206) для мгновенной перемотки видео в веб-интерфейсах.
    - `src/core/` — общее ядро с переиспользуемыми клиентами, генераторами, инспектором safetensors, валидатором JSON Schema и пайплайнами.
    - `schemas/` — единый каталог строгих схем **JSON Schema (Draft 2020-12)** для `config.json`, сценариев, спецификаций изображений и всех MCP-запросов и ответов (`additionalProperties: false`).
-2. **Канонический набор из 9 инструментов (8 пользовательских + 1 для разработчиков):**
+2. **Канонический набор из 10 инструментов (9 пользовательских + 1 для разработчиков):**
    - Единые инвариантные контракты входа и выхода для CLI, Stdio MCP и HTTP SSE.
    - Выделенный инструмент `media_reload_modules` для горячей перезагрузки модулей ядра в топологическом порядке зависимостей без перезапуска процесса сервера.
 3. **Единый пайплайн оптимального разрешения (~1.0 MP) для всех движков изображений:**
@@ -54,7 +54,8 @@ media_mcp/
 │   ├── requests/               # Схемы валидации входящих аргументов инструментов
 │   │   ├── image_generate.json
 │   │   ├── video_generate.json
-│   │   ├── video_validate.json
+│   │   ├── media_get_job.json
+│   │   ├── media_remove_job.json
 │   │   ├── media_get_models.json
 │   │   ├── media_get_samplers.json
 │   │   ├── media_get_loras.json
@@ -64,7 +65,8 @@ media_mcp/
 │   └── responses/              # Строгие схемы ответов инструментов (Response Schemas)
 │       ├── image_generate.json
 │       ├── video_generate.json
-│       ├── video_validate.json
+│       ├── media_get_job.json
+│       ├── media_remove_job.json
 │       ├── media_get_models.json
 │       ├── media_get_samplers.json
 │       ├── media_get_loras.json
@@ -100,7 +102,8 @@ media_mcp/
 │   ├── mcp_image_generate_inpaint.json
 │   ├── mcp_image_generate_outpaint.json
 │   ├── mcp_video_generate.json
-│   ├── mcp_video_validate.json
+│   ├── mcp_media_get_job.json
+│   ├── mcp_media_remove_job.json
 │   ├── mcp_media_get_models.json
 │   ├── mcp_media_get_samplers.json
 │   └── mcp_media_get_loras.json
@@ -147,11 +150,14 @@ media_mcp/
     - `denoise` *(number, 0.05..1.0, по умолчанию 0.65, для outpaint 0.85)*.
   - Сохраняет разрешённую спецификацию в `workflows/{run_prefix}-spec.json` и возвращает `run_prefix`, `image_path`, `spec_path`, `width`, `height`, `native_width`, `native_height` и опциональный массив `warnings`.
 - **`video_generate`** (`schemas/requests/video_generate.json`):
+  - Асинхронный запуск генерации: выполняет предварительную синхронную валидацию, сохраняет сценарий в `workflows/{run_prefix}-spec.json`, регистрирует задачу в очереди сервера и мгновенно возвращает `{"run_prefix": "...", "status": "queued", "spec_path": "..."}`.
   - Поддерживает `scenario_path` *(string)* и/или инлайн объект сценария (`video`, `image`, `scenes`).
   - Все технические параметры (`engine`, `model`, `width`, `height`, `fps`, `steps`, `cfg`, `guidance`, `sampler`, `seed`, `max_duration`, `ramp_latents`, `min_cfg`, `weight_dtype`) задаются строго в корневых секциях `.image` и `.video`.
-  - Сохраняет воспроизводимый сценарий в `workflows/{run_prefix}-spec.json` и возвращает `run_prefix`, `spec_path`, `video_path`, `poster_path`.
-- **`video_validate`** (`schemas/requests/video_validate.json`):
-  - Dry-run валидация сценария по схеме, пропорциям и законам таймингов (`max_duration`) без запуска рендеринга на GPU.
+  - Опциональный флаг `dry_run` *(boolean, по умолчанию `false`)*: при `true` выполняет мгновенную pre-flight валидацию, расчет хронометража и сохранение spec без постановки задачи на GPU (возвращает `status: "validated"`, `is_valid: true`, `total_duration`, `scenes_count`, `blocks_count`).
+- **`media_get_job`** (`schemas/requests/media_get_job.json`):
+  - Опрос статуса, прогресса и получение результатов задачи по `run_prefix`. Поддерживает блокирующее ожидание `wait` (0-55 сек). По завершении возвращает структурированные контейнеры `video` и `image` (постер).
+- **`media_remove_job`** (`schemas/requests/media_remove_job.json`):
+  - Отмена задачи в очереди или на GPU, либо удаление метаданных завершённой задачи из серверного реестра.
 
 ### 2. Инспекция и обнаружение моделей (Discovery)
 - **`media_get_models`** (`schemas/requests/media_get_models.json`):

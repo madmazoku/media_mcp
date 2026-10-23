@@ -61,7 +61,7 @@ output_dir/
 2. **Продвижение в постер (`poster.png`):**
    - После сборки финального ролика `videos/{run_prefix}-final.mp4` опорный кадр первой сцены автоматически копируется в чистовик:
      $$\texttt{temp/\{run\_prefix\}-s001-anchor.png} \longrightarrow \texttt{images/\{run\_prefix\}-poster.png}$$
-   - Путь к нему возвращается клиенту в поле `poster_path`.
+   - Путь к нему возвращается клиенту в объекте `image` (поле `image_path`) по завершении задачи через `media_get_job`.
 
 ---
 
