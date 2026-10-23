@@ -65,21 +65,21 @@
 
 ### А. Через Stdio MCP (AI-ассистент):
 Ассистент вызывает инструмент `video_generate` с JSON-телом сценария (или `scenario_path`).
-- Перед запуском рекомендуется вызывать `video_validate` для сухой проверки всех полей, таймингов и пропорций.
-- Результат возвращает: `video_path` (смонтированный MP4), `poster_path` (постер сцены 1), `spec_path` (зафиксированный JSON запуска).
+- Для сухой проверки всех полей, таймингов и пропорций без постановки на GPU передаётся флаг `dry_run: true`.
+- Асинхронный запуск возвращает: `run_prefix`, `status: "queued"`, `spec_path`. Статус и финальные `video_path` и `poster_path` запрашиваются через `media_get_job`.
 
 ### Б. Через командную строку (CLI):
 ```bash
-bin/cli.cmd --config path/to/config.json video_generate --payload examples/scenario.json
+bin/cli.cmd --config path/to/config.json video_generate examples/scenario.json
 ```
 Или передача JSON через стандартный поток ввода (stdin):
 ```bash
-cat examples/scenario.json | bin/cli.cmd --config path/to/config.json video_generate --stdin
+type examples\scenario.json | bin/cli.cmd --config path/to/config.json video_generate -
 ```
 
 ### В. Сухая валидация через CLI:
 ```bash
-bin/cli.cmd --config path/to/config.json video_validate --payload examples/scenario.json
+echo {"scenario_path": "examples/scenario.json", "dry_run": true} | bin/cli.cmd --config path/to/config.json video_generate -
 ```
 
 ---

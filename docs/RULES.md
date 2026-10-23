@@ -76,10 +76,12 @@ These rules govern the development, testing, and operation of the `media_mcp` pi
 
 ---
 
-## 7. Queue Preservation & GPU Mutex Lock
+## 7. Queue Preservation, Asynchronous Job Token Pipeline & GPU Mutex Lock
 - Generations must strictly queue up. **NEVER** implicitly abort or interrupt an active generation when a new generation is requested.
-- All generation calls (`execute_image_generate`, `execute_video_generate`) must be guarded by the server-wide `_GPU_LOCK` mutex to prevent concurrent VRAM allocation between ComfyUI and A1111.
-- Interruption is strictly manual and explicit via `media_interrupt`. Any interrupted pipeline or generator MUST reset the local interrupt flag in its `finally` block to allow queued jobs to proceed.
+- **Asynchronous Token Pipeline**: `video_generate` performs instant synchronous validation, registers the job into the bounded in-memory `JobManager` (capacity 1000 items), and immediately returns `{run_prefix, status: "queued", spec_path}`. For pre-flight validation without queueing or GPU allocation, `video_generate` accepts `dry_run: true` returning `{status: "validated", is_valid: true, total_duration, scenes_count, blocks_count}`.
+- All GPU diffusion execution runs sequentially under the server-wide `_GPU_LOCK` mutex to prevent concurrent VRAM allocation between ComfyUI and A1111.
+- Job status, progress, timestamps, and final structured outputs are queried via `media_get_job(run_prefix, wait)`.
+- Cancellation is strictly explicit: `media_remove_job(run_prefix)` cancels in-flight GPU execution or purges completed metadata. Cluster-wide emergency stop is provided via `media_interrupt`. Interrupted pipelines MUST reset the local interrupt flag in their `finally` block to allow queued jobs to proceed.
 
 ---
 

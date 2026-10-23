@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "media_get_job.json",
+  "title": "Media Get Job Request Schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_prefix"
+  ],
+  "properties": {
+    "run_prefix": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-zA-Z0-9_-]+$",
+      "description": "Unique run prefix of the video generation job"
+    },
+    "wait": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 55,
+      "default": 0,
+      "description": "Maximum seconds to block waiting for job completion. Typical MCP client timeouts are 60s, so max is 55. 0 returns current status immediately."
+    }
+  }
+}

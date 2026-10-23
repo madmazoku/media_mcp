@@ -23,15 +23,16 @@ def get_launcher_cmd() -> str:
 
 
 TOOL_DESCRIPTIONS: Dict[str, str] = {
-    "image_generate": "Generate high-quality images via SDXL/Pony (Automatic1111) or FLUX.1/FLUX.2 (ComfyUI).",
-    "video_generate": "Generate sequential multi-block videos using Wan 2.2 or LTX with True Forced Prefix Conditioning.",
-    "video_validate": "Dry-run validation of video scenario structure, timings, and aspect ratios without GPU rendering.",
-    "media_get_models": "Inspect invariant model tree across image and video backends with optional filtering.",
-    "media_get_samplers": "Query supported and recommended samplers for a specific engine and model.",
-    "media_get_loras": "Query compatible LoRAs and extracted activation trigger words for an engine and model.",
-    "media_get_status": "Check backend online availability, GPU render queues, and active pipeline progress.",
-    "media_interrupt": "Send emergency interrupt signals to abort active generations across all backends.",
-    "media_reload_modules": "Developer tool: hot-reload core python modules in memory without restarting servers.",
+    "image_generate": "Generate high-quality images via SDXL/Pony (Automatic1111) or FLUX.1/FLUX.2 (ComfyUI) using a unified image_spec dictionary.",
+    "video_generate": "Generate multi-scene or single-block videos asynchronously using Wan 2.2 Fast (wan-fast), Wan 2.2 Full (wan-full), or LTX-Video (ltx) with 5D Latent-Chaining. Synchronously validates and returns run_prefix immediately.",
+    "media_get_job": "Poll or retrieve the status, progress, and completed video/poster outputs of an asynchronous video generation job by run_prefix. Supports blocking wait.",
+    "media_remove_job": "Cancel a queued or active video generation job, or remove completed job metadata from the server registry.",
+    "media_get_models": "Inspect installed checkpoint and UNET models across image and video engines. Returns invariant tree structure filtered by type or engine.",
+    "media_get_samplers": "Get recommended and compatible samplers for a specific engine and model. Index 0 in returned list is the recommended default.",
+    "media_get_loras": "Inspect compatible LoRA models and their trained activation triggers for a specific engine and model. Supports optional 'pattern' filter.",
+    "media_get_status": "Check cluster health, GPU lock status, active job progress, and backend availability across ComfyUI and Automatic1111.",
+    "media_interrupt": "Emergency stop: interrupt and cancel currently running image and video generations across all engines.",
+    "media_reload_modules": "Developer tool: hot-reload all python modules under 'core' in memory on demand.",
 }
 
 TOOL_EXAMPLES_INPUT: Dict[str, Dict[str, Any]] = {
@@ -45,8 +46,12 @@ TOOL_EXAMPLES_INPUT: Dict[str, Dict[str, Any]] = {
     "video_generate": {
         "scenario_path": "examples/scenario.json"
     },
-    "video_validate": {
-        "scenario_path": "examples/scenario.json"
+    "media_get_job": {
+        "run_prefix": "20261023-205500-abc123",
+        "wait": 10
+    },
+    "media_remove_job": {
+        "run_prefix": "20261023-205500-abc123"
     },
     "media_get_models": {
         "type": "image",
@@ -80,30 +85,51 @@ TOOL_EXAMPLES_OUTPUT: Dict[str, Dict[str, Any]] = {
         "native_height": 768
     },
     "video_generate": {
-        "run_prefix": "20261017-002600-d4e5f6",
-        "video_path": "./workspace/videos/20261017-002600-d4e5f6-final.mp4",
-        "spec_path": "./workspace/workflows/20261017-002600-d4e5f6-spec.json",
-        "poster_path": "./workspace/images/20261017-002600-d4e5f6-poster.png",
-        "duration": 9.8,
-        "width": 832,
-        "height": 480,
-        "fps": 16,
-        "scenes_count": 1,
-        "blocks_count": 2
+        "run_prefix": "20261023-205500-abc123",
+        "status": "queued",
+        "spec_path": "./workspace/workflows/20261023-205500-abc123-spec.json"
     },
-    "video_validate": {
-        "is_valid": True,
-        "total_duration": 10.0,
-        "errors": [],
-        "warnings": [],
-        "scenes": [
-            {
-                "name": "Scene 1",
-                "blocks_count": 2,
-                "projected_duration": 10.0,
-                "anchor_type": "txt2img Prompt"
-            }
-        ]
+    "media_get_job": {
+        "run_prefix": "20261023-205500-abc123",
+        "status": "completed",
+        "spec_path": "./workspace/workflows/20261023-205500-abc123-spec.json",
+        "timestamps": {
+            "created_at": 1729700000.0,
+            "started_at": 1729700001.0,
+            "completed_at": 1729700065.0,
+            "elapsed_seconds": 64.0
+        },
+        "progress": {
+            "phase": "completed",
+            "percent": 100,
+            "scene_index": 1,
+            "total_scenes": 1,
+            "block_index": 2,
+            "total_blocks": 2,
+            "message": "Scenario video assembly completed successfully"
+        },
+        "video": {
+            "video_path": "./workspace/videos/20261023-205500-abc123-final.mp4",
+            "duration": 9.8,
+            "width": 832,
+            "height": 480,
+            "fps": 16,
+            "scenes_count": 1,
+            "blocks_count": 2
+        },
+        "image": {
+            "image_path": "./workspace/images/20261023-205500-abc123-poster.png",
+            "seed": 79192059900392,
+            "width": 832,
+            "height": 480,
+            "native_width": 1280,
+            "native_height": 720
+        }
+    },
+    "media_remove_job": {
+        "run_prefix": "20261023-205500-abc123",
+        "status": "removed",
+        "message": "Finished job '20261023-205500-abc123' (status was: completed) was removed from registry."
     },
     "media_get_models": {
         "image": {
@@ -148,8 +174,13 @@ TOOL_CONSTRAINTS: Dict[str, List[str]] = {
         "Technical parameters ('engine', 'model', 'steps', 'cfg', 'seed', 'ramp_latents', 'min_cfg', 'weight_dtype') must be placed in root '.image' and '.video' sections.",
         "Multi-block scenes require sequential duration constraints (prefix_duration + clip_duration < max_video_duration)."
     ],
-    "video_validate": [
-        "Dry-run offline validation: executes full timing and aspect ratio math without contacting GPU backends."
+    "media_get_job": [
+        "Parameter 'run_prefix' is REQUIRED.",
+        "Parameter 'wait' is optional integer seconds (0-600) to block awaiting completion."
+    ],
+    "media_remove_job": [
+        "Parameter 'run_prefix' is REQUIRED.",
+        "Cancels in-flight GPU execution if active, or purges completed job metadata."
     ],
     "media_get_models": [
         "Filter 'type' allows: 'image' or 'video'.",

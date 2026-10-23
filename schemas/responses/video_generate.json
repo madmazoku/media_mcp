@@ -6,63 +6,48 @@
   "additionalProperties": false,
   "required": [
     "run_prefix",
-    "video_path",
-    "poster_path",
-    "spec_path",
-    "duration",
-    "width",
-    "height",
-    "fps",
-    "scenes_count",
-    "blocks_count"
+    "status",
+    "spec_path"
   ],
   "properties": {
     "run_prefix": {
       "type": "string",
-      "description": "Unique run prefix (YYYYMMDD-HHMMSS-{hash})"
+      "description": "Unique run prefix (YYYYMMDD-HHMMSS-{hash6})"
     },
-    "video_path": {
+    "status": {
       "type": "string",
-      "description": "Absolute path to the final assembled video file (.mp4)"
-    },
-    "poster_path": {
-      "type": "string",
-      "description": "Absolute path to the video poster / first keyframe image file (.png)"
+      "enum": [
+        "queued",
+        "validated"
+      ],
+      "description": "Initial state of the submitted video generation job or pre-flight validation status"
     },
     "spec_path": {
       "type": "string",
-      "description": "Absolute path to the resolved scenario specification file (.json)"
+      "description": "Absolute POSIX path to the resolved scenario specification file (.json)"
     },
-    "duration": {
+    "is_valid": {
+      "type": "boolean",
+      "description": "Whether scenario pre-flight validation passed (present when dry_run=true)"
+    },
+    "total_duration": {
       "type": "number",
-      "description": "Total video duration in seconds"
-    },
-    "width": {
-      "type": "integer",
-      "description": "Video frame width in pixels"
-    },
-    "height": {
-      "type": "integer",
-      "description": "Video frame height in pixels"
-    },
-    "fps": {
-      "type": "integer",
-      "description": "Video frame rate (fps)"
+      "description": "Calculated total duration of the scenario in seconds (present when dry_run=true)"
     },
     "scenes_count": {
       "type": "integer",
-      "description": "Number of montage scenes rendered"
+      "description": "Total number of scenes in scenario (present when dry_run=true)"
     },
     "blocks_count": {
       "type": "integer",
-      "description": "Total number of continuous motion blocks rendered"
+      "description": "Total number of continuous motion blocks across scenes (present when dry_run=true)"
     },
     "warnings": {
       "type": "array",
       "items": {
         "type": "string"
       },
-      "description": "Optional non-fatal warnings collected during anchor image or video generation"
+      "description": "Optional non-fatal warnings collected during dry-run validation"
     }
   }
 }

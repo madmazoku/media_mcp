@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Unified Media MCP Server for media_mcp.
-Single production-grade server combining Image and Video generation into a canonical 9-tool suite.
+Single production-grade server combining Image and Video generation into a canonical 10-tool suite.
 Supports Stdio (Antigravity / Claude / Cursor) and SSE HTTP (Open-WebUI).
 """
 
@@ -26,7 +26,6 @@ if str(SRC_DIR) not in sys.path:
 from core import config
 from core.tools import (
     execute_tool,
-    CANONICAL_TOOLS,
     get_tools_list,
     reload_core_modules,
 )
@@ -99,16 +98,6 @@ def broadcast_mcp_progress(message: str, progress: Optional[float] = None, total
                 q.put_nowait(progress_notif)
         except Exception:
             pass
-
-
-# ---------------------------------------------------------------------------
-# Tool Handlers Registry (Delegated to core.tools)
-# ---------------------------------------------------------------------------
-
-TOOL_HANDLERS = {
-    name: (lambda args, name=name: execute_tool(name, args, progress_callback=broadcast_mcp_progress))
-    for name in CANONICAL_TOOLS
-}
 
 
 def handle_jsonrpc(req: dict) -> Optional[dict]:

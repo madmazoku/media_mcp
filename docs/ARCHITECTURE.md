@@ -9,7 +9,7 @@
 Сервер `media_mcp` объединяет генерацию изображений (через Automatic1111 и ComfyUI) и сценарный видеопайплайн (на базе Wan 2.2 и LTX-Video) в единую, строгую систему:
 1. **Единая инфраструктура:** общие клиенты A1111/ComfyUI с пулингом соединений, инспектор `.safetensors`, логика путей и строгая валидация JSON Schema.
 2. **Исключение коллизий ресурсов (VRAM Contention):** межпоточный мьютекс `_GPU_LOCK` гарантирует последовательное выполнение тяжёлых генераций в A1111 и ComfyUI, предотвращая `CUDA Out of Memory`.
-3. **Единый набор инструментов для LLM-агентов:** 9 канонических инструментов с инвариантными контрактами входа и выхода.
+3. **Единый набор инструментов для LLM-агентов:** 10 канонических инструментов с инвариантными контрактами входа и выхода.
 
 ```mermaid
 flowchart TD
@@ -96,7 +96,8 @@ schemas/
 ├── requests/                       # Контракты входных параметров инструментов
 │   ├── image_generate.json
 │   ├── video_generate.json
-│   ├── video_validate.json
+│   ├── media_get_job.json
+│   ├── media_remove_job.json
 │   ├── media_get_models.json
 │   ├── media_get_samplers.json
 │   ├── media_get_loras.json
@@ -106,7 +107,8 @@ schemas/
 └── responses/                      # Контракты выходных структур инструментов
     ├── image_generate.json
     ├── video_generate.json
-    ├── video_validate.json
+    ├── media_get_job.json
+    ├── media_remove_job.json
     ├── media_get_models.json
     ├── media_get_samplers.json
     ├── media_get_loras.json
@@ -127,10 +129,10 @@ bin/cli.cmd <tool_name> --help
 ## 5. Контракт структурированного вывода (Zero Base64 Payload)
 
 Инструменты возвращают **только строгие структурированные метаданные и абсолютные POSIX-пути к файлам на диске**:
-- `image_path`: путь к чистовому сгенерированному изображению.
-- `video_path`: путь к смонтированному видеоролику.
-- `poster_path`: путь к чистовому постеру (опорному кадру сцены 1).
-- `spec_path`: путь к сохранённому файлу воспроизводимой JSON-спецификации.
+- `image_path`: путь к чистовому сгенерированному изображению (в ответе `image_generate` и `media_get_job.image`).
+- `video_path`: путь к смонтированному видеоролику (в ответе `media_get_job.video`).
+- `poster_path`: путь к чистовому постеру (опорному кадру сцены 1, в ответе `media_get_job.image.image_path`).
+- `spec_path`: путь к сохранённому файлу воспроизводимой JSON-спецификации (в ответе `image_generate`, `video_generate` и `media_get_job`).
 
 ---
 
@@ -139,8 +141,9 @@ bin/cli.cmd <tool_name> --help
 | Инструмент | Назначение | Ключевые параметры | Особенности |
 | :--- | :--- | :--- | :--- |
 | `image_generate` | Синтез изображений (txt2img, img2img, inpaint, outpaint). | `engine` (`sdxl`, `flux1`, `flux2`), `model`, `prompt`, `image_path`, `mask_path`, `fit` (`crop`, `outpaint`), `loras`. | Генерация в оптимальном ~1.0 MP (`native_width` x `native_height`) + Lanczos post-resize + `warnings`. |
-| `video_generate` | Рендеринг сценарных видеороликов. | `video` (`engine`: `wan-fast`, `wan-full`, `ltx`; `model`), `image`, `scenes`. | 5D латентное префиксное кондиционирование, 1-frame I2V, FFmpeg `-c copy`. |
-| `video_validate` | Сухая валидация сценария перед запуском. | Входные параметры аналогичны `video_generate`. | Проверяет схему, тайминги (лимиты окон диффузии движков) и пропорции кадров без запуска GPU. |
+| `video_generate` | Асинхронный запуск рендеринга видео. | `video` (`engine`: `wan-fast`, `wan-full`, `ltx`; `model`), `image`, `scenes`, `dry_run`. | Выполняет быструю синхронную валидацию, регистрирует задачу в JobManager и мгновенно возвращает `run_prefix`. Рендеринг идёт в фоновом воркере под `_GPU_LOCK`. При `dry_run: true` валидирует сценарий без постановки в очередь. |
+| `media_get_job` | Проверка статуса и прогресса задачи. | `run_prefix` (обязателен), `wait` (опционально, 0..55 сек). | Позволяет поллить прогресс или блокирующе ждать завершения. Возвращает строго типизированные контейнеры `video` и `image` по завершении. |
+| `media_remove_job` | Отмена задачи или удаление из реестра. | `run_prefix` (обязателен). | Отменяет ожидающую задачу, прерывает генерацию на GPU при активном рендере или очищает метаданные завершённой задачи. |
 | `media_get_models` | Инспекция доступных чекпоинтов и бандлов. | `engine` (опционально), `type` (`image` или `video`, опционально). | Инвариантная структура `{"image": {...}, "video": {...}}` с группировкой бандлов Wan 2.2. |
 | `media_get_samplers`| Получение поддерживаемых сэмплеров. | `engine`, `model` (обязательны). | Возвращает список `samplers`, где индекс `[0]` — рекомендуемый по умолчанию. |
 | `media_get_loras` | Каталог совместимых LoRA с триггерами. | `engine`, `model` (обязательны), `pattern` (опционально). | Фильтрует LoRA по архитектуре `.safetensors` и regex-шаблону по имени и триггерам. |

@@ -10,6 +10,11 @@
     { "required": ["video", "scenes"] }
   ],
   "properties": {
+    "dry_run": {
+      "type": "boolean",
+      "default": false,
+      "description": "If true, validates scenario configuration, calculates durations, and writes spec without queueing GPU job."
+    },
     "scenario_path": {
       "type": "string",
       "minLength": 1,

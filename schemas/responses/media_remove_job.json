@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "media_remove_job.json",
+  "title": "Media Remove Job Response Schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_prefix",
+    "status",
+    "message"
+  ],
+  "properties": {
+    "run_prefix": {
+      "type": "string",
+      "description": "Unique run prefix of the targeted job"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "cancelled",
+        "removed",
+        "not_found"
+      ],
+      "description": "Resulting state of the removal/cancellation operation"
+    },
+    "message": {
+      "type": "string",
+      "description": "Human-readable explanation of the action taken"
+    }
+  }
+}

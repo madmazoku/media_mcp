@@ -159,39 +159,59 @@ $$\text{block\_negative} = \text{video.negative\_prompt} + \text{", "} + \text{b
 Все MCP-запросы валидируются по схемам в `schemas/requests/<tool>.json`.
 
 ### `video_generate` (`schemas/requests/video_generate.json`)
-Запуск генерации видео по сценарию.
+Асинхронный запуск генерации видео по сценарию.
+Выполняет быструю синхронную валидацию, сохраняет разрешённый JSON-сценарий в `workflows/{run_prefix}-spec.json`, регистрирует задачу в очереди сервера и немедленно возвращает `{"run_prefix": "...", "status": "queued", "spec_path": "..."}`.
 Принимает `scenario_path` *(string)* и/или инлайн объект сценария (`scenes`, `image`, `video`, `name`).
-Если передан `scenario_path`, сервер загружает базовый JSON-файл и накладывает оверлей переданных параметров (глубокий мердж для объектов, замена для списков). Ключ `scenario_path` немедленно извлекается и удаляется из результирующего словаря, предотвращая утечки и рекурсию.
-Каждый запуск сохраняет итоговый разрешённый JSON-сценарий в `workflows/{run_prefix}-spec.json` и возвращает `run_prefix` и `spec_path` в ответе.
 
 | Аргумент | Тип | По умолчанию | Описание |
 |---|---|---|---|
-| `scenario_path` | `string` | — | Путь к базовому JSON-файлу сценария на диске. |
+| `scenario_path` | `string` | — | Путь к базовому JSON-файлу сценария на диске. Поддерживает deep-merge с инлайн-полями. |
+| `dry_run` | `boolean` | `false` | При `true` выполняет мгновенную pre-flight валидацию и сохранение spec без очереди GPU (`status: "validated"`). |
 | `scenes` | `array` | — | Список сцен сценария. |
 | `image` | `object` | — | Глобальные настройки опорного кадра (`engine`, `model`, `prompt`, `negative_prompt`, `width`, `height`, `steps`, `cfg`, `guidance`, `sampler`, `seed`, `loras`). |
 | `video` | `object` | — | Глобальные настройки видео (`engine`, `model`, `prompt`, `negative_prompt`, `width`, `height`, `fps`, `loras`). |
-| `enable_hud` | `boolean` | `false` | Сгенерировать отладочное видео `{run_prefix}-hud.mp4` с таймлайном блоков. |
 
-### `video_validate` (`schemas/requests/video_validate.json`)
-Предварительная сухая валидация сценария по схеме, проверка наличия файлов `image_path` и проверка законов таймингов. Принимает те же `scenario_path` и инлайн-структуры.
+При указании `scenario_path` совместно с инлайн-параметрами (`video`, `image`, `scenes`) базовый сценарий считывается с диска, а инлайн-поля накладываются через глубокое слияние (deep-merge), позволяя точечно переопределять промпты, сиды и параметры без дублирования всего файла.
+
+### `media_get_job` (`schemas/requests/media_get_job.json`)
+Проверка статуса, прогресса и получение результатов задачи.
+Принимает `run_prefix` *(string, обязателен)* и опциональный `wait` *(integer, 0..55 сек)*.
+- При `wait > 0` сервер блокирующе ожидает завершения задачи до истечения таймаута (в пределах типичных MCP-клиентских таймаутов ~60 сек).
+- По завершении (`status == "completed"`) возвращает строго типизированные контейнеры `video` (`video_path`, `duration`, `width`, `height`, `fps`) и `image` (`image_path` постера, `seed`, `native_width`, `native_height`).
+
+### `media_remove_job` (`schemas/requests/media_remove_job.json`)
+Отмена или удаление задачи по `run_prefix`.
+- Если задача ожидает в очереди: отменяет её, пропуская выполнение на GPU.
+- Если задача сейчас на GPU: посылает сигнал прерывания в ComfyUI/видеопайплайн и переводит статус в `cancelled`.
+- Если задача завершена (или была отменена): освобождает запись в памяти сервера (`status == "removed"`).
+
+### Стандартный протокол взаимодействия агента при генерации видео:
+1. **Запуск:** вызвать `video_generate(scenario_path=...)` и зафиксировать полученный `run_prefix`.
+2. **Ожидание:** в цикле вызывать `media_get_job(run_prefix=run_prefix, wait=30)` пока статус не перейдёт в терминальный (`completed`, `failed` или `cancelled`).
+3. **Публикация:** при `status == "completed"` отобразить постер из `job["image"]["image_path"]` и кликабельную ссылку на видео `job["video"]["video_path"]`.
+4. **Очистка:** вызвать `media_remove_job(run_prefix=run_prefix)` для освобождения слота задачи.
 
 ### Автономный CLI запуск (Standalone CLI)
-Все инструменты поддерживают прямой вызов через единый CLI runner с идентичной логикой обработки:
+Все инструменты поддерживают вызов через единый CLI runner:
 ```cmd
-cmd\cli.cmd [--config config.json] <tool_name> [request_path | -]
+bin\cli.cmd [--config config.json] <tool_name> [request_path | -]
 ```
+- Для `video_generate` CLI использует стратегию ожидания (`PollWaitJobStrategy`): отображает процент выполнения в `stderr`, выводит готовый JSON в `stdout` по завершении и очищает задачу из реестра перед выходом.
+- Для мгновенной сухой валидации сценария без GPU достаточно передать флаг `dry_run: true` (выводит `status: "validated"`, `total_duration` и завершается с кодом 0).
+- При нажатии `Ctrl+C` в режиме ожидания CLI перехватывает сигнал, отправляет явный запрос на прерывание в ComfyUI для освобождения VRAM, очищает задачу и завершается с кодом 130.
+
 Примеры:
 ```cmd
-cmd\cli.cmd video_validate examples/scenario.json
-cmd\cli.cmd --config config.json video_generate workflows/hermione_orbit.json
-echo {"scenario_path":"examples/scenario.json"} | cmd\cli.cmd video_validate -
+bin\cli.cmd --config config.json video_generate workflows/hermione_orbit.json
+type workflows\hermione_orbit.json | bin\cli.cmd --config config.json video_generate -
+echo {"scenario_path": "workflows/hermione_orbit.json", "dry_run": true} | bin\cli.cmd --config config.json video_generate -
 ```
 
 ### `media_get_models`, `media_get_samplers`, `media_get_loras`
-Инспекция чекпоинтов, сэмплеров и LoRA с триггерными словами. `media_get_loras` поддерживает опциональный `pattern` (регистронезависимый Python regex для поиска по имени LoRA или триггерам).
+Инспекция чекпоинтов, сэмплеров и LoRA с извлечением триггерных слов. `media_get_loras` поддерживает опциональный фильтр `pattern` (регистронезависимый регулярный фильтр Python regex).
 
 ### `media_get_status`, `media_interrupt`, `media_reload_modules`
-Управление статусом, прерывание и горячая перезагрузка модулей ядра без рестарта сервера.
+Управление статусом GPU-лока и очередей, аварийное прерывание и горячая перезагрузка модулей ядра без рестарта сервера.
 
 ---
 
@@ -203,9 +223,9 @@ echo {"scenario_path":"examples/scenario.json"} | cmd\cli.cmd video_validate -
    - Хвост блока: `-tail.latent` (при `overlap > 0`) или `-tail.png` (при `overlap == 0`)
    - Финальное видео сценария: `{run_prefix}-final.mp4`, постер: `{run_prefix}-final.png`, HUD: `{run_prefix}-hud.mp4`
 2. **Оформление в чате:**
-   - Отображать постер из `poster_path` (или скопированный в каталог сессии артефактов при необходимости), под ним давать кликабельную ссылку на `video_path`:
+   - Отображать постер из `job["image"]["image_path"]` (или скопированный в каталог сессии артефактов при необходимости), под ним давать кликабельную ссылку на `job["video"]["video_path"]`:
    ```markdown
-   ![Постер](file:///path/to/poster_path)
+   ![Постер](file:///path/to/poster_image_path)
 
    🎬 **[Смотреть видеоролик](file:///path/to/video_path)**
    ```

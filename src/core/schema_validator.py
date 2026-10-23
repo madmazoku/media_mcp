@@ -17,7 +17,8 @@ SCHEMAS_DIR = Path(__file__).resolve().parent.parent.parent / "schemas"
 MCP_TOOL_SCHEMA_MAP: Dict[str, str] = {
     "image_generate": "requests/image_generate.json",
     "video_generate": "requests/video_generate.json",
-    "video_validate": "requests/video_validate.json",
+    "media_get_job": "requests/media_get_job.json",
+    "media_remove_job": "requests/media_remove_job.json",
     "media_get_models": "requests/media_get_models.json",
     "media_get_samplers": "requests/media_get_samplers.json",
     "media_get_loras": "requests/media_get_loras.json",
@@ -29,7 +30,8 @@ MCP_TOOL_SCHEMA_MAP: Dict[str, str] = {
 MCP_RESPONSE_SCHEMA_MAP: Dict[str, str] = {
     "image_generate": "responses/image_generate.json",
     "video_generate": "responses/video_generate.json",
-    "video_validate": "responses/video_validate.json",
+    "media_get_job": "responses/media_get_job.json",
+    "media_remove_job": "responses/media_remove_job.json",
     "media_get_models": "responses/media_get_models.json",
     "media_get_samplers": "responses/media_get_samplers.json",
     "media_get_loras": "responses/media_get_loras.json",

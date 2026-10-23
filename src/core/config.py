@@ -18,9 +18,6 @@ from typing import Any, Dict, Optional
 
 from core.schema_validator import validate_config
 
-# Base repository directory
-REPO_DIR = Path(__file__).resolve().parent.parent.parent
-
 # 1. Resolve configuration JSON file path
 config_file_path: Optional[Path] = None
 

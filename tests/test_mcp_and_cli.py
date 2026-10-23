@@ -12,13 +12,15 @@ Covers:
 """
 
 import sys
+import json
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-SRC_DIR = Path(__file__).resolve().parent.parent / "src"
+REPO_DIR = Path(__file__).resolve().parent.parent
+SRC_DIR = REPO_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
@@ -58,7 +60,7 @@ class TestMcpServerAndCli(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 config.require_configured("Test operation")
 
-            res = execute_tool("video_validate", {"scenario_path": "examples/scenario.json"})
+            res = execute_tool("video_generate", {"scenario_path": "examples/scenario.json"})
             self.assertTrue(res.get("isError"))
             self.assertIn("requires an environment configuration file", res.get("error", ""))
         finally:
@@ -126,13 +128,13 @@ class TestMcpServerAndCli(unittest.TestCase):
             "id": 3,
             "method": "tools/call",
             "params": {
-                "name": "video_validate",
-                "arguments": {"scenario_path": "examples/scenario.json"},
+                "name": "media_get_status",
+                "arguments": {},
                 "_meta": {"progressToken": "tok-123"}
             }
         })
         self.assertIn("result", call_val)
-        self.assertTrue(call_val["result"]["is_valid"])
+        self.assertIn("pipeline", call_val["result"])
         self.assertIsNone(media_mcp._CURRENT_PROGRESS_TOKEN.get())
 
         # Invalid tools/call: isError must be inside result, NOT at top-level JSON-RPC envelope
@@ -172,21 +174,59 @@ class TestMcpServerAndCli(unittest.TestCase):
         self.assertIn("AVAILABLE TOOLS:", res_help.stdout)
 
         res_tool_help = subprocess.run(
-            [sys.executable, str(SRC_DIR / "cli.py"), "video_validate", "--help"],
+            [sys.executable, str(SRC_DIR / "cli.py"), "video_generate", "--help"],
             capture_output=True,
             text=True
         )
         self.assertEqual(res_tool_help.returncode, 0)
-        self.assertIn("TOOL: video_validate", res_tool_help.stdout)
+        self.assertIn("TOOL: video_generate", res_tool_help.stdout)
 
+        cfg_file = str(REPO_DIR / "examples" / "config.json")
         res_raw_json = subprocess.run(
-            [sys.executable, str(SRC_DIR / "cli.py"), "--config", "examples/config.json", "video_validate", '{"scenario_path": "x"}'],
+            [sys.executable, str(SRC_DIR / "cli.py"), "--config", cfg_file, "video_generate", '{"scenario_path": "x"}'],
             capture_output=True,
-            text=True
+            text=True,
+            cwd=str(REPO_DIR)
         )
         self.assertEqual(res_raw_json.returncode, 1)
         self.assertIn("Direct inline JSON strings are not accepted", res_raw_json.stderr)
 
+
+
+    def test_07_cli_tools_integrity_and_execution(self):
+        """Verify CLI_TOOLS symmetry check, direct command output, and dry_run validation via CLI."""
+        from cli import verify_cli_tools_integrity, CLI_TOOLS
+        verify_cli_tools_integrity()
+        self.assertEqual(len(CLI_TOOLS), 10)
+
+        cfg_file = str(REPO_DIR / "examples" / "config.json")
+        scen_file = str(REPO_DIR / "examples" / "scenario.json")
+
+        # 1. Direct command execution via CLI (media_get_status)
+        res_status = subprocess.run(
+            [sys.executable, str(SRC_DIR / "cli.py"), "--config", cfg_file, "media_get_status"],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_DIR)
+        )
+        self.assertEqual(res_status.returncode, 0, f"Stderr: {res_status.stderr}")
+        parsed_status = json.loads(res_status.stdout)
+        self.assertIn("report", parsed_status)
+
+        # 2. Dry-run pre-flight validation of video_generate via CLI stdin
+        dry_payload = {"scenario_path": scen_file, "dry_run": True}
+        res_dry = subprocess.run(
+            [sys.executable, str(SRC_DIR / "cli.py"), "--config", cfg_file, "video_generate", "-"],
+            input=json.dumps(dry_payload),
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_DIR)
+        )
+        self.assertEqual(res_dry.returncode, 0, f"Stderr: {res_dry.stderr}")
+        parsed_dry = json.loads(res_dry.stdout)
+        self.assertEqual(parsed_dry["status"], "validated")
+        self.assertTrue(parsed_dry["is_valid"])
+        self.assertTrue(bool(parsed_dry["run_prefix"]))
 
 if __name__ == "__main__":
     unittest.main()
