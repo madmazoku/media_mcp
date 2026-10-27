@@ -24,7 +24,7 @@ SRC_DIR = Path(__file__).resolve().parent.parent / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from core import config, video_pipeline, schema_validator
+from core import config, video_pipeline, schema_validator, image_engine
 from core.generators import create_video_generator, VideoRequest, GenerationResult
 from core.tools import execute_tool
 
@@ -402,6 +402,71 @@ class TestVideoPipeline(unittest.TestCase):
 
         self.assertTrue(torch.allclose(core_out_mean, torch.full_like(core_out_mean, 1.5), atol=0.15))
         self.assertTrue(torch.allclose(core_out_std, torch.full_like(core_out_std, 0.5), atol=0.15))
+
+
+
+    def test_07_hierarchical_errors_and_promptless_anchor(self):
+        """Verify hierarchical error breadcrumbs and promptless anchor handling."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src_img = Path(tmp_dir) / "test_src.png"
+            Image.new("RGB", (1000, 1000), color=(100, 150, 200)).save(src_img)
+
+            # 1. Passive crop adaptation without prompt
+            ok, out_p, _, meta = image_engine.generate_image({
+                "engine": "sdxl",
+                "model": "ponyDiffusionV6XL.safetensors",
+                "image_path": str(src_img),
+                "fit": "crop",
+                "width": 832,
+                "height": 480
+            })
+            self.assertTrue(ok)
+            self.assertTrue(meta.get("passive_crop"))
+            self.assertEqual((meta["width"], meta["height"]), (832, 480))
+            with Image.open(out_p) as im:
+                self.assertEqual(im.size, (832, 480))
+
+            # 2. Pre-flight check: missing prompt for pure txt2img anchor fails synchronously
+            no_prompt_scen = {
+                "name": "No Prompt Scenario",
+                "video": {
+                    "engine": "wan-fast",
+                    "model": "wan2.2_i2v_14B_fp8_scaled.safetensors"
+                },
+                "scenes": [
+                    {
+                        "name": "Scene 1",
+                        "anchor_image": {},
+                        "blocks": [{"duration": 4.0, "motion_prompt": "dance"}]
+                    }
+                ]
+            }
+            res_no_prompt = execute_tool("video_generate", no_prompt_scen)
+            self.assertTrue(res_no_prompt.get("isError"))
+            err = res_no_prompt.get("error", "")
+            self.assertIn("failed scenario 'No Prompt Scenario'", err)
+            self.assertIn("scene #1 ('Scene 1'): failed anchor_image: Prompt is required", err)
+
+            # 3. Pre-flight check: missing file even when fit='crop' is specified fails synchronously
+            missing_file_scen = {
+                "name": "Missing File Scenario",
+                "video": {
+                    "engine": "wan-fast",
+                    "model": "wan2.2_i2v_14B_fp8_scaled.safetensors"
+                },
+                "scenes": [
+                    {
+                        "name": "Scene 1",
+                        "anchor_image": {"image_path": "non_existent_img.png", "fit": "crop"},
+                        "blocks": [{"duration": 4.0, "motion_prompt": "dance"}]
+                    }
+                ]
+            }
+            res_missing_file = execute_tool("video_generate", missing_file_scen)
+            self.assertTrue(res_missing_file.get("isError"))
+            err_mf = res_missing_file.get("error", "")
+            self.assertIn("failed scenario 'Missing File Scenario'", err_mf)
+            self.assertIn("scene #1 ('Scene 1'): failed anchor_image: Anchor image file not found on disk: non_existent_img.png", err_mf)
 
 
 if __name__ == "__main__":

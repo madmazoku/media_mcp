@@ -5,12 +5,11 @@
   "description": "Generate high-quality images via SDXL/Pony (Automatic1111) or FLUX.1/FLUX.2 (ComfyUI).",
   "type": "object",
   "additionalProperties": false,
-  "required": ["engine", "model", "prompt"],
+  "required": ["engine", "model"],
   "properties": {
     "prompt": {
       "type": "string",
-      "minLength": 1,
-      "description": "Visual prompt text describing the scene"
+      "description": "Visual prompt text describing the scene (required for txt2img, optional for img2img)"
     },
     "negative_prompt": {
       "type": "string",
@@ -94,6 +93,12 @@
     }
   },
   "allOf": [
+    {
+      "anyOf": [
+        { "required": ["prompt"] },
+        { "required": ["image_path"] }
+      ]
+    },
     {
       "if": {
         "required": ["fit"]
