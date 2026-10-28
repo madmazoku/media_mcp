@@ -325,13 +325,13 @@ def collect_scenario_timing_errors(scenes: List[Dict[str, Any]], default_engine:
 
             if overlap_duration >= clip_duration:
                 errors.append(
-                    f"[{sc_name} : {b_name}] Invalid overlap: overlap_duration ({overlap_duration}s) >= "
+                    f"scene #{s_idx + 1} ('{sc_name}'): block #{b_idx + 1} ('{b_name}'): failed video: Invalid overlap: overlap_duration ({overlap_duration}s) >= "
                     f"clip_duration ({clip_duration}s). Condition 'overlap_duration < clip_duration' is required."
                 )
 
             if prefix_duration + clip_duration >= limit:
                 errors.append(
-                    f"[{sc_name} : {b_name}] Generation window exceeded: prefix_duration ({prefix_duration}s) + "
+                    f"scene #{s_idx + 1} ('{sc_name}'): block #{b_idx + 1} ('{b_name}'): failed video: Generation window exceeded: prefix_duration ({prefix_duration}s) + "
                     f"clip_duration ({clip_duration}s) = {prefix_duration + clip_duration:.2f}s >= "
                     f"engine limit ({limit}s for engine '{b_engine}'). Condition 'prefix_duration + clip_duration < engine limit' is required."
                 )
@@ -345,8 +345,10 @@ def collect_scenario_aspect_ratio_errors(
     tolerance: float = 0.05
 ) -> List[str]:
     """
-    Validates that anchor images (keyframe_path, image_path, or explicit txt2img resolution)
-    have an aspect ratio matching the target video resolution within the given tolerance (default 5%).
+    Validates anchor keyframes for each scene:
+    1. Existence of keyframe_path / image_path on disk (always checked, even if fit is set).
+    2. Aspect ratio matching target video resolution within tolerance (checked when fit is not set).
+    3. Mandatory prompt when neither keyframe_path nor image_path is specified (pure txt2img).
     """
     from PIL import Image
     errors: List[str] = []
@@ -358,10 +360,9 @@ def collect_scenario_aspect_ratio_errors(
     for s_idx, sc in enumerate(scenes):
         sc_name = sc.get("scene_name") or sc.get("name", f"Scene #{s_idx + 1}")
         anchor = sc.get("anchor_image", {})
-        if anchor.get("fit"):
-            continue
-
+        fit_mode = anchor.get("fit")
         img_ref = anchor.get("keyframe_path") or anchor.get("image_path")
+
         if img_ref:
             p = Path(img_ref)
             if not p.is_file():
@@ -371,25 +372,33 @@ def collect_scenario_aspect_ratio_errors(
                         p = cand
                         break
             if p.is_file():
-                try:
-                    with Image.open(p) as img:
-                        w, h = img.size
-                    if w > 0 and h > 0:
-                        ar_img = w / h
-                        diff_pct = abs(ar_img - ar_vid) / ar_vid
-                        if diff_pct > tolerance:
-                            errors.append(
-                                f"[{sc_name}] Aspect ratio mismatch: anchor image '{img_ref}' has resolution {w}x{h} "
-                                f"(aspect ratio {ar_img:.2f}), but target video is {video_width}x{video_height} "
-                                f"(aspect ratio {ar_vid:.2f}, difference {diff_pct * 100:.1f}% > {tolerance * 100:.1f}%). "
-                                f"Anchor image aspect ratio must match video aspect ratio to prevent distortion."
-                            )
-                except Exception as ex:
-                    errors.append(f"[{sc_name}] Failed to inspect anchor image '{img_ref}': {ex}")
+                if not fit_mode:
+                    try:
+                        with Image.open(p) as img:
+                            w, h = img.size
+                        if w > 0 and h > 0:
+                            ar_img = w / h
+                            diff_pct = abs(ar_img - ar_vid) / ar_vid
+                            if diff_pct > tolerance:
+                                errors.append(
+                                    f"scene #{s_idx + 1} ('{sc_name}'): failed anchor_image: Aspect ratio mismatch: "
+                                    f"anchor image '{img_ref}' has resolution {w}x{h} (aspect ratio {ar_img:.2f}), "
+                                    f"but target video is {video_width}x{video_height} (aspect ratio {ar_vid:.2f}, "
+                                    f"difference {diff_pct * 100:.1f}% > {tolerance * 100:.1f}%). "
+                                    f"Anchor image aspect ratio must match video aspect ratio to prevent distortion."
+                                )
+                    except Exception as ex:
+                        errors.append(f"scene #{s_idx + 1} ('{sc_name}'): failed anchor_image: Failed to inspect anchor image '{img_ref}': {ex}")
             else:
-                errors.append(f"[{sc_name}] Anchor image file not found on disk: {img_ref}")
+                errors.append(f"scene #{s_idx + 1} ('{sc_name}'): failed anchor_image: Anchor image file not found on disk: {img_ref}")
 
-        elif anchor.get("width") and anchor.get("height"):
+        elif not anchor.get("prompt"):
+            errors.append(
+                f"scene #{s_idx + 1} ('{sc_name}'): failed anchor_image: Prompt is required for anchor image "
+                f"generation when neither keyframe_path nor image_path is specified."
+            )
+
+        elif anchor.get("width") and anchor.get("height") and not fit_mode:
             w = int(anchor["width"])
             h = int(anchor["height"])
             if w > 0 and h > 0:
@@ -397,9 +406,9 @@ def collect_scenario_aspect_ratio_errors(
                 diff_pct = abs(ar_img - ar_vid) / ar_vid
                 if diff_pct > tolerance:
                     errors.append(
-                        f"[{sc_name}] Aspect ratio mismatch: anchor resolution {w}x{h} (aspect ratio {ar_img:.2f}) "
-                        f"does not match target video {video_width}x{video_height} (aspect ratio {ar_vid:.2f}, "
-                        f"difference {diff_pct * 100:.1f}% > {tolerance * 100:.1f}%)."
+                        f"scene #{s_idx + 1} ('{sc_name}'): failed anchor_image: Aspect ratio mismatch: "
+                        f"anchor resolution {w}x{h} (aspect ratio {ar_img:.2f}) does not match target video "
+                        f"{video_width}x{video_height} (aspect ratio {ar_vid:.2f}, difference {diff_pct * 100:.1f}% > {tolerance * 100:.1f}%)."
                     )
 
     return errors
@@ -462,7 +471,8 @@ def prepare_scenario_pipeline(
     ar_errors = collect_scenario_aspect_ratio_errors(scenes, video_width=width, video_height=height)
     combined_errors = timing_errors + ar_errors
     if combined_errors:
-        raise ValueError("; ".join(combined_errors))
+        scen_title = resolved_scenario_dict.get("name") or (Path(scenario_path).stem if scenario_path else "untitled")
+        raise ValueError(f"failed scenario '{scen_title}': {'; '.join(combined_errors)}")
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     run_hash = uuid.uuid4().hex[:6]
@@ -569,205 +579,214 @@ def execute_scenario_pipeline(
             anchor_meta = dict(sc.get("anchor_image", {}))
             blocks = sc.get("blocks", [])
 
-            log("\n==========================================")
-            log(f"[{scene_name}] Preparing Scene Anchor Frame...")
-            log("==========================================")
+            try:
+                log("\n==========================================")
+                log(f"[{scene_name}] Preparing Scene Anchor Frame...")
+                log("==========================================")
 
-            _PIPELINE_STATUS["scene_index"] = scene_idx
-            _PIPELINE_STATUS["scene_name"] = scene_name
-            _PIPELINE_STATUS["phase"] = f"anchor_generation (Scene {scene_idx}/{total_scenes})"
-
-            notify_progress(
-                f"Scene {scene_idx}/{total_scenes} [{scene_name}]: Preparing anchor keyframe...",
-                progress=processed_blocks,
-                total=total_blocks,
-                cb=progress_callback
-            )
-
-            scene_anchor_prefix = f"{run_prefix}-s{scene_idx:03d}"
-            scene_anchor_filename = f"{scene_anchor_prefix}-anchor.png"
-            anchor_meta["run_prefix"] = scene_anchor_prefix
-            if not anchor_meta.get("custom_filename"):
-                anchor_meta["custom_filename"] = (temp_dir / scene_anchor_filename).resolve().as_posix()
-
-            ok, anchor_img_path, _, anchor_res_meta = img_engine_mod.generate_anchor_frame(
-                anchor_meta=anchor_meta,
-                width=width,
-                height=height
-            )
-            if not ok:
-                raise RuntimeError(f"Failed to obtain anchor keyframe for {scene_name}: {anchor_img_path}")
-
-            if isinstance(anchor_res_meta, dict) and anchor_res_meta.get("warnings"):
-                for w in anchor_res_meta["warnings"]:
-                    if w not in pipeline_warnings:
-                        pipeline_warnings.append(w)
-
-            if s_idx == 0:
-                first_poster_path = anchor_img_path
-                first_anchor_res_meta = anchor_res_meta or {}
-
-            next_tail_latent: Optional[str] = None
-            next_tail_latent_count = 0
-            next_tail_image: Optional[str] = None
-
-            for b_idx, blk in enumerate(blocks):
-                if is_interrupted():
-                    raise RuntimeError("Scenario execution was interrupted by user request.")
-
-                block_idx = b_idx + 1
-                b_name = blk.get("name", f"Block {block_idx}")
-                dur = float(blk.get("duration", 5.0))
-                is_last = (b_idx == len(blocks) - 1)
-                overlap = float(blk.get("overlap") or 0.0) if not is_last else 0.0
-
-                motion_prompt = blk["motion_prompt"]
-                b_neg = blk.get("negative_prompt") or ""
-                b_engine_raw = (blk.get("engine") or v_engine).lower()
-                b_model = blk.get("model") or v_model
-
-                b_settings = dict(effective_vid)
-                b_settings["model"] = b_model
-                if blk.get("loras"):
-                    b_settings["loras"] = blk["loras"]
-
-                generator = create_video_generator(b_engine_raw, settings=b_settings)
-                stride = int(getattr(generator, "temporal_stride", 4))
-
-                if b_engine_raw.startswith("wan") and dur > 5.5:
-                    log(
-                        f"Warning: [{scene_name} : {b_name}] Duration ({dur}s) exceeds Wan 2.2 native training horizon "
-                        f"(5.06s / 81 frames). Consider keeping blocks <= 5.0s for optimal image quality across chaining."
-                    )
-
-                block_prefix = f"{run_prefix}-s{scene_idx:03d}-b{block_idx:03d}"
-                out_core_name = f"{block_prefix}-core.mp4"
-
-                _PIPELINE_STATUS["block_index"] = block_idx
-                _PIPELINE_STATUS["block_name"] = b_name
-                _PIPELINE_STATUS["phase"] = f"{generator.name}_diffusion ({scene_name} - {b_name})"
+                _PIPELINE_STATUS["scene_index"] = scene_idx
+                _PIPELINE_STATUS["scene_name"] = scene_name
+                _PIPELINE_STATUS["phase"] = f"anchor_generation (Scene {scene_idx}/{total_scenes})"
 
                 notify_progress(
-                    f"Scene {scene_idx}/{total_scenes} [{scene_name}] - {b_name} ({dur}s): Diffusing {generator.name.upper()}...",
+                    f"Scene {scene_idx}/{total_scenes} [{scene_name}]: Preparing anchor keyframe...",
                     progress=processed_blocks,
                     total=total_blocks,
                     cb=progress_callback
                 )
 
-                blk_steps = blk.get("steps") or effective_vid.get("steps")
-                blk_cfg = blk.get("cfg") if blk.get("cfg") is not None else effective_vid.get("cfg")
-                blk_seed = blk.get("seed") if blk.get("seed") is not None else effective_vid.get("seed", -1)
-                blk_ramp = blk.get("ramp_latents") if blk.get("ramp_latents") is not None else effective_vid.get("ramp_latents", 3)
-                blk_min_cfg = blk.get("min_cfg") if blk.get("min_cfg") is not None else effective_vid.get("min_cfg", 1.0)
-                blk_weight_dtype = blk.get("weight_dtype") or effective_vid.get("weight_dtype")
+                scene_anchor_prefix = f"{run_prefix}-s{scene_idx:03d}"
+                scene_anchor_filename = f"{scene_anchor_prefix}-anchor.png"
+                anchor_meta["run_prefix"] = scene_anchor_prefix
+                if not anchor_meta.get("custom_filename"):
+                    anchor_meta["custom_filename"] = (temp_dir / scene_anchor_filename).resolve().as_posix()
 
-                # Calculate tail latents needed for the NEXT block from overlap duration
-                if not is_last and overlap > 0:
-                    overlap_pixels = max(1, int(round(overlap * fps)))
-                    k_tail_lat = max(2, math.ceil((overlap_pixels - 1) / stride) + 1)
-                    save_tail = True
-                    tail_frames = k_tail_lat
-                else:
-                    k_tail_lat = 0
-                    save_tail = False
-                    tail_frames = 0
-
-                if b_idx == 0:
-                    start_img = anchor_img_path
-                    pref_latent = None
-                    pref_pixel_frames = 0
-                    k_core = max(1, round(dur * fps / stride))
-                    core_frames = stride * k_core + 1
-                    num_frames = core_frames
-                elif next_tail_latent and Path(next_tail_latent).is_file():
-                    # Mode A: Pure 5D Latent prefix (previous block had overlap > 0)
-                    start_img = None
-                    pref_latent = next_tail_latent
-                    k_pref_lat = read_latent_temporal_frames(pref_latent, default=next_tail_latent_count)
-                    if k_pref_lat <= 0:
-                        k_pref_lat = max(2, next_tail_latent_count)
-                    log(f"Verified prefix latent temporal frames from header: latents={k_pref_lat}")
-
-                    pref_pixel_frames = (k_pref_lat - 1) * stride + 1
-                    k_core = max(1, round(dur * fps / stride))
-                    core_frames = stride * k_core
-                    num_frames = pref_pixel_frames + core_frames
-                elif next_tail_image and Path(next_tail_image).is_file():
-                    # Mode B: 1-frame Image Chaining (previous block had overlap == 0)
-                    start_img = next_tail_image
-                    pref_latent = None
-                    k_core = max(1, round(dur * fps / stride))
-                    pref_pixel_frames = 1
-                    core_frames = stride * k_core
-                    num_frames = stride * k_core + 1
-                    log(f"Configuring 1-frame I2V chaining from previous block: {Path(next_tail_image).name} (diffusing {num_frames} frames, slicing core 1..{core_frames})")
-                else:
-                    start_img = anchor_img_path
-                    pref_latent = None
-                    pref_pixel_frames = 0
-                    k_core = max(1, round(dur * fps / stride))
-                    core_frames = stride * k_core + 1
-                    num_frames = core_frames
-
-                log(f"\n[{scene_name} : {b_name}] Engine: {generator.name.upper()}, Duration: {dur}s, Overlap: {overlap}s")
-                log(f"Quantized frames (stride={stride}): total={num_frames}, prefix={pref_pixel_frames}, core={core_frames}, next_tail_latents={tail_frames}")
-                log(f"Motion prompt: '{motion_prompt[:60]}...'")
-
-                save_tail_image = (not is_last and overlap == 0)
-
-                req = VideoRequest(
-                    image_path=start_img,
-                    prefix_latent_path=pref_latent,
-                    prefix_frames=pref_pixel_frames,
-                    core_frames=core_frames,
-                    tail_frames=tail_frames,
-                    save_tail=save_tail,
-                    save_tail_image=save_tail_image,
-                    prompt=motion_prompt,
-                    negative_prompt=b_neg,
+                ok, anchor_img_path, _, anchor_res_meta = img_engine_mod.generate_anchor_frame(
+                    anchor_meta=anchor_meta,
                     width=width,
-                    height=height,
-                    num_frames=num_frames,
-                    fps=fps,
-                    steps=blk_steps,
-                    cfg=blk_cfg,
-                    seed=blk_seed,
-                    ramp_latents=int(blk_ramp),
-                    min_cfg=float(blk_min_cfg),
-                    weight_dtype=blk_weight_dtype,
-                    model=b_model,
-                    loras=blk.get("loras") or [],
-                    out_video_name=out_core_name,
-                    run_prefix=block_prefix,
-                    progress_callback=progress_callback
+                    height=height
                 )
-                res = generator.generate(req)
-                if not res.success or not res.file_path:
-                    raise RuntimeError(f"Block generation failed [{scene_name} : {b_name}]: {res.error}")
+                if not ok:
+                    raise RuntimeError(f"failed anchor_image: {anchor_img_path}")
 
-                if not is_last:
-                    if overlap > 0 and save_tail and res.tail_latent_path and Path(res.tail_latent_path).is_file():
-                        next_tail_latent = res.tail_latent_path
-                        next_tail_latent_count = k_tail_lat
-                        next_tail_image = None
-                        log(f"Captured tail latent for next block (overlap={overlap}s): {Path(next_tail_latent).name} ({k_tail_lat} latents)")
-                    elif res.tail_image_path and Path(res.tail_image_path).is_file():
-                        next_tail_latent = None
-                        next_tail_latent_count = 0
-                        next_tail_image = res.tail_image_path
-                        log(f"Received pristine workflow tail image for next block: {Path(next_tail_image).name}")
-                    else:
-                        next_tail_latent = None
-                        next_tail_latent_count = 0
-                        next_tail_image = None
-                else:
-                    next_tail_latent = None
-                    next_tail_latent_count = 0
-                    next_tail_image = None
+                if isinstance(anchor_res_meta, dict) and anchor_res_meta.get("warnings"):
+                    for w in anchor_res_meta["warnings"]:
+                        if w not in pipeline_warnings:
+                            pipeline_warnings.append(w)
 
-                processed_blocks += 1
-                _PIPELINE_STATUS["processed_blocks"] = processed_blocks
-                all_block_cores.append(res.file_path)
+                if s_idx == 0:
+                    first_poster_path = anchor_img_path
+                    first_anchor_res_meta = anchor_res_meta or {}
+
+                next_tail_latent: Optional[str] = None
+                next_tail_latent_count = 0
+                next_tail_image: Optional[str] = None
+
+                for b_idx, blk in enumerate(blocks):
+                    if is_interrupted():
+                        raise RuntimeError("Scenario execution was interrupted by user request.")
+
+                    block_idx = b_idx + 1
+                    b_name = blk.get("name", f"Block {block_idx}")
+
+                    try:
+                        dur = float(blk.get("duration", 5.0))
+                        is_last = (b_idx == len(blocks) - 1)
+                        overlap = float(blk.get("overlap") or 0.0) if not is_last else 0.0
+
+                        motion_prompt = blk["motion_prompt"]
+                        b_neg = blk.get("negative_prompt") or ""
+                        b_engine_raw = (blk.get("engine") or v_engine).lower()
+                        b_model = blk.get("model") or v_model
+
+                        b_settings = dict(effective_vid)
+                        b_settings["model"] = b_model
+                        if blk.get("loras"):
+                            b_settings["loras"] = blk["loras"]
+
+                        generator = create_video_generator(b_engine_raw, settings=b_settings)
+                        stride = int(getattr(generator, "temporal_stride", 4))
+
+                        if b_engine_raw.startswith("wan") and dur > 5.5:
+                            log(
+                                f"Warning: [{scene_name} : {b_name}] Duration ({dur}s) exceeds Wan 2.2 native training horizon "
+                                f"(5.06s / 81 frames). Consider keeping blocks <= 5.0s for optimal image quality across chaining."
+                            )
+
+                        block_prefix = f"{run_prefix}-s{scene_idx:03d}-b{block_idx:03d}"
+                        out_core_name = f"{block_prefix}-core.mp4"
+
+                        _PIPELINE_STATUS["block_index"] = block_idx
+                        _PIPELINE_STATUS["block_name"] = b_name
+                        _PIPELINE_STATUS["phase"] = f"{generator.name}_diffusion ({scene_name} - {b_name})"
+
+                        notify_progress(
+                            f"Scene {scene_idx}/{total_scenes} [{scene_name}] - {b_name} ({dur}s): Diffusing {generator.name.upper()}...",
+                            progress=processed_blocks,
+                            total=total_blocks,
+                            cb=progress_callback
+                        )
+
+                        blk_steps = blk.get("steps") or effective_vid.get("steps")
+                        blk_cfg = blk.get("cfg") if blk.get("cfg") is not None else effective_vid.get("cfg")
+                        blk_seed = blk.get("seed") if blk.get("seed") is not None else effective_vid.get("seed", -1)
+                        blk_ramp = blk.get("ramp_latents") if blk.get("ramp_latents") is not None else effective_vid.get("ramp_latents", 3)
+                        blk_min_cfg = blk.get("min_cfg") if blk.get("min_cfg") is not None else effective_vid.get("min_cfg", 1.0)
+                        blk_weight_dtype = blk.get("weight_dtype") or effective_vid.get("weight_dtype")
+
+                        if not is_last and overlap > 0:
+                            overlap_pixels = max(1, int(round(overlap * fps)))
+                            k_tail_lat = max(2, math.ceil((overlap_pixels - 1) / stride) + 1)
+                            save_tail = True
+                            tail_frames = k_tail_lat
+                        else:
+                            k_tail_lat = 0
+                            save_tail = False
+                            tail_frames = 0
+
+                        if b_idx == 0:
+                            start_img = anchor_img_path
+                            pref_latent = None
+                            pref_pixel_frames = 0
+                            k_core = max(1, round(dur * fps / stride))
+                            core_frames = stride * k_core + 1
+                            num_frames = core_frames
+                        elif next_tail_latent and Path(next_tail_latent).is_file():
+                            start_img = None
+                            pref_latent = next_tail_latent
+                            k_pref_lat = read_latent_temporal_frames(pref_latent, default=next_tail_latent_count)
+                            if k_pref_lat <= 0:
+                                k_pref_lat = max(2, next_tail_latent_count)
+                            log(f"Verified prefix latent temporal frames from header: latents={k_pref_lat}")
+                            pref_pixel_frames = (k_pref_lat - 1) * stride + 1
+                            k_core = max(1, round(dur * fps / stride))
+                            core_frames = stride * k_core
+                            num_frames = pref_pixel_frames + core_frames
+                        elif next_tail_image and Path(next_tail_image).is_file():
+                            start_img = next_tail_image
+                            pref_latent = None
+                            k_core = max(1, round(dur * fps / stride))
+                            pref_pixel_frames = 1
+                            core_frames = stride * k_core
+                            num_frames = stride * k_core + 1
+                            log(f"Configuring 1-frame I2V chaining from previous block: {Path(next_tail_image).name} (diffusing {num_frames} frames, slicing core 1..{core_frames})")
+                        else:
+                            start_img = anchor_img_path
+                            pref_latent = None
+                            pref_pixel_frames = 0
+                            k_core = max(1, round(dur * fps / stride))
+                            core_frames = stride * k_core + 1
+                            num_frames = core_frames
+
+                        log(f"\n[{scene_name} : {b_name}] Engine: {generator.name.upper()}, Duration: {dur}s, Overlap: {overlap}s")
+                        log(f"Quantized frames (stride={stride}): total={num_frames}, prefix={pref_pixel_frames}, core={core_frames}, next_tail_latents={tail_frames}")
+                        log(f"Motion prompt: '{motion_prompt[:60]}...'")
+
+                        save_tail_image = (not is_last and overlap == 0)
+
+                        req = VideoRequest(
+                            image_path=start_img,
+                            prefix_latent_path=pref_latent,
+                            prefix_frames=pref_pixel_frames,
+                            core_frames=core_frames,
+                            tail_frames=tail_frames,
+                            save_tail=save_tail,
+                            save_tail_image=save_tail_image,
+                            prompt=motion_prompt,
+                            negative_prompt=b_neg,
+                            width=width,
+                            height=height,
+                            num_frames=num_frames,
+                            fps=fps,
+                            steps=blk_steps,
+                            cfg=blk_cfg,
+                            seed=blk_seed,
+                            ramp_latents=int(blk_ramp),
+                            min_cfg=float(blk_min_cfg),
+                            weight_dtype=blk_weight_dtype,
+                            model=b_model,
+                            loras=blk.get("loras") or [],
+                            out_video_name=out_core_name,
+                            run_prefix=block_prefix,
+                            progress_callback=progress_callback
+                        )
+                        res = generator.generate(req)
+                        if not res.success or not res.file_path:
+                            raise RuntimeError(f"failed video: {res.error}")
+
+                        if not is_last:
+                            if overlap > 0 and save_tail and res.tail_latent_path and Path(res.tail_latent_path).is_file():
+                                next_tail_latent = res.tail_latent_path
+                                next_tail_latent_count = k_tail_lat
+                                next_tail_image = None
+                                log(f"Captured tail latent for next block (overlap={overlap}s): {Path(next_tail_latent).name} ({k_tail_lat} latents)")
+                            elif res.tail_image_path and Path(res.tail_image_path).is_file():
+                                next_tail_latent = None
+                                next_tail_latent_count = 0
+                                next_tail_image = res.tail_image_path
+                                log(f"Received pristine workflow tail image for next block: {Path(next_tail_image).name}")
+                            else:
+                                next_tail_latent = None
+                                next_tail_latent_count = 0
+                                next_tail_image = None
+                        else:
+                            next_tail_latent = None
+                            next_tail_latent_count = 0
+                            next_tail_image = None
+
+                        processed_blocks += 1
+                        _PIPELINE_STATUS["processed_blocks"] = processed_blocks
+                        all_block_cores.append(res.file_path)
+
+                    except Exception as b_ex:
+                        if is_interrupted() or "interrupted by user request" in str(b_ex):
+                            raise
+                        raise RuntimeError(f"block #{block_idx} ('{b_name}'): {b_ex}") from b_ex
+
+            except Exception as sc_ex:
+                if is_interrupted() or "interrupted by user request" in str(sc_ex):
+                    raise
+                raise RuntimeError(f"scene #{scene_idx} ('{scene_name}'): {sc_ex}") from sc_ex
 
         _PIPELINE_STATUS["phase"] = "ffmpeg_final_assembly"
         notify_progress(
@@ -777,15 +796,16 @@ def execute_scenario_pipeline(
             cb=progress_callback
         )
 
-        # Final movie assembly across all blocks in a single lossless Stream Copy (-c copy) pass
         final_name = f"{run_prefix}-final.mp4"
         out_vid_dir = Path(config.OUTPUT_VID_DIR) if config.OUTPUT_VID_DIR and Path(config.OUTPUT_VID_DIR).is_dir() else (temp_dir / "videos")
         out_vid_dir.mkdir(parents=True, exist_ok=True)
         final_path = (out_vid_dir / final_name).resolve().as_posix()
-        ffmpeg_engine.concat_videos(all_block_cores, final_path)
-        total_duration = ffmpeg_engine.get_duration(final_path)
+        try:
+            ffmpeg_engine.concat_videos(all_block_cores, final_path)
+            total_duration = ffmpeg_engine.get_duration(final_path)
+        except Exception as f_ex:
+            raise RuntimeError(f"failed assembly: {f_ex}") from f_ex
 
-        # Poster handling: prioritize pristine anchor keyframe from Scene 1
         poster_filename = f"{run_prefix}-poster.png"
         out_img_dir = Path(config.OUTPUT_IMG_DIR) if config.OUTPUT_IMG_DIR and Path(config.OUTPUT_IMG_DIR).is_dir() else (temp_dir / "images")
         out_img_dir.mkdir(parents=True, exist_ok=True)
@@ -815,6 +835,12 @@ def execute_scenario_pipeline(
         if pipeline_warnings:
             result_payload["warnings"] = pipeline_warnings
         return result_payload
+
+    except Exception as ex:
+        if is_interrupted() or "interrupted by user request" in str(ex):
+            raise
+        scen_title = resolved_scenario_dict.get("name") or (Path(scenario_path).stem if scenario_path else "untitled")
+        raise RuntimeError(f"failed scenario '{scen_title}': {ex}") from ex
     finally:
         _INTERRUPT_REQUESTED = False
         if comfy_client.is_interrupted():

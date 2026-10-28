@@ -147,8 +147,8 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
     from PIL import Image
 
     prompt = str(params.get("prompt") or "").strip()
-    if not prompt:
-        return False, None, None, {"error": "Parameter 'prompt' is required for image generation"}
+    if not prompt and not params.get("image_path"):
+        return False, None, None, {"error": "Parameter 'prompt' is required for image generation when 'image_path' is not specified"}
 
     raw_engine = str(params.get("engine") or "").strip().lower()
     if not raw_engine:
@@ -317,6 +317,47 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
                         cropped_mask.save(norm_mask_path, format="PNG")
                         prepared_mask_path = norm_mask_path.resolve().as_posix()
                         log(f"Cropped inpainting mask with fit='crop' to native {native_w}x{native_h}: {prepared_mask_path}")
+
+                    # Passive crop adaptation: if no prompt, no mask, and no explicit denoise in params,
+                    # we cleanly crop to target resolution without destructive empty-prompt diffusion
+                    if not prompt and user_mask_l is None and "denoise" not in params:
+                        log(f"Passive crop adaptation: saving cropped image without diffusion to {custom_fn}")
+                        out_p = Path(custom_fn) if Path(custom_fn).is_absolute() else (temp_dir / custom_fn)
+                        out_p.parent.mkdir(parents=True, exist_ok=True)
+                        if (native_w, native_h) != (target_w, target_h):
+                            final_im = cropped_im.resize((target_w, target_h), Image.Resampling.LANCZOS)
+                            final_im.save(out_p, format="PNG")
+                        else:
+                            cropped_im.save(out_p, format="PNG")
+
+                        resolved_spec = {k: v for k, v in params.items() if k not in ("custom_filename", "run_prefix")}
+                        resolved_spec["engine"] = engine_name
+                        resolved_spec["model"] = model
+                        resolved_spec["seed"] = seed
+                        resolved_spec["width"] = target_w
+                        resolved_spec["height"] = target_h
+                        resolved_spec["fit"] = fit_mode
+                        resolved_spec["image_path"] = original_source_path or source_img_path
+
+                        spec_filename = f"{run_prefix}-spec.json"
+                        workflows_dir = Path(config.WORKFLOWS_DIR) if config.WORKFLOWS_DIR and Path(config.WORKFLOWS_DIR).is_dir() else out_p.parent
+                        spec_path = (workflows_dir / spec_filename).resolve().as_posix()
+                        try:
+                            with open(spec_path, "w", encoding="utf-8") as sf:
+                                json.dump(resolved_spec, sf, indent=2, ensure_ascii=False)
+                        except Exception as ex:
+                            log(f"Warning: Failed to save image spec to {spec_path}: {ex}")
+
+                        return True, out_p.resolve().as_posix(), None, {
+                            "run_prefix": run_prefix,
+                            "spec_path": spec_path,
+                            "seed": seed,
+                            "width": target_w,
+                            "height": target_h,
+                            "native_width": native_w,
+                            "native_height": native_h,
+                            "passive_crop": True
+                        }
 
                 elif fit_mode == "outpaint":
                     scale = min(native_w / cur_w, native_h / cur_h)
@@ -506,8 +547,9 @@ def generate_anchor_frame(
         return False, f"Anchor keyframe_path not found on disk: {keyframe_path}", None, {}
 
     has_prompt = bool(anchor_meta.get("prompt", "").strip())
-    if not has_prompt:
-        return False, "Prompt is required for anchor image generation when keyframe_path is not specified", None, {}
+    has_image = bool(str(anchor_meta.get("image_path") or "").strip())
+    if not has_prompt and not has_image:
+        return False, "Prompt is required for anchor image generation when neither keyframe_path nor image_path is specified", None, {}
 
     gen_params = dict(anchor_meta)
     if not (gen_params.get("image_path") and not gen_params.get("fit")):

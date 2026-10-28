@@ -129,7 +129,8 @@ class TestJobManagerLifecycle(unittest.TestCase):
         res_fail = execute_tool("media_get_job", {"run_prefix": "JOB-FAIL"})
         self.assertFalse(res_fail.get("isError", False))
         self.assertEqual(res_fail["status"], "failed")
-        self.assertIn("CUDA out of memory", res_fail["error"])
+        self.assertEqual(res_fail["error"], "CUDA out of memory")
+        self.assertEqual(res_fail["progress"]["message"], "CUDA out of memory")
 
         # 3. Non-existent job
         res_nf = execute_tool("media_get_job", {"run_prefix": "JOB-NOPE"})

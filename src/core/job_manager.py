@@ -256,7 +256,7 @@ class JobManager:
                 job.elapsed_seconds = round(now - job.started_at, 2)
             job.error = str(error_message)
             job.progress["phase"] = "failed"
-            job.progress["message"] = f"Failed: {error_message}"
+            job.progress["message"] = str(error_message)
 
             if self._active_run_prefix == run_prefix:
                 self._active_run_prefix = None

@@ -120,6 +120,22 @@ class TestSchemasAndContracts(unittest.TestCase):
         with self.assertRaises(schema_validator.SchemaValidationError):
             schema_validator.validate_mcp_args("image_generate", missing_engine)
 
+        # Missing both prompt and image_path must fail
+        missing_both = {
+            "engine": "sdxl",
+            "model": "ponyDiffusionV6XL.safetensors"
+        }
+        with self.assertRaises(schema_validator.SchemaValidationError):
+            schema_validator.validate_mcp_args("image_generate", missing_both)
+
+        # Valid image_path without prompt passes schema validation
+        valid_no_prompt = {
+            "engine": "sdxl",
+            "model": "ponyDiffusionV6XL.safetensors",
+            "image_path": "src.png"
+        }
+        schema_validator.validate_mcp_args("image_generate", valid_no_prompt)
+
     def test_04_image_generate_conditional_constraints(self):
         """Verify conditional schema rules for image_path, mask_path, fit, width, height, and denoise."""
         base = {
