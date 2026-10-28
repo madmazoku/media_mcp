@@ -260,6 +260,12 @@ verify_cli_tools_integrity()
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    # 0. Global version invocation (no config required)
+    if args and args[0] in ("-v", "--version", "version"):
+        from core import __version__
+        print(f"media-mcp {__version__}")
+        return 0
+
     # 1. Global help invocation (no config required)
     if not args or args[0] in ("-h", "--help", "help"):
         print(schema_formatter.format_general_help())

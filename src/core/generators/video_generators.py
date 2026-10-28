@@ -292,6 +292,17 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
         }
 
         # Conditioning Setup
+        end_img_node = None
+        if request.end_image_path and Path(request.end_image_path).is_file():
+            end_fn = comfy_client.upload_file_to_comfy(
+                request.end_image_path,
+                run_prefix=prefix_str,
+                suffix="end"
+            )
+            wf["end_image"] = {"inputs": {"image": end_fn, "upload": "image"}, "class_type": "LoadImage"}
+            end_img_node = ["end_image", 0]
+            log(f"Configuring Wan end_image conditioning: {end_fn}")
+
         if request.prefix_latent_path and Path(request.prefix_latent_path).is_file():
             pref_filename = Path(request.prefix_latent_path).name
             prefix_fn = comfy_client.upload_file_to_comfy(
@@ -305,17 +316,20 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
                 "inputs": {"latent": prefix_fn},
                 "class_type": "LoadLatent"
             }
+            wan_cond_inputs = {
+                "positive": ["positive_cond", 0],
+                "negative": ["negative_cond", 0],
+                "vae": ["vae_loader", 0],
+                "prefix_latent": ["load_prefix_latent", 0],
+                "width": width,
+                "height": height,
+                "length": num_frames,
+                "batch_size": 1
+            }
+            if end_img_node:
+                wan_cond_inputs["end_image"] = end_img_node
             wf["wan_conditioning"] = {
-                "inputs": {
-                    "positive": ["positive_cond", 0],
-                    "negative": ["negative_cond", 0],
-                    "vae": ["vae_loader", 0],
-                    "prefix_latent": ["load_prefix_latent", 0],
-                    "width": width,
-                    "height": height,
-                    "length": num_frames,
-                    "batch_size": 1
-                },
+                "inputs": wan_cond_inputs,
                 "class_type": "WanLatentPrefixToVideo"
             }
         elif request.image_path and Path(request.image_path).is_file():
@@ -325,19 +339,35 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
                 suffix="anchor"
             )
             wf["start_image"] = {"inputs": {"image": img_fn, "upload": "image"}, "class_type": "LoadImage"}
-            wf["wan_conditioning"] = {
-                "inputs": {
-                    "positive": ["positive_cond", 0],
-                    "negative": ["negative_cond", 0],
-                    "vae": ["vae_loader", 0],
-                    "start_image": ["start_image", 0],
-                    "width": width,
-                    "height": height,
-                    "length": num_frames,
-                    "batch_size": 1
-                },
-                "class_type": "WanImageToVideo"
-            }
+            if end_img_node:
+                wf["wan_conditioning"] = {
+                    "inputs": {
+                        "positive": ["positive_cond", 0],
+                        "negative": ["negative_cond", 0],
+                        "vae": ["vae_loader", 0],
+                        "start_image": ["start_image", 0],
+                        "end_image": end_img_node,
+                        "width": width,
+                        "height": height,
+                        "length": num_frames,
+                        "batch_size": 1
+                    },
+                    "class_type": "WanFirstLastFrameToVideo"
+                }
+            else:
+                wf["wan_conditioning"] = {
+                    "inputs": {
+                        "positive": ["positive_cond", 0],
+                        "negative": ["negative_cond", 0],
+                        "vae": ["vae_loader", 0],
+                        "start_image": ["start_image", 0],
+                        "width": width,
+                        "height": height,
+                        "length": num_frames,
+                        "batch_size": 1
+                    },
+                    "class_type": "WanImageToVideo"
+                }
         else:
             raise ValueError(f"No valid start input provided for Wan video generator: {request.image_path}")
 
@@ -715,7 +745,7 @@ class LtxVideoGenerator(BaseVideoGenerator):
         fps = request.fps or self.settings.get("fps", 24)
         seed = random.randint(1, 1_000_000_000) if request.seed in (-1, None) else int(request.seed)
         steps = int(request.steps or self.settings.get("steps", 25))
-        default_cfg = 1.0
+        default_cfg = 3.0
         cfg = float(request.cfg if request.cfg is not None else self.settings.get("cfg", default_cfg))
         num_frames = request.num_frames
 
@@ -852,11 +882,14 @@ class LtxVideoGenerator(BaseVideoGenerator):
                 }
                 guider_model = [u_key, 0]
 
-        # Conditioning Setup: Pure 5D Latent Prefix via LTXVAddLatentGuide/LTXVCropGuides/LTXVAdainLatent vs 1-Frame Image-to-Video
+        # Conditioning Setup: Pure 5D Latent Prefix via LTXVAddLatentGuide/LTXVCropGuides/LTXVAdainLatent vs Image-to-Video
         active_positive = ["ltxv_cond", 0]
         active_negative = ["ltxv_cond", 1]
         scheduler_latent_node = ["empty_latent", 0]
         latent_for_decode = ["sampler", 0]
+        has_guides = False
+        has_prefix_latent = False
+        has_end_image = bool(request.end_image_path and Path(str(request.end_image_path)).is_file())
 
         if request.prefix_latent_path and Path(request.prefix_latent_path).is_file():
             pref_filename = Path(request.prefix_latent_path).name
@@ -887,7 +920,76 @@ class LtxVideoGenerator(BaseVideoGenerator):
             active_positive = ["ltx_latent_guide", 0]
             active_negative = ["ltx_latent_guide", 1]
             active_latent_node = ["ltx_latent_guide", 2]
+            has_guides = True
+            has_prefix_latent = True
+        elif request.image_path and Path(str(request.image_path)).is_file():
+            img_fn = comfy_client.upload_file_to_comfy(
+                str(request.image_path),
+                run_prefix=prefix_str,
+                suffix="anchor"
+            )
+            log(f"Configuring LTX start_image guide (frame_idx=0, strength=0.7): {img_fn}")
+            wf["start_image"] = {"inputs": {"image": img_fn, "upload": "image"}, "class_type": "LoadImage"}
+            wf["preprocess_image"] = {
+                "inputs": {
+                    "image": ["start_image", 0],
+                    "img_compression": 25
+                },
+                "class_type": "LTXVPreprocess"
+            }
+            wf["ltx_start_guide"] = {
+                "inputs": {
+                    "positive": active_positive,
+                    "negative": active_negative,
+                    "vae": ["vae_loader", 0],
+                    "latent": ["empty_latent", 0],
+                    "image": ["preprocess_image", 0],
+                    "frame_idx": 0,
+                    "strength": 0.7
+                },
+                "class_type": "LTXVAddGuide"
+            }
+            active_positive = ["ltx_start_guide", 0]
+            active_negative = ["ltx_start_guide", 1]
+            active_latent_node = ["ltx_start_guide", 2]
+            scheduler_latent_node = ["empty_latent", 0]
+            has_guides = True
+        else:
+            raise ValueError(f"No valid start input provided for LTX video generator: {request.image_path}")
 
+        if has_end_image:
+            end_img_fn = comfy_client.upload_file_to_comfy(
+                str(request.end_image_path),
+                run_prefix=prefix_str,
+                suffix="end"
+            )
+            log(f"Configuring LTX end_image guide (frame_idx=-1, strength=0.7): {end_img_fn}")
+            wf["end_image"] = {"inputs": {"image": end_img_fn, "upload": "image"}, "class_type": "LoadImage"}
+            wf["preprocess_end_image"] = {
+                "inputs": {
+                    "image": ["end_image", 0],
+                    "img_compression": 25
+                },
+                "class_type": "LTXVPreprocess"
+            }
+            wf["ltx_end_guide"] = {
+                "inputs": {
+                    "positive": active_positive,
+                    "negative": active_negative,
+                    "vae": ["vae_loader", 0],
+                    "latent": active_latent_node,
+                    "image": ["preprocess_end_image", 0],
+                    "frame_idx": -1,
+                    "strength": 0.7
+                },
+                "class_type": "LTXVAddGuide"
+            }
+            active_positive = ["ltx_end_guide", 0]
+            active_negative = ["ltx_end_guide", 1]
+            active_latent_node = ["ltx_end_guide", 2]
+            has_guides = True
+
+        if has_guides:
             wf["ltx_crop_guides"] = {
                 "inputs": {
                     "positive": active_positive,
@@ -896,45 +998,20 @@ class LtxVideoGenerator(BaseVideoGenerator):
                 },
                 "class_type": "LTXVCropGuides"
             }
-            wf["ltx_adain_latent"] = {
-                "inputs": {
-                    "latents": ["ltx_crop_guides", 2],
-                    "reference": ["load_prefix_latent", 0],
-                    "factor": 1.0
-                },
-                "class_type": "LTXVAdainLatent"
-            }
-            latent_for_decode = ["ltx_adain_latent", 0]
-        elif request.image_path and Path(str(request.image_path)).is_file():
-            img_fn = comfy_client.upload_file_to_comfy(
-                str(request.image_path),
-                run_prefix=prefix_str,
-                suffix="anchor"
-            )
-            wf["start_image"] = {"inputs": {"image": img_fn, "upload": "image"}, "class_type": "LoadImage"}
-            wf["preprocess_image"] = {
-                "inputs": {
-                    "image": ["start_image", 0],
-                    "img_compression": 33
-                },
-                "class_type": "LTXVPreprocess"
-            }
-            wf["inplace_cond"] = {
-                "inputs": {
-                    "image": ["preprocess_image", 0],
-                    "vae": ["vae_loader", 0],
-                    "latent": ["empty_latent", 0],
-                    "strength": 0.9,
-                    "bypass": False
-                },
-                "class_type": "LTXVImgToVideoInplace"
-            }
-            active_latent_node = ["inplace_cond", 0]
-            scheduler_latent_node = ["inplace_cond", 0]
-        else:
-            raise ValueError(f"No valid start input provided for LTX video generator: {request.image_path}")
+            if has_prefix_latent:
+                wf["ltx_adain_latent"] = {
+                    "inputs": {
+                        "latents": ["ltx_crop_guides", 2],
+                        "reference": ["load_prefix_latent", 0],
+                        "factor": 1.0
+                    },
+                    "class_type": "LTXVAdainLatent"
+                }
+                latent_for_decode = ["ltx_adain_latent", 0]
+            else:
+                latent_for_decode = ["ltx_crop_guides", 2]
 
-        default_sampler = "euler_ancestral" if cfg <= 1.5 else "euler"
+        default_sampler = "euler_ancestral"
         actual_sampler = str(getattr(request, "sampler", None) or self.settings.get("sampler") or default_sampler).strip()
 
         wf.update({

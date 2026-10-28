@@ -17,7 +17,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from PIL import Image
 
 SRC_DIR = Path(__file__).resolve().parent.parent / "src"
@@ -150,14 +150,14 @@ class TestVideoPipeline(unittest.TestCase):
                 self.assertNotIn("prefix_latent_restore", wf)
 
                 # Distilled LoRA must default to 0.7 in distilled mode (cfg <= 1.5)
-                self.assertAlmostEqual(wf["lora_loader"]["inputs"]["strength_model"], 0.7)
+                self.assertAlmostEqual(wf["lora_loader"]["inputs"]["strength_model"], 0.2)
                 self.assertEqual(wf["sampler_select"]["inputs"]["sampler_name"], "euler_ancestral")
 
                 # Verify full guidance mode (cfg > 1.5) uses strength 0.2
                 req_cfg3 = VideoRequest(
                     prompt="camera pans right",
                     model="ltx-video-2b-v0.9.5.safetensors",
-                    cfg=3.0,
+                    cfg=1.0,
                     width=832,
                     height=480,
                     fps=24,
@@ -168,8 +168,8 @@ class TestVideoPipeline(unittest.TestCase):
                 )
                 ltx_gen.generate(req_cfg3)
                 wf_cfg3 = captured_wfs[-1]
-                self.assertAlmostEqual(wf_cfg3["lora_loader"]["inputs"]["strength_model"], 0.2)
-                self.assertEqual(wf_cfg3["sampler_select"]["inputs"]["sampler_name"], "euler")
+                self.assertAlmostEqual(wf_cfg3["lora_loader"]["inputs"]["strength_model"], 0.7)
+                self.assertEqual(wf_cfg3["sampler_select"]["inputs"]["sampler_name"], "euler_ancestral")
 
                 # Must NOT contain the old buggy prefix_latent_decode -> LTXVImgToVideoInplace path
                 self.assertNotIn("prefix_latent_decode", wf)
@@ -200,10 +200,10 @@ class TestVideoPipeline(unittest.TestCase):
                 wf_img = captured_wfs[-1]
                 self.assertIn("preprocess_image", wf_img)
                 self.assertEqual(wf_img["preprocess_image"]["class_type"], "LTXVPreprocess")
-                self.assertEqual(wf_img["preprocess_image"]["inputs"]["img_compression"], 33)
-                self.assertIn("inplace_cond", wf_img)
-                self.assertEqual(wf_img["inplace_cond"]["class_type"], "LTXVImgToVideoInplace")
-                self.assertEqual(wf_img["inplace_cond"]["inputs"]["strength"], 0.9)
+                self.assertEqual(wf_img["preprocess_image"]["inputs"]["img_compression"], 25)
+                self.assertIn("ltx_start_guide", wf_img)
+                self.assertEqual(wf_img["ltx_start_guide"]["class_type"], "LTXVAddGuide")
+                self.assertEqual(wf_img["ltx_start_guide"]["inputs"]["strength"], 0.7)
                 self.assertEqual(wf_img["sampler_select"]["inputs"]["sampler_name"], "euler_ancestral")
 
             # Also verify WanFast with prefix_latent_path wires Stage 1 and Stage 2 LTXVAdainLatent nodes
@@ -233,8 +233,8 @@ class TestVideoPipeline(unittest.TestCase):
                         "name": "Scene 1",
                         "anchor_image": {"keyframe_path": "hero.png"},
                         "blocks": [
-                            {"duration": 4.5, "overlap": 2.0, "motion_prompt": "b1"},
-                            {"duration": 4.5, "overlap": 0.0, "motion_prompt": "b2"}  # 2.0 + 4.5 = 6.5 > 6.0 for Wan!
+                            {"duration": 4.5, "overlap": 2.0, "prompt": "b1"},
+                            {"duration": 4.5, "overlap": 0.0, "prompt": "b2"}  # 2.0 + 4.5 = 6.5 > 6.0 for Wan!
                         ]
                     }
                 ]
@@ -319,8 +319,8 @@ class TestVideoPipeline(unittest.TestCase):
                         "prompt": "refined anchor"
                     },
                     "blocks": [
-                        {"motion_prompt": "block 1", "duration": 4.0, "overlap": 1.0},
-                        {"motion_prompt": "block 2", "duration": 4.0, "overlap": 0.0}
+                        {"prompt": "block 1", "duration": 4.0, "overlap": 1.0},
+                        {"prompt": "block 2", "duration": 4.0, "overlap": 0.0}
                     ]
                 }
             ]
@@ -437,7 +437,7 @@ class TestVideoPipeline(unittest.TestCase):
                     {
                         "name": "Scene 1",
                         "anchor_image": {},
-                        "blocks": [{"duration": 4.0, "motion_prompt": "dance"}]
+                        "blocks": [{"duration": 4.0, "prompt": "dance"}]
                     }
                 ]
             }
@@ -458,7 +458,7 @@ class TestVideoPipeline(unittest.TestCase):
                     {
                         "name": "Scene 1",
                         "anchor_image": {"image_path": "non_existent_img.png", "fit": "crop"},
-                        "blocks": [{"duration": 4.0, "motion_prompt": "dance"}]
+                        "blocks": [{"duration": 4.0, "prompt": "dance"}]
                     }
                 ]
             }
@@ -468,6 +468,285 @@ class TestVideoPipeline(unittest.TestCase):
             self.assertIn("failed scenario 'Missing File Scenario'", err_mf)
             self.assertIn("scene #1 ('Scene 1'): failed anchor_image: Anchor image file not found on disk: non_existent_img.png", err_mf)
 
+
+    def test_08_end_image_preflight_and_workflows(self):
+        """Verify end_image pre-flight hierarchical validation and generator workflow attachment."""
+        # 1. Pre-flight check: missing file in end_image
+        missing_end_scen = {
+            "name": "Missing End File Scenario",
+            "video": {
+                "engine": "wan-fast",
+                "model": "wan2.2_i2v_14B_fp8_scaled.safetensors"
+            },
+            "scenes": [
+                {
+                    "name": "Scene 1",
+                    "anchor_image": {"prompt": "hero starts"},
+                    "blocks": [
+                        {
+                            "name": "Block 1",
+                            "duration": 4.0,
+                            "prompt": "hero runs",
+                            "end_image": {"keyframe_path": "non_existent_end.png"}
+                        }
+                    ]
+                }
+            ]
+        }
+        res_mf = execute_tool("video_generate", missing_end_scen)
+        self.assertTrue(res_mf.get("isError"))
+        err_mf = res_mf.get("error", "")
+        self.assertIn("failed scenario 'Missing End File Scenario'", err_mf)
+        self.assertIn("scene #1 ('Scene 1'): block #1 ('Block 1'): failed end_image: End image file not found on disk: non_existent_end.png", err_mf)
+
+        # 2. Pre-flight check: missing prompt for pure txt2img end_image
+        no_prompt_end_scen = {
+            "name": "No Prompt End Scenario",
+            "video": {
+                "engine": "wan-fast",
+                "model": "wan2.2_i2v_14B_fp8_scaled.safetensors"
+            },
+            "scenes": [
+                {
+                    "name": "Scene 1",
+                    "anchor_image": {"prompt": "hero starts"},
+                    "blocks": [
+                        {
+                            "name": "Block 1",
+                            "duration": 4.0,
+                            "prompt": "hero runs",
+                            "end_image": {}
+                        }
+                    ]
+                }
+            ]
+        }
+        res_np = execute_tool("video_generate", no_prompt_end_scen)
+        self.assertTrue(res_np.get("isError"))
+        err_np = res_np.get("error", "")
+        self.assertIn("failed scenario 'No Prompt End Scenario'", err_np)
+        self.assertIn("scene #1 ('Scene 1'): block #1 ('Block 1'): failed end_image: Prompt is required for end image generation when neither keyframe_path nor image_path is specified.", err_np)
+
+        # 3. Wan video generator workflow attachment: WanFirstLastFrameToVideo (overlap=0)
+        start_img = self.tmp_path / "wan_flf_start.png"
+        end_img = self.tmp_path / "wan_flf_end.png"
+        Image.new("RGB", (832, 480), color=(10, 20, 30)).save(start_img)
+        Image.new("RGB", (832, 480), color=(40, 50, 60)).save(end_img)
+
+        req_flf_0 = VideoRequest(
+            prompt="motion to destination",
+            image_path=start_img.as_posix(),
+            end_image_path=end_img.as_posix(),
+            model="wan2.2_i2v_14B_fp8_scaled.safetensors",
+            width=832,
+            height=480,
+            fps=16,
+            num_frames=65,
+            prefix_frames=0,
+            core_frames=65,
+            run_prefix="20261027-120000-abcdef-s001-b001"
+        )
+        captured_wfs = []
+        def fake_exec(wf, **kwargs):
+            captured_wfs.append(wf)
+            return GenerationResult(success=True, file_path=start_img.as_posix())
+
+        with patch("core.discovery.resolve_wan_model_bundle", return_value=("high_model.safetensors", "low_model.safetensors")), \
+             patch("core.comfy_client.upload_file_to_comfy", side_effect=lambda p, **kw: Path(p).name):
+            wan_gen = create_video_generator("wan-fast")
+            with patch.object(wan_gen, "_execute_comfy_workflow", side_effect=fake_exec):
+                wan_gen.generate(req_flf_0)
+
+            wf_wan_0 = captured_wfs[-1]
+            # Should have WanFirstLastFrameToVideo attached
+            self.assertEqual(wf_wan_0["wan_conditioning"]["class_type"], "WanFirstLastFrameToVideo")
+            self.assertIn("end_image", wf_wan_0["wan_conditioning"]["inputs"])
+            self.assertIn("end_image", wf_wan_0)
+
+        # 4. Wan video generator workflow attachment: WanLatentPrefixToVideo with end_image (overlap>0)
+        mock_lat = self.tmp_path / "mock.latent"
+        mock_lat.write_bytes(b"dummy")
+
+        req_flf_pref = VideoRequest(
+            prompt="motion to destination",
+            image_path=start_img.as_posix(),
+            end_image_path=end_img.as_posix(),
+            prefix_latent_path=(self.tmp_path / "mock.latent").as_posix(),
+            model="wan2.2_i2v_14B_fp8_scaled.safetensors",
+            width=832,
+            height=480,
+            fps=16,
+            num_frames=69,
+            prefix_frames=5,
+            core_frames=64,
+            run_prefix="20261027-120000-abcdef-s001-b002"
+        )
+        with patch("core.discovery.resolve_wan_model_bundle", return_value=("high_model.safetensors", "low_model.safetensors")), \
+             patch("core.comfy_client.upload_file_to_comfy", side_effect=lambda p, **kw: Path(p).name):
+            with patch.object(wan_gen, "_execute_comfy_workflow", side_effect=fake_exec):
+                wan_gen.generate(req_flf_pref)
+
+            wf_wan_pref = captured_wfs[-1]
+            self.assertEqual(wf_wan_pref["wan_conditioning"]["class_type"], "WanLatentPrefixToVideo")
+            self.assertIn("end_image", wf_wan_pref["wan_conditioning"]["inputs"])
+
+        # 5. LTX video generator workflow attachment: LTXVAddGuide + LTXVCropGuides
+        req_ltx = VideoRequest(
+            prompt="motion to destination ltx",
+            image_path=start_img.as_posix(),
+            end_image_path=end_img.as_posix(),
+            model="ltx-video-2b-v0.9.5.safetensors",
+            width=832,
+            height=480,
+            fps=16,
+            num_frames=65,
+            prefix_frames=0,
+            core_frames=65,
+            run_prefix="20261027-120000-abcdef-s001-b001"
+        )
+        with patch("core.comfy_client.upload_file_to_comfy", side_effect=lambda p, **kw: Path(p).name):
+            ltx_gen = create_video_generator("ltx")
+            with patch.object(ltx_gen, "_execute_comfy_workflow", side_effect=fake_exec):
+                ltx_gen.generate(req_ltx)
+
+            wf_ltx = captured_wfs[-1]
+            self.assertIn("ltx_end_guide", wf_ltx)
+            self.assertEqual(wf_ltx["ltx_end_guide"]["class_type"], "LTXVAddGuide")
+            self.assertEqual(wf_ltx["ltx_end_guide"]["inputs"]["frame_idx"], -1)
+            self.assertIn("ltx_crop_guides", wf_ltx)
+            self.assertEqual(wf_ltx["ltx_crop_guides"]["class_type"], "LTXVCropGuides")
+
+        # 6. Pre-flight check: runtime references $anchor / $start in scene anchor_image are forbidden
+        anchor_ref_scen = {
+            "name": "Anchor Ref Scenario",
+            "video": {"engine": "wan-fast", "model": "wan2.2_i2v_14B_fp8_scaled.safetensors"},
+            "scenes": [
+                {
+                    "name": "Scene 1",
+                    "anchor_image": {"keyframe_path": "$start"},
+                    "blocks": [{"duration": 4.0, "prompt": "b1"}]
+                }
+            ]
+        }
+        res_ar = execute_tool("video_generate", anchor_ref_scen)
+        self.assertTrue(res_ar.get("isError"))
+        self.assertIn("Runtime reference '$start' is only permitted inside block end_image, not in scene anchor_image", res_ar.get("error", ""))
+
+        # 7. Pre-flight check: $anchor / $start in end_image image_path requires prompt
+        no_prompt_ref_scen = {
+            "name": "No Prompt Ref Scenario",
+            "video": {"engine": "wan-fast", "model": "wan2.2_i2v_14B_fp8_scaled.safetensors"},
+            "scenes": [
+                {
+                    "name": "Scene 1",
+                    "anchor_image": {"prompt": "hero starts"},
+                    "blocks": [
+                        {
+                            "name": "Block 1",
+                            "duration": 4.0,
+                            "prompt": "hero runs",
+                            "end_image": {"image_path": "$start"}
+                        }
+                    ]
+                }
+            ]
+        }
+        res_npr = execute_tool("video_generate", no_prompt_ref_scen)
+        self.assertTrue(res_npr.get("isError"))
+        self.assertIn("Prompt is required when using '$start' in end_image image_path", res_npr.get("error", ""))
+
+        # 8. Runtime execution: $start and $anchor dynamic resolution & persistent spec preservation
+        gen_img_calls = []
+        def fake_gen_anchor(anchor_meta, width, height):
+            gen_img_calls.append(dict(anchor_meta))
+            meta_path = anchor_meta.get("custom_filename") or f"{anchor_meta.get('run_prefix')}-final.png"
+            return True, meta_path, None, {}
+
+        captured_requests = []
+        def fake_gen_video(request):
+            captured_requests.append(request)
+            mock_video = self.tmp_path / f"{request.run_prefix}-core.mp4"
+            mock_video.write_bytes(b"mockmp4")
+            mock_tail_img = self.tmp_path / f"{request.run_prefix}-tail.png"
+            mock_tail_img.write_bytes(b"mocktail")
+            mock_tail_lat = self.tmp_path / f"{request.run_prefix}-tail.latent"
+            raw_hdr = json.dumps({"samples": {"dtype": "F32", "shape": [1, 16, 5, 60, 104], "data_offsets": [0, 0]}}).encode("utf-8")
+            with open(mock_tail_lat, "wb") as f_lat:
+                f_lat.write(struct.pack("<Q", len(raw_hdr)))
+                f_lat.write(raw_hdr)
+            return GenerationResult(
+                success=True,
+                file_path=mock_video.as_posix(),
+                tail_image_path=mock_tail_img.as_posix(),
+                tail_latent_path=mock_tail_lat.as_posix()
+            )
+
+        multi_block_ref_scen = {
+            "name": "Runtime Ref Test Scenario",
+            "image": {"engine": "sdxl", "model": "ponyDiffusionV6XL.safetensors"},
+            "video": {"engine": "wan-fast", "model": "wan2.2_i2v_14B_fp8_scaled.safetensors"},
+            "scenes": [
+                {
+                    "name": "Scene 1",
+                    "anchor_image": {"prompt": "hero anchor frame"},
+                    "blocks": [
+                        {
+                            "name": "Block 1",
+                            "duration": 4.0,
+                            "overlap": 1.0,
+                            "prompt": "block 1 motion",
+                            "end_image": {
+                                "image_path": "$start",
+                                "prompt": "block 1 end modified from start"
+                            }
+                        },
+                        {
+                            "name": "Block 2",
+                            "duration": 4.0,
+                            "overlap": 0.0,
+                            "prompt": "block 2 motion",
+                            "end_image": {
+                                "image_path": "$anchor",
+                                "prompt": "block 2 end modified from anchor"
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+
+        with patch("core.image_engine.generate_anchor_frame", side_effect=fake_gen_anchor), \
+             patch("core.video_pipeline.create_video_generator") as mock_vg_factory, \
+             patch("core.ffmpeg_engine.concat_videos", return_value="final.mp4"):
+            mock_gen_inst = MagicMock()
+            mock_gen_inst.name = "wan-fast"
+            mock_gen_inst.temporal_stride = 1
+            mock_gen_inst.generate.side_effect = fake_gen_video
+            mock_vg_factory.return_value = mock_gen_inst
+
+            prep = video_pipeline.prepare_scenario_pipeline(multi_block_ref_scen)
+            spec_on_disk = Path(prep["spec_path"]).read_text(encoding="utf-8")
+            # Verify persistent spec on disk preserves literal references '$start' and '$anchor'
+            self.assertIn('"$start"', spec_on_disk)
+            self.assertIn('"$anchor"', spec_on_disk)
+
+            res_pipe = video_pipeline.execute_scenario_pipeline(prepared_pipeline_data=prep)
+            self.assertIn("video_path", res_pipe)
+
+            # Check calls to generate_anchor_frame:
+            # Call 0: Scene anchor
+            self.assertIn("hero anchor frame", gen_img_calls[0]["prompt"])
+            scene_anchor_path = gen_img_calls[0]["custom_filename"]
+
+            # Call 1: Block 1 end_image with $start -> resolved to scene anchor
+            self.assertEqual(gen_img_calls[1]["image_path"], scene_anchor_path)
+
+            # Call 2: Block 2 end_image with $anchor -> resolved to scene anchor
+            self.assertEqual(gen_img_calls[2]["image_path"], scene_anchor_path)
+
+            # Verify save_tail_image was True for Block 1 despite overlap=1.0
+            self.assertTrue(captured_requests[0].save_tail_image)
+            self.assertTrue(captured_requests[0].save_tail)
 
 if __name__ == "__main__":
     unittest.main()

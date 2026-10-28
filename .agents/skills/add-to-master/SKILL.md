@@ -22,6 +22,17 @@ Publish only the explicitly reviewed task changes. Preserve unrelated working-tr
    - PR body: the expanded description, including the motivation, material changes, verification performed, and relevant caveats.
 8. Do not force the branch slug to repeat the full commit or PR title. Keep it substantially shorter.
 9. **Documentation Integrity (Mandatory)**: Always verify that `README.md` is updated to reflect any changes to tools, options, parameters, architecture, or workflows introduced by the task before committing. The README must remain complete and fully self-contained for any new agent opening the repository.
+10. **Version & Changelog Synchronization (Mandatory)**:
+    Before running tests and committing, synchronize the version `0.<n>.0` matching task `AI-<n>` across all three authoritative files:
+    - `src/core/__init__.py`: update `__version__ = "0.<n>.0"`.
+    - `pyproject.toml`: update `version = "0.<n>.0"`.
+    - `CHANGELOG.md`: add/finalize section `## [0.<n>.0] - YYYY-MM-DD (AI-<n>)` (following [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and SemVer) with categorized sub-bullets (`Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`) describing all material changes introduced by the task (if previously staged as `[0.<n>.0] - Unreleased`, finalize its date to current `YYYY-MM-DD`).
+11. **Full Test Suite Verification (Mandatory)**:
+    Execute the full unit test suite **after** version synchronization and **before** committing:
+    ```bash
+    python -m unittest discover -s tests -p "test_*.py"
+    ```
+    Confirm a 100% pass rate (including version parity test `test_08_cli_version_and_changelog_parity`). Never commit, push, or open a PR with failing or unverified tests.
 
 Example:
 
@@ -36,7 +47,7 @@ PR body: detailed motivation, changed components, compatibility notes, and check
 
 1. Start from an up-to-date `master`. If switching branches would overwrite working-tree changes, stop and report the conflict; never stash, reset, or discard user changes without explicit approval.
 2. Create `AI-<n>-<very-short-slug>` from `master`.
-3. Stage only the reviewed task files using explicit paths. Avoid `git add -A` in a dirty worktree.
+3. Stage only the reviewed task files using explicit paths (including `CHANGELOG.md`, `src/core/__init__.py`, `pyproject.toml`, and updated docs). Avoid `git add -A` in a dirty worktree.
 4. Review `git diff --cached --name-status`, `git diff --cached`, and `git diff --cached --check`.
 5. Commit with the generated commit message.
 6. Push the branch to `origin` and set its upstream.

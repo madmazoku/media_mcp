@@ -27,6 +27,7 @@ class WanLatentPrefixToVideo:
             "optional": {
                 "prefix_latent": ("LATENT",),
                 "start_image": ("IMAGE",),
+                "end_image": ("IMAGE",),
                 "clip_vision_output": ("CLIP_VISION_OUTPUT",),
             }
         }
@@ -37,7 +38,7 @@ class WanLatentPrefixToVideo:
     CATEGORY = "model/conditioning/wan"
 
     def execute(self, positive, negative, vae, width, height, length, batch_size,
-                prefix_latent=None, start_image=None, clip_vision_output=None):
+                prefix_latent=None, start_image=None, end_image=None, clip_vision_output=None):
         device = comfy.model_management.intermediate_device()
         t_latents = ((length - 1) // 4) + 1
         h_lat = height // 8
@@ -59,11 +60,26 @@ class WanLatentPrefixToVideo:
             # Wan I2V conditioning padding:
             # Wan I2V was trained with flat 0.5 gray image encoded by VAE for unconditioned frames.
             gray_img = torch.ones((length, height, width, 3), device="cpu", dtype=torch.float32) * 0.5
+            end_img_up = None
+            if end_image is not None:
+                end_img_up = comfy.utils.common_upscale(
+                    end_image[-length:].movedim(-1, 1), width, height, "bilinear", "center"
+                ).movedim(1, -1)
+                gray_img[-end_img_up.shape[0]:] = end_img_up[:, :, :, :3].to(device="cpu", dtype=torch.float32)
+
             concat_latent = vae.encode(gray_img[:, :, :, :3]).to(device=device)
+            if batch_size > 1 and concat_latent.shape[0] == 1:
+                concat_latent = concat_latent.repeat(batch_size, 1, 1, 1, 1)
             concat_latent[:, :, :k_lat] = prefix_vae[:batch_size, :, :k_lat].to(dtype=concat_latent.dtype)
 
-            mask = torch.ones((batch_size, 1, t_latents, h_lat, w_lat), device=device, dtype=torch.float32)
-            mask[:, :, :k_lat] = 0.0
+            if end_img_up is not None:
+                mask = torch.ones((batch_size, 1, t_latents * 4, h_lat, w_lat), device=device, dtype=torch.float32)
+                mask[:, :, :k_lat * 4] = 0.0
+                mask[:, :, -end_img_up.shape[0]:] = 0.0
+                mask = mask.view(batch_size, t_latents, 4, h_lat, w_lat).transpose(1, 2)
+            else:
+                mask = torch.ones((batch_size, 1, t_latents, h_lat, w_lat), device=device, dtype=torch.float32)
+                mask[:, :, :k_lat] = 0.0
 
             # Clean unmasked diffusion latents matching native Wan I2V conditioning:
             out_latent = {
@@ -76,11 +92,27 @@ class WanLatentPrefixToVideo:
             ).movedim(1, -1)
             image = torch.ones((length, height, width, start_image.shape[-1]), device=start_image.device, dtype=start_image.dtype) * 0.5
             image[:start_image.shape[0]] = start_image
+
+            end_img_up = None
+            if end_image is not None:
+                end_img_up = comfy.utils.common_upscale(
+                    end_image[-length:].movedim(-1, 1), width, height, "bilinear", "center"
+                ).movedim(1, -1)
+                image[-end_img_up.shape[0]:] = end_img_up[:, :, :, :image.shape[-1]]
+
             encoded_image_latent = vae.encode(image[:, :, :, :3]).to(device=device)
             concat_latent = encoded_image_latent.repeat(batch_size, 1, 1, 1, 1)
-            k_masked = ((start_image.shape[0] - 1) // 4) + 1
-            mask = torch.ones((batch_size, 1, t_latents, h_lat, w_lat), device=device, dtype=torch.float32)
-            mask[:, :, :k_masked] = 0.0
+
+            if end_img_up is not None:
+                mask = torch.ones((batch_size, 1, t_latents * 4, h_lat, w_lat), device=device, dtype=torch.float32)
+                mask[:, :, :start_image.shape[0] + 3] = 0.0
+                mask[:, :, -end_img_up.shape[0]:] = 0.0
+                mask = mask.view(batch_size, t_latents, 4, h_lat, w_lat).transpose(1, 2)
+            else:
+                k_masked = ((start_image.shape[0] - 1) // 4) + 1
+                mask = torch.ones((batch_size, 1, t_latents, h_lat, w_lat), device=device, dtype=torch.float32)
+                mask[:, :, :k_masked] = 0.0
+
             out_latent = {"samples": torch.zeros([batch_size, 16, t_latents, h_lat, w_lat], device=device, dtype=torch.float32)}
         else:
             concat_latent = torch.zeros([batch_size, 16, t_latents, h_lat, w_lat], device=device, dtype=torch.float32)

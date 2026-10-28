@@ -254,7 +254,7 @@
             "keyframe_path": {
               "type": "string",
               "minLength": 1,
-              "description": "Path to an existing anchor keyframe image on disk. Used directly as initial frame for video generation without invoking the image generator."
+              "description": "Path to an existing keyframe image on disk, or runtime reference '$anchor' / '$start' (in block end_image). Used directly as keyframe without invoking the image generator."
             }
           }
         },
@@ -275,7 +275,7 @@
             "image_path": {
               "type": "string",
               "minLength": 1,
-              "description": "Source image on disk for img2img refinement"
+              "description": "Source image on disk for img2img refinement, or runtime reference '$anchor' / '$start' (in block end_image) to refine relative to scene anchor or block start."
             },
             "mask_path": {
               "type": "string",
@@ -307,7 +307,7 @@
     "block": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["motion_prompt"],
+      "required": ["prompt"],
       "properties": {
         "name": {
           "type": "string",
@@ -328,7 +328,7 @@
           "default": 0.0,
           "description": "Tail latent overlap duration into subsequent block"
         },
-        "motion_prompt": {
+        "prompt": {
           "type": "string",
           "minLength": 1,
           "description": "Action and camera dynamics prompt"
@@ -336,6 +336,10 @@
         "negative_prompt": {
           "type": "string",
           "description": "Block-specific negative prompt"
+        },
+        "end_image": {
+          "$ref": "#/$defs/anchor_image",
+          "description": "Optional target end keyframe for this block (ready keyframe_path, runtime reference '$anchor'/'$start', or generated via txt2img/img2img/inpaint/outpaint). Guides block diffusion to arrive at this frame on its final step."
         },
         "loras": {
           "type": "array",

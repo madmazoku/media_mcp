@@ -17,7 +17,7 @@ description: >-
 
 ## Доступные инструменты (Tools):
 - **`image_generate`** (`schemas/requests/image_generate.json`): единый инструмент генерации изображений:
-  - `prompt` *(string, обязателен)*: текстовое описание сцены.
+  - `prompt` *(string, опционален при наличии `image_path`)*: текстовое описание сцены. Если `image_path` указан без `prompt` и `mask_path` при `fit="crop"`, выполняется пассивная подгонка разрешения без запуска диффузии.
   - `engine` *(`"sdxl"` | `"flux1"` | `"flux2"`, по умолчанию `"sdxl"`)*.
   - `model` *(string, опционально)*: имя файла модели/чекпоинта.
   - `width`, `height` *(int, кратны 16)*.
