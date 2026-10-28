@@ -203,7 +203,7 @@ class TestSchemasAndContracts(unittest.TestCase):
                             "name": "Block 1",
                             "duration": 4.0,
                             "overlap": 0.0,
-                            "motion_prompt": "waves hand",
+                            "prompt": "waves hand",
                             "loras": [{"name": "motion_lora", "strength": 0.8}]
                         }
                     ]
@@ -351,6 +351,52 @@ class TestSchemasAndContracts(unittest.TestCase):
         self.assertIn("INPUT PARAMETERS", img_help)
         self.assertIn("OUTPUT FORMAT", img_help)
 
+
+    def test_08_scenario_block_end_image_schema(self):
+        """Verify end_image in scenario block validates properly against schema."""
+        base_scenario = {
+            "name": "Test End Image Scenario",
+            "video": {
+                "engine": "wan-fast",
+                "model": "wan2.2_i2v_14B_fp8_scaled.safetensors",
+                "width": 832,
+                "height": 480
+            },
+            "scenes": [
+                {
+                    "name": "Scene 1",
+                    "anchor_image": {"prompt": "start hero"},
+                    "blocks": [
+                        {
+                            "name": "Block 1",
+                            "duration": 4.0,
+                            "prompt": "running",
+                            "end_image": {"prompt": "destination gate"}
+                        },
+                        {
+                            "name": "Block 2",
+                            "duration": 4.0,
+                            "prompt": "stopping",
+                            "end_image": {"keyframe_path": "gate.png"}
+                        },
+                        {
+                            "name": "Block 3",
+                            "duration": 4.0,
+                            "prompt": "looking",
+                            "end_image": {"image_path": "src.png", "fit": "crop"}
+                        }
+                    ]
+                }
+            ]
+        }
+        # Should succeed
+        schema_validator.validate_scenario(base_scenario)
+
+        # Extra forbidden properties in end_image must fail
+        bad_scenario = json.loads(json.dumps(base_scenario))
+        bad_scenario["scenes"][0]["blocks"][0]["end_image"]["forbidden_param"] = 123
+        with self.assertRaises(Exception):
+            schema_validator.validate_scenario(bad_scenario)
 
 if __name__ == "__main__":
     unittest.main()

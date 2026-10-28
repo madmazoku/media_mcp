@@ -39,9 +39,9 @@ These rules govern the development, testing, and operation of the `media_mcp` pi
 ---
 
 ## 3. Video Pipeline & Latent Chaining
-- Follow the hierarchy: `Root (.image, .video) -> Scene (anchor_image) -> Blocks (motion_prompt)`:
+- Follow the hierarchy: `Root (.image, .video) -> Scene (anchor_image) -> Blocks (prompt)`:
   - Technical parameters (`engine`, `model`, `width`, `height`, `fps`, `steps`, `cfg`, `guidance`, `sampler`, `seed`, `ramp_latents`, `min_cfg`, `weight_dtype`) belong strictly in root `.image` and `.video` sections.
-  - `anchor_image` and `blocks[]` contain only narrative/framing parameters (`prompt`, `motion_prompt`, `negative_prompt`, `duration`, `overlap`, `loras`, `denoise`, `fit`, `image_path`, `keyframe_path`, `mask_path`).
+  - `anchor_image` and `blocks[]` contain only narrative/framing parameters (`prompt`, `negative_prompt`, `duration`, `overlap`, `loras`, `denoise`, `fit`, `image_path`, `keyframe_path`, `mask_path`, `end_image`).
 - Default to 1-frame I2V chaining (`overlap: 0.0s`) for clean production video without Causal VAE deconvolution artifacts. For LTX-2.3, 1-frame conditioning strictly uses `LTXVPreprocess(img_compression=33)` to eliminate high-frequency pixel sensor noise and `LTXVImgToVideoInplace(strength=0.9)` to avoid rigid initial frame freezing.
 - Use **True Forced Prefix Conditioning** (`WanLatentPrefixLock` + Stage1/Stage2 `LTXVAdainLatent` + `WanLatentPrefixRestore` for Wan 2.2; `LTXVAddLatentGuide` + `LTXVCropGuides` + `LTXVAdainLatent` for LTX) with Latent AdaIN color stabilization in 5D latent space between sequential blocks when `overlap > 0.0s`. Tail latents are always cut from `latent_for_decode` post-normalization.
 - **Engine Horizon & Immutable Window Limits**:

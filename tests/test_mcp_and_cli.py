@@ -228,5 +228,41 @@ class TestMcpServerAndCli(unittest.TestCase):
         self.assertTrue(parsed_dry["is_valid"])
         self.assertTrue(bool(parsed_dry["run_prefix"]))
 
+
+    def test_08_cli_version_and_changelog_parity(self):
+        """Verify CLI --version/-v parity across core.__version__, pyproject.toml, and CHANGELOG.md."""
+        import re
+        from core import __version__
+
+        # 1. Verify CLI output without --config
+        for flag in ("--version", "-v"):
+            res = subprocess.run(
+                [sys.executable, str(SRC_DIR / "cli.py"), flag],
+                capture_output=True,
+                text=True
+            )
+            self.assertEqual(res.returncode, 0, f"Flag {flag} failed: {res.stderr}")
+            self.assertEqual(res.stdout.strip(), f"media-mcp {__version__}")
+
+        # 2. Verify pyproject.toml version
+        pyproject_path = REPO_DIR / "pyproject.toml"
+        self.assertTrue(pyproject_path.is_file())
+        with open(pyproject_path, "r", encoding="utf-8") as f:
+            pyproject_content = f.read()
+        match_pyproject = re.search(r'version\s*=\s*"([^"]+)"', pyproject_content)
+        self.assertIsNotNone(match_pyproject, "version field not found in pyproject.toml")
+        pyproject_version = match_pyproject.group(1)
+        self.assertEqual(pyproject_version, __version__, "pyproject.toml version mismatch with core.__version__")
+
+        # 3. Verify CHANGELOG.md latest version
+        changelog_path = REPO_DIR / "CHANGELOG.md"
+        self.assertTrue(changelog_path.is_file(), "CHANGELOG.md does not exist in repo root")
+        with open(changelog_path, "r", encoding="utf-8") as f:
+            changelog_content = f.read()
+        match_changelog = re.search(r'##\s*\[([0-9]+\.[0-9]+\.[0-9]+)\]', changelog_content)
+        self.assertIsNotNone(match_changelog, "No semantic version header found in CHANGELOG.md")
+        changelog_version = match_changelog.group(1)
+        self.assertEqual(changelog_version, __version__, "CHANGELOG.md latest version mismatch with core.__version__")
+
 if __name__ == "__main__":
     unittest.main()

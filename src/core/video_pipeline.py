@@ -200,6 +200,46 @@ def resolve_scenario_dict(raw_data: Any, request_overrides: Optional[Dict[str, A
     return scenario_dict
 
 
+def _normalize_keyframe_config(raw_kf: Any, image_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(raw_kf, dict):
+        return {}
+    if raw_kf.get("keyframe_path"):
+        return {"keyframe_path": raw_kf["keyframe_path"]}
+
+    kf = dict(raw_kf)
+    root_image_engine = image_cfg.get("engine", "sdxl")
+    root_image_model = image_cfg.get("model", "")
+    root_image_negative = image_cfg.get("negative_prompt", "")
+    root_image_prompt = image_cfg.get("prompt", "")
+    root_image_loras = image_cfg.get("loras", [])
+
+    kf["engine"] = root_image_engine
+    kf["model"] = root_image_model
+
+    for k in ("width", "height", "steps", "cfg", "guidance", "sampler", "seed", "fit"):
+        if k not in kf and k in image_cfg:
+            kf[k] = image_cfg[k]
+
+    combined_prompt = combine_prompts(root_image_prompt, kf.get("prompt")) if (kf.get("prompt") or root_image_prompt) else ""
+    if combined_prompt:
+        kf["prompt"] = combined_prompt
+    if kf.get("negative_prompt") or root_image_negative:
+        kf["negative_prompt"] = combine_negative_prompts(root_image_negative, kf.get("negative_prompt"))
+
+    if kf.get("image_path"):
+        if "denoise" in kf:
+            pass
+        elif "denoise" in image_cfg and (combined_prompt or kf.get("mask_path")):
+            kf["denoise"] = image_cfg["denoise"]
+        elif combined_prompt or kf.get("mask_path"):
+            kf["denoise"] = 0.65
+        # If no prompt and no mask_path, do not inject denoise so passive crop triggers
+    else:
+        kf["denoise"] = 1.0
+
+    kf["loras"] = _merge_loras(root_image_loras, kf.get("loras"))
+    return kf
+
 def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """
     Validates scenario against schemas/scenario.json and normalizes it into a list of Scene objects.
@@ -231,47 +271,24 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
         sc_negative = combine_negative_prompts(root_video_negative, sc.get("negative_prompt"))
         sc_name = sc.get("name") or f"Scene #{s_idx + 1}"
 
-        raw_anchor = sc["anchor_image"]
-        if isinstance(raw_anchor, dict) and raw_anchor.get("keyframe_path"):
-            anchor = {"keyframe_path": raw_anchor["keyframe_path"]}
-        else:
-            anchor = dict(raw_anchor)
-            anchor["engine"] = root_image_engine
-            anchor["model"] = root_image_model
-
-            # Inherit global image technical parameters only if not already set on local anchor
-            for k in ("width", "height", "steps", "cfg", "guidance", "sampler", "seed", "fit"):
-                if k not in anchor and k in image_cfg:
-                    anchor[k] = image_cfg[k]
-
-            if anchor.get("image_path"):
-                if "denoise" not in anchor and "denoise" in image_cfg:
-                    anchor["denoise"] = image_cfg["denoise"]
-                elif "denoise" not in anchor:
-                    anchor["denoise"] = 0.65
-            else:
-                anchor["denoise"] = 1.0
-
-            anchor["loras"] = _merge_loras(root_image_loras, anchor.get("loras"))
-
-            if anchor.get("prompt") or root_image_prompt:
-                anchor["prompt"] = combine_prompts(root_image_prompt, anchor.get("prompt"))
-            if anchor.get("negative_prompt") or root_image_negative:
-                anchor["negative_prompt"] = combine_negative_prompts(root_image_negative, anchor.get("negative_prompt"))
+        anchor = _normalize_keyframe_config(sc["anchor_image"], image_cfg)
 
         raw_blocks = sc["blocks"]
         norm_blocks = []
         for b_idx, blk in enumerate(raw_blocks):
-            b_prompt = combine_prompts(root_video_prompt, blk["motion_prompt"])
+            b_prompt = combine_prompts(root_video_prompt, blk["prompt"])
             b_neg = combine_negative_prompts(sc_negative, blk.get("negative_prompt"))
             b_loras = _merge_loras(root_video_loras, blk.get("loras"))
+            raw_end_img = blk.get("end_image")
+            norm_end_img = _normalize_keyframe_config(raw_end_img, image_cfg) if raw_end_img is not None else None
 
             norm_blocks.append({
                 "name": blk.get("name", f"Block #{b_idx + 1}"),
                 "duration": float(blk.get("duration", 5.0)),
                 "overlap": float(blk.get("overlap") or 0.0) if b_idx < len(raw_blocks) - 1 else 0.0,
-                "motion_prompt": b_prompt,
+                "prompt": b_prompt,
                 "negative_prompt": b_neg,
+                "end_image": norm_end_img,
                 "engine": root_video_engine,
                 "model": root_video_model,
                 "steps": video_cfg.get("steps"),
@@ -338,6 +355,87 @@ def collect_scenario_timing_errors(scenes: List[Dict[str, Any]], default_engine:
     return errors
 
 
+def _validate_keyframe_spec(
+    kf: Dict[str, Any],
+    label_prefix: str,
+    entity_label: str,
+    ar_vid: float,
+    video_width: int,
+    video_height: int,
+    tolerance: float = 0.05,
+    allow_runtime_refs: bool = False
+) -> List[str]:
+    from PIL import Image
+    errors: List[str] = []
+    if kf is None or not isinstance(kf, dict):
+        return errors
+
+    fit_mode = kf.get("fit")
+    img_ref = kf.get("keyframe_path") or kf.get("image_path")
+
+    if img_ref in ("$anchor", "$start"):
+        if not allow_runtime_refs:
+            errors.append(
+                f"{label_prefix}: Runtime reference '{img_ref}' is only permitted inside block end_image, "
+                f"not in scene anchor_image."
+            )
+        elif kf.get("image_path") == img_ref and not kf.get("prompt") and not kf.get("mask_path"):
+            errors.append(
+                f"{label_prefix}: Prompt is required when using '{img_ref}' in end_image image_path. "
+                f"To reuse the frame unmodified, use keyframe_path instead."
+            )
+        return errors
+
+    if img_ref:
+        p = Path(img_ref)
+        if not p.is_file():
+            for base in [Path.cwd(), Path(config.OUTPUT_IMG_DIR), Path(config.WORKFLOWS_DIR)]:
+                cand = base / img_ref
+                if cand.is_file():
+                    p = cand
+                    break
+        if p.is_file():
+            if not fit_mode:
+                try:
+                    with Image.open(p) as img:
+                        w, h = img.size
+                    if w > 0 and h > 0:
+                        ar_img = w / h
+                        diff_pct = abs(ar_img - ar_vid) / ar_vid
+                        if diff_pct > tolerance:
+                            errors.append(
+                                f"{label_prefix}: Aspect ratio mismatch: "
+                                f"{entity_label.lower()} '{img_ref}' has resolution {w}x{h} (aspect ratio {ar_img:.2f}), "
+                                f"but target video is {video_width}x{video_height} (aspect ratio {ar_vid:.2f}, "
+                                f"difference {diff_pct * 100:.1f}% > {tolerance * 100:.1f}%). "
+                                f"{entity_label} aspect ratio must match video aspect ratio to prevent distortion."
+                            )
+                except Exception as ex:
+                    errors.append(f"{label_prefix}: Failed to inspect {entity_label.lower()} '{img_ref}': {ex}")
+        else:
+            errors.append(f"{label_prefix}: {entity_label} file not found on disk: {img_ref}")
+
+    elif not kf.get("prompt"):
+        errors.append(
+            f"{label_prefix}: Prompt is required for {entity_label.lower()} "
+            f"generation when neither keyframe_path nor image_path is specified."
+        )
+
+    elif kf.get("width") and kf.get("height") and not fit_mode:
+        w = int(kf["width"])
+        h = int(kf["height"])
+        if w > 0 and h > 0:
+            ar_img = w / h
+            diff_pct = abs(ar_img - ar_vid) / ar_vid
+            if diff_pct > tolerance:
+                errors.append(
+                    f"{label_prefix}: Aspect ratio mismatch: "
+                    f"resolution {w}x{h} (aspect ratio {ar_img:.2f}) does not match target video "
+                    f"{video_width}x{video_height} (aspect ratio {ar_vid:.2f}, difference {diff_pct * 100:.1f}% > {tolerance * 100:.1f}%)."
+                )
+
+    return errors
+
 def collect_scenario_aspect_ratio_errors(
     scenes: List[Dict[str, Any]],
     video_width: int = 832,
@@ -345,12 +443,11 @@ def collect_scenario_aspect_ratio_errors(
     tolerance: float = 0.05
 ) -> List[str]:
     """
-    Validates anchor keyframes for each scene:
+    Validates anchor and block end keyframes for each scene:
     1. Existence of keyframe_path / image_path on disk (always checked, even if fit is set).
     2. Aspect ratio matching target video resolution within tolerance (checked when fit is not set).
     3. Mandatory prompt when neither keyframe_path nor image_path is specified (pure txt2img).
     """
-    from PIL import Image
     errors: List[str] = []
     if video_height <= 0 or video_width <= 0:
         return errors
@@ -360,56 +457,32 @@ def collect_scenario_aspect_ratio_errors(
     for s_idx, sc in enumerate(scenes):
         sc_name = sc.get("scene_name") or sc.get("name", f"Scene #{s_idx + 1}")
         anchor = sc.get("anchor_image", {})
-        fit_mode = anchor.get("fit")
-        img_ref = anchor.get("keyframe_path") or anchor.get("image_path")
+        errors.extend(_validate_keyframe_spec(
+            kf=anchor,
+            label_prefix=f"scene #{s_idx + 1} ('{sc_name}'): failed anchor_image",
+            entity_label="Anchor image",
+            ar_vid=ar_vid,
+            video_width=video_width,
+            video_height=video_height,
+            tolerance=tolerance,
+            allow_runtime_refs=False
+        ))
 
-        if img_ref:
-            p = Path(img_ref)
-            if not p.is_file():
-                for base in [Path.cwd(), Path(config.OUTPUT_IMG_DIR), Path(config.WORKFLOWS_DIR)]:
-                    cand = base / img_ref
-                    if cand.is_file():
-                        p = cand
-                        break
-            if p.is_file():
-                if not fit_mode:
-                    try:
-                        with Image.open(p) as img:
-                            w, h = img.size
-                        if w > 0 and h > 0:
-                            ar_img = w / h
-                            diff_pct = abs(ar_img - ar_vid) / ar_vid
-                            if diff_pct > tolerance:
-                                errors.append(
-                                    f"scene #{s_idx + 1} ('{sc_name}'): failed anchor_image: Aspect ratio mismatch: "
-                                    f"anchor image '{img_ref}' has resolution {w}x{h} (aspect ratio {ar_img:.2f}), "
-                                    f"but target video is {video_width}x{video_height} (aspect ratio {ar_vid:.2f}, "
-                                    f"difference {diff_pct * 100:.1f}% > {tolerance * 100:.1f}%). "
-                                    f"Anchor image aspect ratio must match video aspect ratio to prevent distortion."
-                                )
-                    except Exception as ex:
-                        errors.append(f"scene #{s_idx + 1} ('{sc_name}'): failed anchor_image: Failed to inspect anchor image '{img_ref}': {ex}")
-            else:
-                errors.append(f"scene #{s_idx + 1} ('{sc_name}'): failed anchor_image: Anchor image file not found on disk: {img_ref}")
-
-        elif not anchor.get("prompt"):
-            errors.append(
-                f"scene #{s_idx + 1} ('{sc_name}'): failed anchor_image: Prompt is required for anchor image "
-                f"generation when neither keyframe_path nor image_path is specified."
-            )
-
-        elif anchor.get("width") and anchor.get("height") and not fit_mode:
-            w = int(anchor["width"])
-            h = int(anchor["height"])
-            if w > 0 and h > 0:
-                ar_img = w / h
-                diff_pct = abs(ar_img - ar_vid) / ar_vid
-                if diff_pct > tolerance:
-                    errors.append(
-                        f"scene #{s_idx + 1} ('{sc_name}'): failed anchor_image: Aspect ratio mismatch: "
-                        f"anchor resolution {w}x{h} (aspect ratio {ar_img:.2f}) does not match target video "
-                        f"{video_width}x{video_height} (aspect ratio {ar_vid:.2f}, difference {diff_pct * 100:.1f}% > {tolerance * 100:.1f}%)."
-                    )
+        blocks = sc.get("blocks", [])
+        for b_idx, blk in enumerate(blocks):
+            b_name = blk.get("name", f"Block #{b_idx + 1}")
+            end_img = blk.get("end_image")
+            if end_img is not None:
+                errors.extend(_validate_keyframe_spec(
+                    kf=end_img,
+                    label_prefix=f"scene #{s_idx + 1} ('{sc_name}'): block #{b_idx + 1} ('{b_name}'): failed end_image",
+                    entity_label="End image",
+                    ar_vid=ar_vid,
+                    video_width=video_width,
+                    video_height=video_height,
+                    tolerance=tolerance,
+                    allow_runtime_refs=True
+                ))
 
     return errors
 
@@ -621,6 +694,7 @@ def execute_scenario_pipeline(
                 next_tail_latent: Optional[str] = None
                 next_tail_latent_count = 0
                 next_tail_image: Optional[str] = None
+                last_block_tail_image: Optional[str] = None
 
                 for b_idx, blk in enumerate(blocks):
                     if is_interrupted():
@@ -634,7 +708,7 @@ def execute_scenario_pipeline(
                         is_last = (b_idx == len(blocks) - 1)
                         overlap = float(blk.get("overlap") or 0.0) if not is_last else 0.0
 
-                        motion_prompt = blk["motion_prompt"]
+                        block_prompt = blk["prompt"]
                         b_neg = blk.get("negative_prompt") or ""
                         b_engine_raw = (blk.get("engine") or v_engine).lower()
                         b_model = blk.get("model") or v_model
@@ -720,19 +794,67 @@ def execute_scenario_pipeline(
 
                         log(f"\n[{scene_name} : {b_name}] Engine: {generator.name.upper()}, Duration: {dur}s, Overlap: {overlap}s")
                         log(f"Quantized frames (stride={stride}): total={num_frames}, prefix={pref_pixel_frames}, core={core_frames}, next_tail_latents={tail_frames}")
-                        log(f"Motion prompt: '{motion_prompt[:60]}...'")
+                        log(f"Prompt: '{block_prompt[:60]}...'")
 
-                        save_tail_image = (not is_last and overlap == 0)
+                        current_block_start_image = anchor_img_path if b_idx == 0 else (last_block_tail_image or anchor_img_path)
+
+                        end_img_meta = blk.get("end_image")
+                        block_end_img_path = None
+                        if end_img_meta:
+                            block_end_prefix = f"{run_prefix}-s{scene_idx:03d}-b{block_idx:03d}"
+                            block_end_filename = f"{block_end_prefix}-end.png"
+                            end_meta_copy = dict(end_img_meta)
+                            end_meta_copy["run_prefix"] = block_end_prefix
+                            if not end_meta_copy.get("custom_filename"):
+                                end_meta_copy["custom_filename"] = (temp_dir / block_end_filename).resolve().as_posix()
+
+                            # Dynamic runtime resolution for $anchor and $start references
+                            if end_meta_copy.get("image_path") == "$anchor":
+                                end_meta_copy["image_path"] = anchor_img_path
+                                log(f"Resolved end_image image_path reference '$anchor' -> {Path(anchor_img_path).name}")
+                            elif end_meta_copy.get("image_path") == "$start":
+                                end_meta_copy["image_path"] = current_block_start_image
+                                log(f"Resolved end_image image_path reference '$start' -> {Path(current_block_start_image).name}")
+
+                            if end_meta_copy.get("keyframe_path") == "$anchor":
+                                end_meta_copy["keyframe_path"] = anchor_img_path
+                                log(f"Resolved end_image keyframe_path reference '$anchor' -> {Path(anchor_img_path).name}")
+                            elif end_meta_copy.get("keyframe_path") == "$start":
+                                end_meta_copy["keyframe_path"] = current_block_start_image
+                                log(f"Resolved end_image keyframe_path reference '$start' -> {Path(current_block_start_image).name}")
+
+                            _PIPELINE_STATUS["phase"] = f"end_image_generation ({scene_name} - {b_name})"
+                            notify_progress(
+                                f"Scene {scene_idx}/{total_scenes} [{scene_name}] - {b_name}: Preparing end keyframe...",
+                                progress=processed_blocks,
+                                total=total_blocks,
+                                cb=progress_callback
+                            )
+                            ok_end, end_path, _, end_res_meta = img_engine_mod.generate_anchor_frame(
+                                anchor_meta=end_meta_copy,
+                                width=width,
+                                height=height
+                            )
+                            if not ok_end:
+                                raise RuntimeError(f"failed end_image: {end_path}")
+                            block_end_img_path = end_path
+                            if isinstance(end_res_meta, dict) and end_res_meta.get("warnings"):
+                                for w in end_res_meta["warnings"]:
+                                    if w not in pipeline_warnings:
+                                        pipeline_warnings.append(w)
+
+                        save_tail_image = not is_last
 
                         req = VideoRequest(
                             image_path=start_img,
+                            end_image_path=block_end_img_path,
                             prefix_latent_path=pref_latent,
                             prefix_frames=pref_pixel_frames,
                             core_frames=core_frames,
                             tail_frames=tail_frames,
                             save_tail=save_tail,
                             save_tail_image=save_tail_image,
-                            prompt=motion_prompt,
+                            prompt=block_prompt,
                             negative_prompt=b_neg,
                             width=width,
                             height=height,
@@ -755,6 +877,9 @@ def execute_scenario_pipeline(
                             raise RuntimeError(f"failed video: {res.error}")
 
                         if not is_last:
+                            if res.tail_image_path and Path(res.tail_image_path).is_file():
+                                last_block_tail_image = res.tail_image_path
+
                             if overlap > 0 and save_tail and res.tail_latent_path and Path(res.tail_latent_path).is_file():
                                 next_tail_latent = res.tail_latent_path
                                 next_tail_latent_count = k_tail_lat

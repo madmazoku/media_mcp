@@ -25,13 +25,13 @@
           "name": "Block 1: Entering Compartment",
           "duration": 4.5,
           "overlap": 1.0,
-          "motion_prompt": "She gently slides the compartment door open with her hand, stepping inside gracefully, looking around with a polite, curious expression"
+          "prompt": "She gently slides the compartment door open with her hand, stepping inside gracefully, looking around with a polite, curious expression"
         },
         {
           "name": "Block 2: Sitting Down",
           "duration": 4.5,
           "overlap": 0.0,
-          "motion_prompt": "She moves toward the window seat and sits down gracefully, smoothing her pleated skirt with her hand, soft sunlight illuminating her face"
+          "prompt": "She moves toward the window seat and sits down gracefully, smoothing her pleated skirt with her hand, soft sunlight illuminating her face"
         }
       ]
     }

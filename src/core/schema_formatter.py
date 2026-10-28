@@ -208,6 +208,7 @@ def format_general_help() -> str:
         f"  {cmd} [--config <path>] <tool_name> [request.json | -]",
         f"  {cmd} <tool_name> --help",
         f"  {cmd} --help",
+        f"  {cmd} --version (-v)",
         "",
         "CONFIGURATION:",
         "  Requires explicit configuration path via:",

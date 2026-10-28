@@ -12,9 +12,13 @@
 2. **Сцена (`scenes[]`):** единая локация и состояние персонажа:
    - **`anchor_image`**: опорное изображение (`prompt`, либо `image_path` для img2img/inpaint/outpaint, либо готовый `keyframe_path`).
 3. **Блок (`scenes[].blocks[]`):** непрерывный отрезок видео (обычно 3–5 секунд):
-   - **`motion_prompt`**: описание действия персонажа и движения камеры.
+   - **`prompt`**: описание действия персонажа и движения камеры.
    - **`duration`**: чистая продолжительность генерируемого клипа (в секундах).
    - **`overlap`**: время латентного перекрытия со следующим блоком (`0.0` по умолчанию для чистого 1-кадрового I2V чейнинга; `> 0.0` для 5D латентного префикса).
+5. **Двустороннее кондиционирование начала и конца блока (First-Last Frame Conditioning) и ссылки `$start` / `$anchor`:**
+
+   - **Динамические ссылки в `end_image`:** поддержка `"image_path": "$start"` (img2img от начала блока: опорного кадра сцены в Блоке 1 или сохранённого `-tail.png` предыдущего блока в Блоках 2+ независимо от `overlap`) и `"image_path": "$anchor"` (img2img от опорного кадра сцены). Позволяет сохранять постоянный фон, стол и ракурс камеры при смене жестов/позы. Для точного возврата в исходный кадр без вызова генератора поддерживается `"keyframe_path": "$anchor"`.
+
 
 ---
 
@@ -46,12 +50,12 @@
         {
           "duration": 5.0,
           "overlap": 0.0,
-          "motion_prompt": "Lord Captain looking through viewport, stars outside drifting slowly, subtle breathing"
+          "prompt": "Lord Captain looking through viewport, stars outside drifting slowly, subtle breathing"
         },
         {
           "duration": 5.0,
           "overlap": 0.0,
-          "motion_prompt": "Lord Captain slowly turns head towards holographic console, dramatic amber light reflections"
+          "prompt": "Lord Captain slowly turns head towards holographic console, dramatic amber light reflections"
         }
       ]
     }
@@ -93,6 +97,10 @@ echo {"scenario_path": "examples/scenario.json", "dry_run": true} | bin/cli.cmd 
    - Все блоки кодируются с идентичными параметрами H.264 и собираются через `ffmpeg -f concat -safe 0 -c copy` без пережатия видеопотока.
 3. **Исключение дублирования стыковочного кадра:**
    - При 1-кадровом I2V чейнинге (`overlap = 0.0`) кадр 0 нового блока совпадает с последним кадром предыдущего. Пайплайн автоматически сдвигает нарезку ядра нового блока на 1 кадр (`batch_index = 1`), исключая микро-зависание видео на стыке.
+5. **Двустороннее кондиционирование начала и конца блока (First-Last Frame Conditioning):**
+   - **Wan 2.2:** при `overlap == 0` нода `WanFirstLastFrameToVideo` связывает стартовый кадр ($t=0$) и конечный кадр ($t=T-1$). При `overlap > 0` нода `WanLatentPrefixToVideo` кодирует `end_image` в последний темпоральный срез и выставляет 0.0 в 4-канальной маске `[B, 4, T_lat, H_lat, W_lat]` для среза $[-1]$, обеспечивая одновременный префиксный чейнинг начала и жесткую привязку конца блока.
+   - **LTX-Video:** подключает `LTXVPreprocess` (`img_compression=25`) $\to$ `LTXVAddGuide(frame_idx=-1, strength=0.7)` к латенту генерации со стохастическим сэмплером `euler_ancestral` (сохраняя исходный латент для `LTXVScheduler`), а после сэмплинга нода `LTXVCropGuides` вырезает служебные токены направляющих перед AdaIN-нормализацией и `VAEDecode`.
+
 4. **5D латентный префиксный чейнинг (`overlap > 0.0s`):**
    - **Wan 2.2 (`wan-fast`, `wan-full`):** использует `WanLatentPrefixLock` (инъекция префикса в сэмплер) + `WanLatentPrefixRestore` (принудительное восстановление префикса и **Latent AdaIN** выравнивание среднего $\mu$ и дисперсии $\sigma$ каналов латентов ядра по префиксу для исключения выцветания/раздувания контраста). Отрезка хвостового латента (`cut_tail_latent`) производится строго из нормализованного `latent_for_decode`.
    - **LTX-Video (`ltx`):** использует связку нативных нод `LTXVAddLatentGuide` (инъекция направляющего кадра с `noise_mask = 0.0` и RoPE-координатами) + `LTXVCropGuides` (отсечение guide-токенов) + `WanLatentPrefixRestore` (Latent AdaIN), полностью устраняя рестарт генерации каждого блока с белого шума.

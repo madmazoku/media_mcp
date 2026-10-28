@@ -121,6 +121,7 @@ media_mcp/
 │   └── test_mcp_and_cli.py
 │
 ├── pyproject.toml              # Конфигурация пакета и pytest
+├── CHANGELOG.md                # История изменений по стандарту Keep a Changelog и SemVer
 ├── requirements.txt            # Зависимости (jsonschema, requests, urllib3, Pillow)
 └── README.md                   # Главная документация
 ```
@@ -129,7 +130,8 @@ media_mcp/
 
 ## 🛠️ Справочник инструментов (MCP Tools & CLI)
 
-Все инструменты работают через единый диспетчер `src/core/tools.py`. Доступны через MCP (Stdio), SSE HTTP (`:7865`) и командную строку (`bin\cli.cmd`).
+Все инструменты работают через единый диспетчер `src/core/tools.py`. Доступны через MCP (Stdio), SSE HTTP (`:7865`) и командную строку (`bin\cli.cmd` / `bin/cli.sh`).
+Флаги CLI: `bin\cli.cmd --help` (справка по инструментам и схемам) и `bin\cli.cmd --version` / `-v` (инспекция версии сборки без необходимости передачи `--config`).
 Все параметры строго валидируются по `schemas/requests/<tool>.json` перед выполнением, а ответы — по `schemas/responses/<tool>.json`.
 
 ### 1. Генерация медиа
@@ -142,9 +144,10 @@ media_mcp/
     - `steps` *(int)*, `seed` *(int)*.
     - `cfg` *(number, для SDXL)*, `guidance` *(number, для FLUX)*.
     - `sampler` *(string, опционально)*: сэмплер.
+    - `prompt` *(string, опционально при наличии `image_path`)*: текстовый позитивный промпт. Если `image_path` указан без `prompt` и без `mask_path` при `fit="crop"`, выполняется пассивная подгонка разрешения без запуска диффузии.
     - `loras` *(array of `{"name": str, "strength": float}`, опционально)*.
     - `negative_prompt` *(string, для SDXL)*.
-    - `image_path` *(string, опционально)*: путь к исходному изображению для img2img / inpaint / outpaint.
+    - `image_path` *(string, опционально)*: путь к исходному изображению для img2img / inpaint / outpaint / crop.
     - `mask_path` *(string, опционально)*: путь к полутоновой маске инпейнтинга (1.0/белый = перегенерация, 0.0/чёрный = сохранение исходника).
     - `fit` *(`"crop"` | `"outpaint"`, опционально)*: стратегия подгонки при изменении пропорций исходника.
     - `denoise` *(number, 0.05..1.0, по умолчанию 0.65, для outpaint 0.85)*.
@@ -152,7 +155,8 @@ media_mcp/
 - **`video_generate`** (`schemas/requests/video_generate.json`):
   - Асинхронный запуск генерации: выполняет предварительную синхронную валидацию, сохраняет сценарий в `workflows/{run_prefix}-spec.json`, регистрирует задачу в очереди сервера и мгновенно возвращает `{"run_prefix": "...", "status": "queued", "spec_path": "..."}`.
   - Поддерживает `scenario_path` *(string)* и/или инлайн объект сценария (`video`, `image`, `scenes`).
-  - Все технические параметры (`engine`, `model`, `width`, `height`, `fps`, `steps`, `cfg`, `guidance`, `sampler`, `seed`, `max_duration`, `ramp_latents`, `min_cfg`, `weight_dtype`) задаются строго в корневых секциях `.image` и `.video`.
+  - В блоках сценария (`scenes[].blocks[]`) поддерживается опциональный `end_image` (first-last frame conditioning для Wan 2.2 и LTX-2.3).
+  - Все технические параметры (`engine`, `model`, `width`, `height`, `fps`, `steps`, `cfg`, `guidance`, `sampler`, `seed`, `ramp_latents`, `min_cfg`, `weight_dtype`) задаются строго в корневых секциях `.image` и `.video`.
   - Опциональный флаг `dry_run` *(boolean, по умолчанию `false`)*: при `true` выполняет мгновенную pre-flight валидацию, расчет хронометража и сохранение spec без постановки задачи на GPU (возвращает `status: "validated"`, `is_valid: true`, `total_duration`, `scenes_count`, `blocks_count`).
 - **`media_get_job`** (`schemas/requests/media_get_job.json`):
   - Опрос статуса, прогресса и получение результатов задачи по `run_prefix`. Поддерживает блокирующее ожидание `wait` (0-55 сек). По завершении возвращает структурированные контейнеры `video` и `image` (постер).
@@ -211,7 +215,6 @@ media_mcp/
     "width": 832,
     "height": 480,
     "fps": 16,
-    "max_duration": 10.0,
     "negative_prompt": "blurry, low quality, jitter, static, deformed, extra limbs, bad anatomy, text, watermark"
   },
   "scenes": [
@@ -225,13 +228,13 @@ media_mcp/
           "name": "Block 1: Opening Door",
           "duration": 4.5,
           "overlap": 1.0,
-          "motion_prompt": "She gently slides the compartment door open with her hand and steps inside, looking around curiously"
+          "prompt": "She gently slides the compartment door open with her hand and steps inside, looking around curiously"
         },
         {
           "name": "Block 2: Greeting",
           "duration": 4.5,
           "overlap": 0.0,
-          "motion_prompt": "She notices the passenger across from her and smiles warmly while sitting down"
+          "prompt": "She notices the passenger across from her and smiles warmly while sitting down"
         }
       ]
     }

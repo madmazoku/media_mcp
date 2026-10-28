@@ -100,6 +100,7 @@ class ImageRequest(GenerationRequest):
 @dataclass
 class VideoRequest(GenerationRequest):
     image_path: Optional[str] = None
+    end_image_path: Optional[str] = None
     prefix_latent_path: Optional[str] = None
     prefix_frames: int = 0
     negative_prompt: str = ""

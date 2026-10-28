@@ -16,13 +16,13 @@ graph TD
 
         subgraph Scene1["Сцена 1 (.scenes[0])"]
             S1_ANCHOR["Опорный кадр (anchor_image)\nТолько нарратив и кадрирование: prompt, loras, image_path, mask_path, fit, denoise"]
-            S1_B1["Блок #1 (.blocks[0])\nmotion_prompt, duration, overlap, loras"]
-            S1_B2["Блок #2 (.blocks[1])\nmotion_prompt, duration, overlap, loras"]
+            S1_B1["Блок #1 (.blocks[0])\nprompt, duration, overlap, loras"]
+            S1_B2["Блок #2 (.blocks[1])\nprompt, duration, overlap, loras"]
         end
 
         subgraph Scene2["Сцена 2 (.scenes[1])"]
             S2_ANCHOR["Опорный кадр (anchor_image)\nНовая поза/одежда/ракурс"]
-            S2_B1["Блок #1 (.blocks[0])\nmotion_prompt, duration, overlap, loras"]
+            S2_B1["Блок #1 (.blocks[0])\nprompt, duration, overlap, loras"]
         end
     end
 
@@ -49,11 +49,17 @@ graph TD
    - Размеры опорных кадров (`anchor_image`) автоматически наследуют `width` и `height` из `.video` для гарантированного совпадения пропорций.
 2. **Нарративные параметры в `scenes[].anchor_image` и `scenes[].blocks[]`:**
    - В `anchor_image`: `prompt`, `negative_prompt`, `loras`, `image_path`, `keyframe_path`, `mask_path`, `fit`, `denoise`.
-   - В `blocks[]`: `name`, `duration`, `overlap`, `motion_prompt`, `negative_prompt`, `loras`.
+   - В `blocks[]`: `name`, `duration`, `overlap`, `prompt`, `negative_prompt`, `loras`, `end_image`.
 3. **Порядок конкатенации промптов (`combine_prompts`):**
    - Локальный промпт сцены или блока ставится **в начало**, а глобальный базовый промпт из `.image.prompt` / `.video.prompt` — **в конец** через перенос строки (`\n`):
      $$\text{Final Prompt} = \text{local\_prompt} + \text{"\textbackslash n"} + \text{global\_prompt}$$
    - **Обоснование:** Токены в начале промпта получают наибольший вес внимания в CLIP/T5, что позволяет усилить специфику конкретного кадра или движения блока, сохраняя глобальный стиль и описание персонажа в качестве контекстного базиса.
+5. **Конечный опорный кадр блока (`end_image` / First-Last Frame Conditioning):**
+   - Каждый блок может содержать опциональный объект `end_image`, задающий конечное целевое состояние движения (First-Last Frame Conditioning).
+   - Формат `end_image` идентичен `anchor_image` (поддерживает `keyframe_path`, `image_path`, `prompt`, `fit`, `denoise`, `loras`).
+   - **Инвариант чейнинга:** добавление `end_image` не меняет логику построения последующих блоков: блок $N$ диффундирует от своего старта (для блока 1 — `anchor_image`, для блока 2+ — хвост блока $N-1$) к целевому кадру `end_image`. Следующий блок $N+1$ начинает движение с фактического хвоста блока $N$ (пиксельного `-tail.png` при `overlap=0` или 5D латентного `-tail.latent` при `overlap>0`), сохраняя бесшовность сборки.
+   - **Аппаратная реализация:** для Wan 2.2 задействуется `WanFirstLastFrameToVideo` (при `overlap=0`) либо `WanLatentPrefixToVideo` с 4-канальной суб-фрейм маской (при `overlap>0`); для LTX-2.3 задействуется `LTXVAddGuide(frame_idx=-1)` с последующим `LTXVCropGuides`.
+
 4. **Списки LoRA (`loras`):**
    - Глобальный список `loras` из `.image` / `.video` объединяется с локальным списком сцены или блока (`merge_lora_lists`). Если одна и та же LoRA указана и глобально, и локально, применяется `strength` из локальной секции.
 
@@ -76,7 +82,7 @@ graph TD
         {
           "duration": 5.0,
           "overlap": 0.0,
-          "motion_prompt": "Slow tracking shot from behind, soft reflection on the window glass"
+          "prompt": "Slow tracking shot from behind, soft reflection on the window glass"
         }
       ]
     }
