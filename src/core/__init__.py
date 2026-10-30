@@ -1,5 +1,5 @@
 # media_mcp core package
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 
 from .config import (
     COMFY_URL, SD_WEBUI_URL, OUTPUT_DIR, OUTPUT_IMG_DIR, OUTPUT_VID_DIR,

@@ -137,14 +137,12 @@ class TestVideoPipeline(unittest.TestCase):
                 ltx_gen.generate(req_prefix)
                 wf = captured_wfs[-1]
 
-                # Must use LoadLatent + LTXVAddLatentGuide + LTXVCropGuides + LTXVAdainLatent (without WanLatentPrefixRestore overwriting t=0)
+                # Must use LoadLatent + in-canvas LTXLatentPrefixToVideo + LTXVAdainLatent
                 self.assertIn("load_prefix_latent", wf)
                 self.assertEqual(wf["load_prefix_latent"]["class_type"], "LoadLatent")
-                self.assertIn("ltx_latent_guide", wf)
-                self.assertEqual(wf["ltx_latent_guide"]["class_type"], "LTXVAddLatentGuide")
-                self.assertEqual(wf["ltx_latent_guide"]["inputs"]["strength"], 1.0)
-                self.assertIn("ltx_crop_guides", wf)
-                self.assertEqual(wf["ltx_crop_guides"]["class_type"], "LTXVCropGuides")
+                self.assertIn("ltx_latent_prefix", wf)
+                self.assertEqual(wf["ltx_latent_prefix"]["class_type"], "LTXLatentPrefixToVideo")
+                self.assertEqual(wf["ltx_latent_prefix"]["inputs"]["strength"], 1.0)
                 self.assertIn("ltx_adain_latent", wf)
                 self.assertEqual(wf["ltx_adain_latent"]["class_type"], "LTXVAdainLatent")
                 self.assertNotIn("prefix_latent_restore", wf)
@@ -175,11 +173,11 @@ class TestVideoPipeline(unittest.TestCase):
                 self.assertNotIn("prefix_latent_decode", wf)
                 self.assertNotIn("inplace_cond", wf)
 
-                # Guider and Sampler must receive guided conditioning, while LTXVScheduler receives empty_latent
-                self.assertEqual(wf["guider"]["inputs"]["positive"], ["ltx_latent_guide", 0])
-                self.assertEqual(wf["guider"]["inputs"]["negative"], ["ltx_latent_guide", 1])
+                # Guider receives clean conditioning, while Sampler receives in-canvas prefix latent
+                self.assertEqual(wf["guider"]["inputs"]["positive"], ["ltxv_cond", 0])
+                self.assertEqual(wf["guider"]["inputs"]["negative"], ["ltxv_cond", 1])
+                self.assertEqual(wf["sampler"]["inputs"]["latent_image"], ["ltx_latent_prefix", 0])
                 self.assertEqual(wf["scheduler"]["inputs"]["latent"], ["empty_latent", 0])
-                self.assertEqual(wf["sampler"]["inputs"]["latent_image"], ["ltx_latent_guide", 2])
                 self.assertEqual(wf["vae_decode"]["inputs"]["samples"], ["ltx_adain_latent", 0])
 
                 # Verify LTX 1-frame image mode uses LTXVPreprocess (CRF=33) + LTXVImgToVideoInplace (strength=0.9)
@@ -217,6 +215,23 @@ class TestVideoPipeline(unittest.TestCase):
             self.assertEqual(wf_wan["stage2_adain_core"]["class_type"], "LTXVAdainLatent")
             self.assertEqual(wf_wan["sampler_stage2"]["inputs"]["latent_image"], ["stage1_restored", 0])
             self.assertEqual(wf_wan["prefix_latent_restore"]["inputs"]["samples"], ["stage2_concat", 0])
+
+            # Verify Wan guard auto-routes high steps/cfg requests from wan-fast to wan-full
+            req_oversampled = VideoRequest(
+                prompt="fast action",
+                model="wan2.2_i2v_14B_fp8_scaled.safetensors",
+                steps=25,
+                cfg=5.0,
+                width=832,
+                height=480,
+                fps=16,
+                num_frames=65,
+                image_path=dummy_img.as_posix()
+            )
+            with patch("core.generators.video_generators.WanFullVideoGenerator.generate", return_value=GenerationResult(success=True, file_path="routed.mp4")) as mock_full:
+                res_routed = wan_gen.generate(req_oversampled)
+                self.assertTrue(res_routed.success)
+                mock_full.assert_called_once_with(req_oversampled)
 
     def test_04_video_generate_synchronous_validation_and_job_lifecycle(self):
         """Verify video_generate pre-flight validation rejects timing errors synchronously, supports dry_run, and queues valid jobs."""

@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Each release version `0.<N>.0` directly corresponds to task **AI-<N>**.
 
+## [0.15.0] - 2026-10-28 (AI-15)
+
+### Added
+- **LTX In-Canvas Latent Prefix Conditioning (`LTXLatentPrefixToVideo`)**:
+  - Implemented custom ComfyUI node `LTXLatentPrefixToVideo` in `custom_nodes/ComfyUI-MediaMCP/ltx_latent_nodes.py` to replace the flawed `LTXVAddLatentGuide` + `LTXVCropGuides` pattern.
+  - Directly injects prefix latent frames into the canvas (`samples[:, :, :k] = prefix_latent`) and locks them with Diffusion Forcing denoise mask (`noise_mask[:, :, :k] = 0.0`), preventing canvas collapse to white noise and eliminating temporal drift.
+  - Automatically matches spatial dimensions (downscale factor 32) and coordinates post-diffusion color stabilization with `LTXVAdainLatent`.
+- **Wan Fast-Mode Guard & Auto-Routing**:
+  - Added intelligent auto-routing in `WanFastVideoGenerator`: when `steps > 8` or `cfg > 2.0` are requested, the engine detects that 4-step consistency LoRAs (Lightx2v) cannot be over-sampled and automatically routes execution to `WanFullVideoGenerator` (`wan-full`), running pure High/Low Noise UNets safely without burning latents.
+
+### Changed
+- Refactored `LtxVideoGenerator` workflow to utilize in-canvas `LTXLatentPrefixToVideo` while preserving `LTXVCropGuides` strictly for end keyframe conditioning.
+- Synchronized repository engineering rules in `docs/RULES.md` and added Defect 14 in `docs/MEDIA_MCP_KNOWLEDGE_BASE.md`.
+
 ## [0.14.0] - 2026-10-28 (AI-14)
 
 ### Added

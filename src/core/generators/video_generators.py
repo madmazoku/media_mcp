@@ -626,6 +626,18 @@ class WanFastVideoGenerator(BaseWanVideoGenerator):
     def generate(self, request: VideoRequest) -> GenerationResult:
         actual_steps = int(request.steps or self.settings.get("steps", 4))
         actual_cfg = float(request.cfg if request.cfg is not None else self.settings.get("cfg", 1.0))
+
+        # Wan Guard: 4-step consistency LoRA (Lightx2v) cannot be over-sampled with high steps/CFG
+        # without extreme latent variance explosion. Auto-route to wan-full (pure UNet) if requested.
+        if actual_steps > 8 or actual_cfg > 2.0:
+            log(
+                f"Wan Guard: 'wan-fast' uses 4-step consistency LoRA (Lightx2v), strictly designed for 4 steps and CFG 1.0. "
+                f"Requested steps={actual_steps}, cfg={actual_cfg} would cause severe latent variance explosion and burned output. "
+                f"Auto-routing request to 'wan-full' (pure UNet) generator to safely fulfill requested steps and CFG."
+            )
+            full_gen = WanFullVideoGenerator(name="wan-full", settings=self.settings)
+            return full_gen.generate(request)
+
         split_step = max(1, actual_steps // 2)
 
         if request.out_video_name:
@@ -900,27 +912,25 @@ class LtxVideoGenerator(BaseVideoGenerator):
                 suffix="prefix"
             )
 
-            log(f"Configuring NATIVE 5D LATENT PREFIX for LTX via LTXVAddLatentGuide + LTXVCropGuides + LTXVAdainLatent: {prefix_fn}")
+            log(f"Configuring IN-CANVAS 5D LATENT PREFIX for LTX via LTXLatentPrefixToVideo + LTXVAdainLatent: {prefix_fn}")
             wf["load_prefix_latent"] = {
                 "inputs": {"latent": prefix_fn},
                 "class_type": "LoadLatent"
             }
-            wf["ltx_latent_guide"] = {
+            wf["ltx_latent_prefix"] = {
                 "inputs": {
-                    "positive": ["ltxv_cond", 0],
-                    "negative": ["ltxv_cond", 1],
-                    "vae": ["vae_loader", 0],
                     "latent": ["empty_latent", 0],
-                    "guiding_latent": ["load_prefix_latent", 0],
-                    "latent_idx": 0,
-                    "strength": 1.0
+                    "prefix_latent": ["load_prefix_latent", 0],
+                    "strength": 1.0,
+                    "ramp_latents": int(request.ramp_latents if request.ramp_latents is not None else self.settings.get("ramp_latents", 0))
                 },
-                "class_type": "LTXVAddLatentGuide"
+                "class_type": "LTXLatentPrefixToVideo"
             }
-            active_positive = ["ltx_latent_guide", 0]
-            active_negative = ["ltx_latent_guide", 1]
-            active_latent_node = ["ltx_latent_guide", 2]
-            has_guides = True
+            active_positive = ["ltxv_cond", 0]
+            active_negative = ["ltxv_cond", 1]
+            active_latent_node = ["ltx_latent_prefix", 0]
+            scheduler_latent_node = ["empty_latent", 0]
+            has_guides = False
             has_prefix_latent = True
         elif request.image_path and Path(str(request.image_path)).is_file():
             img_fn = comfy_client.upload_file_to_comfy(
@@ -989,27 +999,30 @@ class LtxVideoGenerator(BaseVideoGenerator):
             active_latent_node = ["ltx_end_guide", 2]
             has_guides = True
 
+        current_latent = ["sampler", 0]
         if has_guides:
             wf["ltx_crop_guides"] = {
                 "inputs": {
                     "positive": active_positive,
                     "negative": active_negative,
-                    "latent": ["sampler", 0]
+                    "latent": current_latent
                 },
                 "class_type": "LTXVCropGuides"
             }
-            if has_prefix_latent:
-                wf["ltx_adain_latent"] = {
-                    "inputs": {
-                        "latents": ["ltx_crop_guides", 2],
-                        "reference": ["load_prefix_latent", 0],
-                        "factor": 1.0
-                    },
-                    "class_type": "LTXVAdainLatent"
-                }
-                latent_for_decode = ["ltx_adain_latent", 0]
-            else:
-                latent_for_decode = ["ltx_crop_guides", 2]
+            current_latent = ["ltx_crop_guides", 2]
+
+        if has_prefix_latent:
+            wf["ltx_adain_latent"] = {
+                "inputs": {
+                    "latents": current_latent,
+                    "reference": ["load_prefix_latent", 0],
+                    "factor": 1.0
+                },
+                "class_type": "LTXVAdainLatent"
+            }
+            latent_for_decode = ["ltx_adain_latent", 0]
+        else:
+            latent_for_decode = current_latent
 
         default_sampler = "euler_ancestral"
         actual_sampler = str(getattr(request, "sampler", None) or self.settings.get("sampler") or default_sampler).strip()
