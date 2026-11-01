@@ -145,6 +145,10 @@ def queue_prompt(workflow: Dict[str, Any]) -> Tuple[bool, str]:
     payload = {"prompt": workflow}
     try:
         res = make_request("/prompt", data=payload, method="POST", timeout=30)
+        node_errors = res.get("node_errors")
+        if node_errors:
+            import json
+            return False, f"ComfyUI node validation errors: {json.dumps(node_errors)}"
         prompt_id = res.get("prompt_id")
         if not prompt_id:
             return False, f"No prompt_id returned: {res}"
@@ -166,17 +170,22 @@ def set_global_progress_callback(cb):
 
 def wait_for_prompt(
     prompt_id: str,
-    timeout: int = 600,
-    poll_interval: float = 0.5,
-    progress_callback: Optional[Any] = None
+    timeout: int = 1800,
+    poll_interval: float = 2.0,
+    progress_callback: Optional[Any] = None,
+    max_unresponsive_seconds: float = 300.0
 ) -> Tuple[bool, Dict[str, Any]]:
     """
     Monitors prompt execution in ComfyUI with active queue tracking and HTTP Keep-Alive.
+    Includes a robust grace period for ComfyUI HTTP event loop unresponsiveness during
+    heavy GPU, VAE decoding, or frame interpolation workloads.
     """
     start_time = time.time()
     execution_start_time: Optional[float] = None
     last_notify = 0.0
     was_seen_in_queue = False
+    was_running = False
+    unresponsive_since: Optional[float] = None
     cb = progress_callback or _GLOBAL_PROGRESS_CALLBACK
     max_queue_wait = 1800.0
 
@@ -188,9 +197,9 @@ def wait_for_prompt(
         now = time.time()
         total_elapsed = now - start_time
 
-        # 1. Fast history check
+        # 1. Fast history check (20s socket timeout)
         try:
-            history = make_request(f"/history/{prompt_id}", timeout=5)
+            history = make_request(f"/history/{prompt_id}", timeout=20)
             if prompt_id in history:
                 prompt_hist = history[prompt_id]
                 status = prompt_hist.get("status", {})
@@ -201,13 +210,15 @@ def wait_for_prompt(
         except Exception:
             pass
 
-        # 2. Check position in ComfyUI queue
+        # 2. Check position in ComfyUI queue (20s socket timeout)
         in_pending = False
         in_running = False
         queue_pos = None
+        queue_fetch_ok = False
 
         try:
-            q_data = make_request("/queue", timeout=5)
+            q_data = make_request("/queue", timeout=20)
+            queue_fetch_ok = True
             running_list = q_data.get("queue_running", [])
             for item in running_list:
                 if len(item) > 1 and item[1] == prompt_id:
@@ -222,11 +233,64 @@ def wait_for_prompt(
                         queue_pos = idx + 1
                         break
         except Exception:
-            pass
+            queue_fetch_ok = False
 
         if in_pending or in_running:
             was_seen_in_queue = True
+        if in_running:
+            was_running = True
 
+        # 3. Handle network/socket unresponsiveness with grace period
+        if not queue_fetch_ok:
+            if unresponsive_since is None:
+                unresponsive_since = now
+            unresponsive_dur = now - unresponsive_since
+
+            if was_running:
+                if execution_start_time is None:
+                    execution_start_time = now
+                exec_elapsed = now - execution_start_time
+                if exec_elapsed > timeout:
+                    return False, {"error": f"Execution timeout after {timeout}s diffusing prompt {prompt_id}"}
+
+                if unresponsive_dur > max_unresponsive_seconds:
+                    return False, {
+                        "error": (
+                            f"ComfyUI HTTP event loop remained unresponsive for {int(unresponsive_dur)}s "
+                            f"(exceeded {int(max_unresponsive_seconds)}s grace period) while diffusing prompt {prompt_id[:8]}"
+                        )
+                    }
+
+                if total_elapsed - last_notify >= 5.0:
+                    last_notify = total_elapsed
+                    msg = (
+                        f"ComfyUI event loop is busy with heavy compute ({int(unresponsive_dur)}s silence), "
+                        f"prompt {prompt_id[:8]} still diffusing on GPU (elapsed: {int(exec_elapsed)}s)"
+                    )
+                    if cb:
+                        try:
+                            cb(msg, None, None)
+                        except Exception:
+                            pass
+                    log(msg)
+            else:
+                if total_elapsed > max_queue_wait:
+                    return False, {"error": f"Queue wait timeout after {int(max_queue_wait)}s waiting for prompt {prompt_id}"}
+                if unresponsive_dur > max_unresponsive_seconds:
+                    return False, {
+                        "error": (
+                            f"ComfyUI HTTP event loop remained unresponsive for {int(unresponsive_dur)}s "
+                            f"(exceeded {int(max_unresponsive_seconds)}s grace period) waiting for prompt {prompt_id[:8]}"
+                        )
+                    }
+
+            time.sleep(poll_interval)
+            continue
+
+        # Server responded with valid queue data: reset unresponsive tracker
+        unresponsive_since = None
+
+        # 4. Handle known queue states
         if in_pending:
             if total_elapsed > max_queue_wait:
                 return False, {"error": f"Queue wait timeout after {int(max_queue_wait)}s waiting for prompt {prompt_id}"}
@@ -261,19 +325,22 @@ def wait_for_prompt(
                 log(msg)
 
         else:
+            # Prompt has left queue_running and queue_fetch_ok is True.
+            # Give ComfyUI up to 15 seconds (with retries) to serialize history and flush outputs
             if was_seen_in_queue or total_elapsed >= 5.0:
-                time.sleep(0.5)
-                try:
-                    history = make_request(f"/history/{prompt_id}", timeout=5)
-                    if prompt_id in history:
-                        prompt_hist = history[prompt_id]
-                        status = prompt_hist.get("status", {})
-                        if status.get("status_str") == "error":
-                            return False, {"error": status.get("messages", "ComfyUI reported execution error")}
-                        if status.get("completed", False) or (prompt_hist.get("outputs") and len(prompt_hist["outputs"]) > 0):
-                            return True, prompt_hist
-                except Exception:
-                    pass
+                for _ in range(5):
+                    time.sleep(1.0)
+                    try:
+                        history = make_request(f"/history/{prompt_id}", timeout=20)
+                        if prompt_id in history:
+                            prompt_hist = history[prompt_id]
+                            status = prompt_hist.get("status", {})
+                            if status.get("status_str") == "error":
+                                return False, {"error": status.get("messages", "ComfyUI reported execution error")}
+                            if status.get("completed", False) or (prompt_hist.get("outputs") and len(prompt_hist["outputs"]) > 0):
+                                return True, prompt_hist
+                    except Exception:
+                        pass
 
                 return False, {
                     "error": f"ComfyUI prompt {prompt_id[:8]} disappeared from queue without completing (possible crash, CUDA error, or manual cancellation)."

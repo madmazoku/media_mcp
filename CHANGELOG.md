@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Each release version `0.<N>.0` directly corresponds to task **AI-<N>**.
 
+## [0.16.0] - 2026-10-30 (AI-16)
+
+### Added
+- **Temporal & Spatial Multipliers (`fps_multiplier`, `size_multiplier`)**:
+  - Added support for `fps_multiplier` (integer $\ge 1$, min 1, max 8) for temporal frame interpolation using ComfyUI `RIFE VFI` (`rife47.pth`). Enforcing integer multipliers guarantees that 100% of diffusion ground-truth frames remain intact without cadence judder.
+  - Added support for `size_multiplier` (float $\ge 1.0$, min 1.0, max 4.0) for high-performance spatial upscaling using ComfyUI `ImageScale` (`lanczos`), snapped to 16px (Wan) or 32px (LTX) with 0 additional VRAM footprint.
+  - Chaining Isolation: Latent tails (`-tail.latent`) and tail keyframe images (`-tail.png`) are strictly tapped prior to VFI and upscaling directly from native unscaled latents and decoded pixels, preventing recursive interpolation or scaling degradation across sequential blocks.
+  - Added `8`, `12`, and `48` to `fps` enum in `schemas/scenario.json` to support 12fps base generation and 48fps high-motion output.
+- **Frame-Based Window Limits (`ENGINE_MAX_FRAMES`)**:
+  - Replaced hardcoded wall-clock second limits with hardware/architecture frame limits: `97` frames for `wan-fast`/`wan-full` and `385` frames for `ltx`.
+  - Dynamic limit duration in seconds is now calculated dynamically as $	ext{limit\_sec} = (N_{	ext{max}} - 1) / 	ext{fps}$ (e.g. 8.0s at 12 fps and 6.0s at 16 fps for Wan; 16.0s at 24 fps for LTX).
+  - Pre-flight timing validation and runtime window warnings now report exact frame counts and framerate context.
+
+### Added
+- **ComfyUI Event Loop Resilience & Unresponsiveness Grace Period**:
+  - Implemented 300-second (5-minute) unresponsiveness grace period in `comfy_client.wait_for_prompt()` for heavy GPU, VAE decoding, RIFE VFI, and Lanczos scaling workloads.
+  - Strict decoupling of HTTP socket read timeouts from task queue status (`queue_fetch_ok` flag): temporary network lag no longer triggers false positive prompt disappearance or premature failures.
+  - Relaxed active GPU polling interval from 0.5s to 2.0s to eliminate aiohttp event loop starvation, and increased single-request socket timeouts from 5s to 20s.
+  - Added direct filesystem output fallback in `BaseVideoGenerator._execute_comfy_workflow()` to verify `-core.mp4` presence in `COMFY_OUTPUT_DIR` before reporting failure.
+
+### Changed
+- Updated `VideoRequest` with `fps_multiplier` and `size_multiplier`.
+- Updated `WanFastVideoGenerator`, `WanFullVideoGenerator`, and `LtxVideoGenerator` ComfyUI workflow builders to integrate `RIFE VFI` (with explicit `dtype: "float32"` and `torch_compile: False`) and `ImageScale` (with `crop: "disabled"`) into core clip post-processing.
+- Updated documentation in `docs/RULES.md` (Rule 6), `docs/MEDIA_MCP_KNOWLEDGE_BASE.md` (Defect 15 & 16), `README.md`, and `.agents/skills/video-scenario/SKILL.md`.
+
 ## [0.15.0] - 2026-10-28 (AI-15)
 
 ### Added

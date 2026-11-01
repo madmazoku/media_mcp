@@ -24,7 +24,10 @@
    - Непрерывное сохранение динамики сцены внутри монтажа для `wan-fast`, `wan-full` и `ltx`: при `overlap > 0` хвост предыдущего блока (`-tail.latent`) отрезается через `LatentCut` и передаётся в следующий блок через 5D-ноды `WanLatentPrefixLock` / `WanLatentPrefixRestore` (для Wan) и in-canvas ноду `LTXLatentPrefixToVideo` (для LTX) без промежуточного декодирования в пиксели. При `overlap == 0.0` (дефолт) используется бесшовная 1-кадровая сцепка по последнему кадру (`-tail.png`).
 5. **Чистовая основа блоков и Stream Copy (-c copy):**
    - Чистовая основа каждого блока (`-core.mp4`) сохраняется напрямую в H.264. Финальная сборка всех блоков в FFmpeg происходит через мгновенный **Stream Copy (`-c copy`) без перекодирования**.
-6. **Zero-VRAM Discovery, бандлы Wan 2.2 и парсинг триггеров LoRA:**
+6. **Временная и пространственная постобработка (`fps_multiplier`, `size_multiplier`):**
+   - Поддержка темпоральной интерполяции кадров через RIFE VFI (`rife47.pth`, целочисленный множитель $\ge 1$) и быстрого пространственного масштабирования через ComfyUI `ImageScale` (`lanczos`, множитель $\ge 1.0$) с квантованием размеров по 16px (Wan) / 32px (LTX).
+   - Архитектурная изоляция: хвосты связывания (`-tail.latent`, `-tail.png`) отбираются строго до апскейла и VFI, исключая рекурсивное накопление артефактов.
+7. **Zero-VRAM Discovery, бандлы Wan 2.2 и парсинг триггеров LoRA:**
    - Автоматическая классификация архитектур моделей и LoRA (`sdxl`, `flux1`, `flux2`, `wan-fast`, `wan-full`, `ltx`) по бинарным заголовкам `.safetensors` (`<0.5ms`, без зависимости от `torch`).
    - Автоматическая группировка парных моделей `high_noise` и `low_noise` для `wan-fast` и `wan-full` в единый канонический идентификатор бандла (например, `wan2.2_i2v_14B_fp8_scaled.safetensors`).
    - Извлечение триггерных слов LoRA из заголовков `.safetensors` и sidecar-файлов (`.json`, `.civitai.info`) для всех движков.
@@ -246,8 +249,9 @@ media_mcp/
 Блок $i$ получает хвост предыдущего блока $\text{prefix\_duration} = \text{overlap}_{i-1}$ (для первого блока сцены $\text{prefix\_duration} = 0$), диффундирует суммарное окно $\text{prefix\_duration} + \text{clip\_duration}$, отсекает префикс через `ImageFromBatch` и отдаёт в финальную склейку ровно $\text{clip\_duration}$ чистого видео:
 1. **Хвост меньше самого клипа:**
    $$\text{overlap\_duration} < \text{clip\_duration}$$
-2. **Суммарное окно генерации строго меньше лимита движка (6.0 сек для `wan-fast`/`wan-full` и 16.0 сек для `ltx`):**
-   $$\text{prefix\_duration} + \text{clip\_duration} < \text{engine\_max\_duration}$$
+2. **Суммарное окно генерации строго меньше лимита движка по кадрам (`ENGINE_MAX_FRAMES`: 97 кадров для `wan-fast`/`wan-full` и 385 кадров для `ltx`):**
+   $$\text{prefix\_frames} + \text{clip\_frames} < \text{ENGINE\_MAX\_FRAMES}[\text{engine}]$$
+   Динамический лимит длительности в секундах: $\text{limit\_sec} = (N_{\text{max}} - 1) / \text{fps}$ (например, для Wan: 6.0с при 16 fps, 8.0с при 12 fps; для LTX: 16.0с при 24 fps).
 3. **Итоговая длительность сцены:** равна чистой сумме $\sum \text{clip\_duration}$ всех блоков сцены.
 
 ---

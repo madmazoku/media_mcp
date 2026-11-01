@@ -103,6 +103,48 @@ class TestMcpServerAndCli(unittest.TestCase):
             self.assertTrue(ok)
             self.assertIn("outputs", hist)
 
+        # Verify resilience to HTTP event loop unresponsiveness during heavy compute:
+        # Step 0: queue_running -> was_running becomes True
+        # Steps 1..3: make_request raises ReadTimeout (event loop blocked)
+        # Step 4: make_request returns history
+        heavy_seq = {"step": 0}
+
+        def mock_heavy_compute(endpoint, data=None, method="GET", raw=False, timeout=30):
+            step = heavy_seq["step"]
+            if endpoint.startswith("/history"):
+                if step >= 4:
+                    return {"heavy_pid": {"status": {"completed": True}, "outputs": {"1": {"videos": ["out.mp4"]}}}}
+                raise requests.exceptions.ReadTimeout("ComfyUI event loop blocked")
+            elif endpoint == "/queue":
+                if step == 0:
+                    heavy_seq["step"] += 1
+                    return {"queue_running": [[1, "heavy_pid"]], "queue_pending": []}
+                elif step < 4:
+                    heavy_seq["step"] += 1
+                    raise requests.exceptions.ReadTimeout("ComfyUI event loop blocked")
+                return {"queue_running": [], "queue_pending": []}
+            return {}
+
+        with patch("core.comfy_client.make_request", side_effect=mock_heavy_compute):
+            ok, hist = comfy_client.wait_for_prompt("heavy_pid", timeout=10, poll_interval=0.01, max_unresponsive_seconds=5.0)
+            self.assertTrue(ok)
+            self.assertIn("outputs", hist)
+
+        # Verify timeout when unresponsiveness exceeds max_unresponsive_seconds
+        def mock_perma_blocked(endpoint, data=None, method="GET", raw=False, timeout=30):
+            raise requests.exceptions.ReadTimeout("ComfyUI server down")
+
+        with patch("core.comfy_client.make_request", side_effect=mock_perma_blocked):
+            ok_fail, err_hist = comfy_client.wait_for_prompt("stuck_pid", timeout=10, poll_interval=0.01, max_unresponsive_seconds=0.05)
+            self.assertFalse(ok_fail)
+            self.assertIn("unresponsive", err_hist.get("error", ""))
+
+        # Test queue_prompt catching node_errors immediately
+        with patch("core.comfy_client.make_request", return_value={"prompt_id": "p1", "node_errors": {"vfi": {"errors": ["missing batch_size"]}}}):
+            q_ok, q_err = comfy_client.queue_prompt({"test": {}})
+            self.assertFalse(q_ok)
+            self.assertIn("ComfyUI node validation errors", q_err)
+
     def test_03_topological_reload_preserves_config_and_gpu_lock(self):
         """Verify reload_core_modules reloads in topological order and preserves _GPU_LOCK and config."""
         lock_before = tools._GPU_LOCK

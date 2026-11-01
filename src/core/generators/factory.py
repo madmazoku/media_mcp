@@ -48,3 +48,24 @@ def create_video_generator(engine_or_name: str = "wan-fast", settings: Optional[
             f"Unsupported video engine '{engine_or_name}'. Allowed values: {list(VIDEO_GENERATOR_REGISTRY.keys())}"
         )
     return cls(name=key, settings=settings)
+
+def get_image_generator_class(engine_or_name: str = "sdxl") -> Type[BaseImageGenerator]:
+    """Returns the BaseImageGenerator class for a given engine name without instantiation."""
+    key = str(engine_or_name or "sdxl").strip().lower()
+    cls = IMAGE_GENERATOR_REGISTRY.get(key)
+    if cls is None:
+        raise ValueError(
+            f"Unsupported image engine '{engine_or_name}'. Allowed values: {list(IMAGE_GENERATOR_REGISTRY.keys())}"
+        )
+    return cls
+
+
+def get_video_generator_class(engine_or_name: str = "wan-fast") -> Type[BaseVideoGenerator]:
+    """Returns the BaseVideoGenerator class for a given engine name without instantiation."""
+    key = str(engine_or_name or "wan-fast").strip().lower()
+    cls = VIDEO_GENERATOR_REGISTRY.get(key)
+    if cls is None:
+        raise ValueError(
+            f"Unsupported video engine '{engine_or_name}'. Allowed values: {list(VIDEO_GENERATOR_REGISTRY.keys())}"
+        )
+    return cls

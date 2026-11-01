@@ -69,7 +69,11 @@ def calculate_native_dimensions(
 
     if multiple_of is None:
         eng_lower = str(engine or "sdxl").strip().lower()
-        multiple_of = 64 if eng_lower == "sdxl" else 16
+        try:
+            from .generators import get_image_generator_class
+            multiple_of = get_image_generator_class(eng_lower).spatial_stride
+        except Exception:
+            multiple_of = 64 if eng_lower == "sdxl" else 16
 
     ar = src_w / src_h
     ideal_h = math.sqrt(target_area / ar)

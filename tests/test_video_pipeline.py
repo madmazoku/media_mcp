@@ -763,5 +763,224 @@ class TestVideoPipeline(unittest.TestCase):
             self.assertTrue(captured_requests[0].save_tail_image)
             self.assertTrue(captured_requests[0].save_tail)
 
+    def test_09_multipliers_post_processing_and_frame_based_limits(self):
+        """Verify fps_multiplier (RIFE VFI), size_multiplier (ImageScale Lanczos), and frame-based limits."""
+        from core.generators import snap_to_16, snap_to_32
+
+        # 1. Timing validation respecting ENGINE_MAX_FRAMES
+        # Wan: max_frames=97.
+        # At 12 fps, 7.0s is 84 frames <= 96 -> Valid!
+        valid_wan_scenes = [
+            {
+                "scene_name": "Scene 1",
+                "anchor_image": {"prompt": "hero anchor"},
+                "blocks": [
+                    {"name": "Block 1", "duration": 7.0, "prompt": "action 1"}
+                ]
+            }
+        ]
+        errors = video_pipeline.collect_scenario_timing_errors(valid_wan_scenes, default_engine="wan-fast", default_fps=12)
+        self.assertEqual(errors, [])
+
+        # Wan: At 12 fps, 9.0s is 108 frames > 96 -> Fails with limit_sec = (97-1)/12 = 8.0s
+        invalid_wan_scenes = [
+            {
+                "scene_name": "Scene 1",
+                "anchor_image": {"prompt": "hero anchor"},
+                "blocks": [
+                    {"name": "Block 1", "duration": 9.0, "prompt": "action 1"}
+                ]
+            }
+        ]
+        errors = video_pipeline.collect_scenario_timing_errors(invalid_wan_scenes, default_engine="wan-fast", default_fps=12)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("engine limit (8.0s for engine 'wan-fast') [97 frames at 12fps]", errors[0])
+
+        # LTX: max_frames=385.
+        # At 24 fps, 16.0s is 384 frames <= 384 -> Valid!
+        valid_ltx_scenes = [
+            {
+                "scene_name": "Scene 1",
+                "anchor_image": {"prompt": "hero anchor"},
+                "blocks": [
+                    {"name": "Block 1", "duration": 16.0, "prompt": "action 1"}
+                ]
+            }
+        ]
+        errors = video_pipeline.collect_scenario_timing_errors(valid_ltx_scenes, default_engine="ltx", default_fps=24)
+        self.assertEqual(errors, [])
+
+        # LTX: At 24 fps, 18.0s is 432 frames > 384 -> Fails with limit_sec = (385-1)/24 = 16.0s
+        invalid_ltx_scenes = [
+            {
+                "scene_name": "Scene 1",
+                "anchor_image": {"prompt": "hero anchor"},
+                "blocks": [
+                    {"name": "Block 1", "duration": 18.0, "prompt": "action 1"}
+                ]
+            }
+        ]
+        errors = video_pipeline.collect_scenario_timing_errors(invalid_ltx_scenes, default_engine="ltx", default_fps=24)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("engine limit (16.0s for engine 'ltx') [385 frames at 24fps]", errors[0])
+
+        # 2. Wan Video Generator Workflow with fps_multiplier and size_multiplier
+        start_img = self.tmp_path / "wan_mult_start.png"
+        Image.new("RGB", (832, 480), color=(10, 20, 30)).save(start_img)
+
+        req_wan = VideoRequest(
+            prompt="flowing water",
+            image_path=start_img.as_posix(),
+            model="wan2.2_i2v_14B_fp8_scaled.safetensors",
+            width=832,
+            height=480,
+            fps=12,
+            fps_multiplier=2,
+            size_multiplier=1.5,
+            num_frames=49,
+            prefix_frames=0,
+            core_frames=49,
+            save_tail=True,
+            tail_frames=12,
+            save_tail_image=True,
+            run_prefix="20261030-wan-mult"
+        )
+        captured_wan_wf = []
+
+        def fake_wan_exec(wf, **kwargs):
+            captured_wan_wf.append(wf)
+            return GenerationResult(success=True, file_path="dummy.mp4")
+
+        with patch("core.discovery.resolve_wan_model_bundle", return_value=("high_model.safetensors", "low_model.safetensors")), \
+             patch("core.comfy_client.upload_file_to_comfy", return_value="mult_input.png"):
+            wan_gen = create_video_generator("wan-fast")
+            with patch.object(wan_gen, "_execute_comfy_workflow", side_effect=fake_wan_exec):
+                wan_gen.generate(req_wan)
+
+        wf_wan = captured_wan_wf[-1]
+        self.assertIn("vfi_core", wf_wan)
+        self.assertEqual(wf_wan["vfi_core"]["class_type"], "RIFE VFI")
+        self.assertEqual(wf_wan["vfi_core"]["inputs"]["multiplier"], 2)
+        self.assertEqual(wf_wan["vfi_core"]["inputs"]["ckpt_name"], "rife47.pth")
+        self.assertEqual(wf_wan["vfi_core"]["inputs"]["dtype"], "float32")
+        self.assertIs(wf_wan["vfi_core"]["inputs"]["torch_compile"], False)
+        self.assertEqual(wf_wan["vfi_core"]["inputs"]["batch_size"], 1)
+
+        self.assertIn("scale_core", wf_wan)
+        self.assertEqual(wf_wan["scale_core"]["class_type"], "ImageScale")
+        self.assertEqual(wf_wan["scale_core"]["inputs"]["upscale_method"], "lanczos")
+        expected_w_wan = snap_to_16(int(round(832 * 1.5)))
+        expected_h_wan = snap_to_16(int(round(480 * 1.5)))
+        self.assertEqual(wf_wan["scale_core"]["inputs"]["width"], expected_w_wan)
+        self.assertEqual(wf_wan["scale_core"]["inputs"]["height"], expected_h_wan)
+
+        # Video save uses scaled fps and scaled images
+        self.assertEqual(wf_wan["create_video"]["inputs"]["fps"], 24)
+        self.assertEqual(wf_wan["create_video"]["inputs"]["images"], ["scale_core", 0])
+
+        # Chaining isolation: cut_tail_latent and cut_tail_image are NOT fed from scale_core or vfi_core
+        self.assertIn("cut_tail_latent", wf_wan)
+        self.assertIn("slice_tail_image", wf_wan)
+        self.assertEqual(wf_wan["slice_tail_image"]["inputs"]["image"], ["vae_decode", 0])
+
+        # 3. LTX Video Generator Workflow with fps_multiplier and size_multiplier
+        req_ltx = VideoRequest(
+            prompt="camera panning",
+            image_path=start_img.as_posix(),
+            model="ltx-video-2b-v0.9.5.safetensors",
+            width=832,
+            height=480,
+            fps=24,
+            fps_multiplier=2,
+            size_multiplier=1.5,
+            num_frames=65,
+            prefix_frames=0,
+            core_frames=65,
+            save_tail=True,
+            tail_frames=16,
+            save_tail_image=True,
+            run_prefix="20261030-ltx-mult"
+        )
+        captured_ltx_wf = []
+
+        def fake_ltx_exec(wf, **kwargs):
+            captured_ltx_wf.append(wf)
+            return GenerationResult(success=True, file_path="dummy_ltx.mp4")
+
+        with patch("core.comfy_client.upload_file_to_comfy", return_value="mult_ltx_input.png"):
+            ltx_gen = create_video_generator("ltx")
+            with patch.object(ltx_gen, "_execute_comfy_workflow", side_effect=fake_ltx_exec):
+                ltx_gen.generate(req_ltx)
+
+        wf_ltx = captured_ltx_wf[-1]
+        self.assertIn("vfi_core", wf_ltx)
+        self.assertEqual(wf_ltx["vfi_core"]["class_type"], "RIFE VFI")
+        self.assertEqual(wf_ltx["vfi_core"]["inputs"]["multiplier"], 2)
+        self.assertEqual(wf_ltx["vfi_core"]["inputs"]["dtype"], "float32")
+        self.assertIs(wf_ltx["vfi_core"]["inputs"]["torch_compile"], False)
+        self.assertEqual(wf_ltx["vfi_core"]["inputs"]["batch_size"], 1)
+
+        self.assertIn("scale_core", wf_ltx)
+        self.assertEqual(wf_ltx["scale_core"]["class_type"], "ImageScale")
+        self.assertEqual(wf_ltx["scale_core"]["inputs"]["upscale_method"], "lanczos")
+        expected_w_ltx = snap_to_32(int(round(832 * 1.5)))
+        expected_h_ltx = snap_to_32(int(round(480 * 1.5)))
+        self.assertEqual(wf_ltx["scale_core"]["inputs"]["width"], expected_w_ltx)
+        self.assertEqual(wf_ltx["scale_core"]["inputs"]["height"], expected_h_ltx)
+        self.assertEqual(wf_ltx["create_video"]["inputs"]["fps"], 48)
+        self.assertEqual(wf_ltx["create_video"]["inputs"]["images"], ["scale_core", 0])
+        self.assertEqual(wf_ltx["slice_tail_image"]["inputs"]["image"], ["vae_decode", 0])
+
+        # 4. End-to-end execute_scenario_pipeline multiplier resolution
+        full_mult_scen = {
+            "name": "Full Multiplier Scenario",
+            "image": {
+                "engine": "sdxl",
+                "model": "ponyDiffusionV6XL.safetensors"
+            },
+            "video": {
+                "engine": "wan-fast",
+                "model": "wan2.2_i2v_14B_fp8_scaled.safetensors",
+                "fps": 12,
+                "width": 832,
+                "height": 480,
+                "fps_multiplier": 2,
+                "size_multiplier": 1.5
+            },
+            "scenes": [
+                {
+                    "name": "Scene 1",
+                    "anchor_image": {
+                        "image_path": start_img.as_posix(),
+                        "prompt": "hero anchor"
+                    },
+                    "blocks": [
+                        {"name": "Block 1", "duration": 4.0, "prompt": "block 1 motion"}
+                    ]
+                }
+            ]
+        }
+        with patch("core.image_engine.generate_image", return_value=(True, start_img.as_posix(), "", {"run_prefix": "p", "seed": 1})), \
+             patch("core.video_pipeline.create_video_generator") as mock_vg_f, \
+             patch("core.ffmpeg_engine.concat_videos"), \
+             patch("core.ffmpeg_engine.get_duration", return_value=4.0):
+            mock_g = MagicMock()
+            mock_g.name = "wan-fast"
+            mock_g.temporal_stride = 1
+            mock_g.generate.return_value = GenerationResult(success=True, file_path="block1.mp4")
+            mock_vg_f.return_value = mock_g
+
+            res_full = video_pipeline.execute_scenario_pipeline(full_mult_scen)
+            self.assertEqual(res_full["fps"], 24)
+            self.assertEqual(res_full["width"], expected_w_wan)
+            self.assertEqual(res_full["height"], expected_h_wan)
+            self.assertIn("spec_path", res_full)
+
+            saved_full_spec = json.loads(Path(res_full["spec_path"]).read_text(encoding="utf-8"))
+            schema_validator.validate_scenario(saved_full_spec)
+            self.assertEqual(saved_full_spec["video"]["fps_multiplier"], 2)
+            self.assertEqual(saved_full_spec["video"]["size_multiplier"], 1.5)
+
+
 if __name__ == "__main__":
     unittest.main()
