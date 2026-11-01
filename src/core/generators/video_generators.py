@@ -191,11 +191,72 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
     user LoRA chaining, and core/tail slicing via native ComfyUI nodes.
     """
 
+    engine_id = "wan"
+    family = "wan"
     temporal_stride = 4
     spatial_stride = 16
     default_fps = 16
     max_frames = 97
     native_horizon_frames = 81
+
+    @classmethod
+    def resolve_components(
+        cls,
+        model_name: str,
+        header: Optional[Dict[str, Any]] = None,
+        settings: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        comps = {
+            "text_encoder": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+            "vae": "wan_2.1_vae.safetensors",
+        }
+        if settings:
+            for k in ("text_encoder", "vae"):
+                if k in settings and settings[k] is not None:
+                    comps[k] = settings[k]
+        return comps
+
+    @classmethod
+    def matches_model(cls, header: Dict[str, Any], filename: str = "") -> bool:
+        fn_lower = Path(filename).name.lower() if filename else ""
+        meta = header.get("__metadata__", {}) if isinstance(header, dict) else {}
+        arch_meta = str(meta.get("modelspec.architecture") or meta.get("ss_base_model_version") or "").lower()
+
+        if any(x in fn_lower for x in ("wan", "wan2.1", "wan2.2", "lightx2v")):
+            return True
+        if "wan" in arch_meta:
+            return True
+
+        tensor_keys = [k for k in header.keys() if k != "__metadata__"] if isinstance(header, dict) else []
+        if tensor_keys:
+            sample_keys = " ".join(tensor_keys[:200]).lower()
+            if "cross_attn.k_img" in sample_keys or ("patch_embedding.weight" in sample_keys and "blocks.0.self_attn" in sample_keys):
+                return True
+            p_embed = header.get("patch_embedding.weight") or header.get("model.diffusion_model.patch_embedding.weight")
+            if isinstance(p_embed, dict) and isinstance(p_embed.get("shape"), list) and len(p_embed["shape"]) == 5:
+                return True
+        return False
+
+    @classmethod
+    def matches_lora(
+        cls,
+        header: Optional[Dict[str, Any]] = None,
+        meta: Optional[Dict[str, Any]] = None,
+        filename: str = ""
+    ) -> bool:
+        meta = meta or {}
+        fn_lower = Path(filename).name.lower() if filename else ""
+        base_ver = str(meta.get("ss_base_model_version") or meta.get("modelspec.architecture") or "").lower()
+
+        if any(x in base_ver for x in ("wan", "wan2.1", "wan2.2", "lightx2v")) or any(x in fn_lower for x in ("wan", "wan2.1", "wan2.2", "lightx2v")):
+            return True
+
+        if header and isinstance(header, dict):
+            tensor_keys = [k for k in header.keys() if k != "__metadata__"]
+            sample = " ".join(tensor_keys[:120]).lower()
+            if "cross_attn_k_img" in sample or "cross_attn.k_img" in sample or ("blocks_0_self_attn" in sample and "blocks_0_cross_attn" in sample):
+                return True
+        return False
 
     def _build_wan_graph(
         self,
@@ -812,11 +873,78 @@ class LtxVideoGenerator(BaseVideoGenerator):
     without intermediate VAEDecode/VAEEncode degradation or t=0 causal slot corruption.
     """
 
+    engine_id = "ltx"
+    family = "ltx"
     temporal_stride = 8
     spatial_stride = 32
     default_fps = 24
     max_frames = 385
     native_horizon_frames = 257
+
+    @classmethod
+    def resolve_components(
+        cls,
+        model_name: str,
+        header: Optional[Dict[str, Any]] = None,
+        settings: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        comps = {
+            "text_encoder": "t5xxl_fp16.safetensors",
+            "vae": "ltx-video-vae.safetensors",
+            "steps": 25,
+            "cfg": 3.0,
+        }
+        if settings:
+            for k in ("text_encoder", "vae", "steps", "cfg"):
+                if k in settings and settings[k] is not None:
+                    comps[k] = settings[k]
+        return comps
+
+    @classmethod
+    def matches_model(cls, header: Dict[str, Any], filename: str = "") -> bool:
+        fn_lower = Path(filename).name.lower() if filename else ""
+        if "hunyuan" in fn_lower:
+            return False
+
+        meta = header.get("__metadata__", {}) if isinstance(header, dict) else {}
+        arch_meta = str(meta.get("modelspec.architecture") or meta.get("ss_base_model_version") or "").lower()
+        if "hunyuan" in arch_meta:
+            return False
+
+        if any(x in fn_lower for x in ("ltx", "sulphur", "sulfur")):
+            return True
+        if "ltx" in arch_meta:
+            return True
+
+        tensor_keys = [k for k in header.keys() if k != "__metadata__"] if isinstance(header, dict) else []
+        if tensor_keys:
+            if any("hunyuan" in k for k in tensor_keys):
+                return False
+            sample_keys = " ".join(tensor_keys[:200]).lower()
+            if "adaln_single" in sample_keys or "patchify_proj" in sample_keys or "scale_shift_table" in sample_keys or ("transformer_blocks.0.attn1" in sample_keys and "caption_projection" in sample_keys):
+                return True
+        return False
+
+    @classmethod
+    def matches_lora(
+        cls,
+        header: Optional[Dict[str, Any]] = None,
+        meta: Optional[Dict[str, Any]] = None,
+        filename: str = ""
+    ) -> bool:
+        meta = meta or {}
+        fn_lower = Path(filename).name.lower() if filename else ""
+        base_ver = str(meta.get("ss_base_model_version") or meta.get("modelspec.architecture") or "").lower()
+
+        if any(x in base_ver for x in ("ltx", "ltxv", "sulphur", "sulfur")) or any(x in fn_lower for x in ("ltx", "ltxv", "sulphur", "sulfur")):
+            return True
+
+        if header and isinstance(header, dict):
+            tensor_keys = [k for k in header.keys() if k != "__metadata__"]
+            sample = " ".join(tensor_keys[:120]).lower()
+            if "adaln_single" in sample or "caption_projection" in sample or "transformer_blocks_0_attn1" in sample:
+                return True
+        return False
 
     def generate(self, request: VideoRequest) -> GenerationResult:
         width = self.snap_dim(request.width or self.settings.get("width", 832), default=832)

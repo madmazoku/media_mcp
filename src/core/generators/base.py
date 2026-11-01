@@ -156,6 +156,8 @@ class BaseGenerator(ABC):
     """Abstract base class for all image and video generators."""
 
     spatial_stride: int = 16
+    engine_id: str = ""
+    family: str = ""
 
     def __init__(self, name: str, settings: Optional[Dict[str, Any]] = None):
         self.name = name
@@ -171,8 +173,41 @@ class BaseGenerator(ABC):
         """Snaps both width and height to spatial_stride."""
         return (cls.snap_dim(width, default=default_w), cls.snap_dim(height, default=default_h))
 
+    @classmethod
+    def matches_model(cls, header: dict, filename: str = "") -> bool:
+        """
+        Determines whether the given safetensors header or filename matches this generator strategy.
+        Concrete strategies implement tensor signature and dimension checks.
+        """
+        return False
+
+    @classmethod
+    def matches_lora(
+        cls,
+        header: dict = None,
+        meta: dict = None,
+        filename: str = ""
+    ) -> bool:
+        """
+        Determines whether the given LoRA safetensors header, metadata, or filename matches this generator strategy.
+        """
+        return False
+
+    @classmethod
+    def resolve_components(
+        cls,
+        model_name: str,
+        header: dict = None,
+        settings: dict = None
+    ) -> dict:
+        """
+        Resolves model-specific auxiliary components (text encoders, VAEs, clip types, etc.)
+        and default hyperparameters.
+        """
+        return {}
+
     @abstractmethod
-    def metadata(self) -> Dict[str, Any]:
+    def metadata(self) -> dict:
         """Return generator metadata and configuration settings."""
         pass
 

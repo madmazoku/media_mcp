@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Each release version `0.<N>.0` directly corresponds to task **AI-<N>**.
 
+## [0.17.0] - 2026-11-01 (AI-17)
+
+### Added
+- **Polymorphic Strategy Architecture for Model & LoRA Classification**:
+  - Replaced procedural magic-number architecture detection in `lora_inspector.py` and `discovery.py` with polymorphic Object-Oriented Strategy methods on `BaseGenerator` (`matches_model()`, `matches_lora()`, `resolve_components()`).
+  - Added centralized strategy query provider `get_model_strategies()` in `core.generators.factory`.
+  - Added dedicated unit test suite `tests/test_strategy_profiles.py` verifying profile resolution, strategy classification, and workflow generation.
+
+### Fixed
+- **FLUX.2 Model & Text Encoder Profile Resolution**:
+  - Added dynamic model profile resolution in `Flux2ImageGenerator` covering `dev` (Mistral 3, dim 15360, 28 steps), `klein_9b` (Qwen 3 8B, dim 12288, 4 steps), and `klein_4b` (Qwen 3 4B, dim 7680, 4 steps).
+  - Fixed `RuntimeError: mat1 and mat2 shapes cannot be multiplied (4096 and 15360)` when generating with `flux2_dev_fp8mixed.safetensors` by automatically injecting `mistral_3_small_flux2_bf16.safetensors` into ComfyUI `CLIPLoader`.
+  - Fixed inverted QKV hidden dimension check (`in_dim == 3072`) in `lora_inspector.py` that caused all FLUX.1 Dev models (`flux1-dev.safetensors`) to be falsely classified as `flux2`. FLUX.1 Dev models are now strictly identified by 19 double blocks, 4096-dim text projection, and 64-dim image patches.
+  - Fixed false-positive classification of HunyuanVideo models (`hunyuanvideo1.5_720p_i2v_fp16.safetensors`) as `sd15` by isolating Hunyuan video DiT checks.
+
 ## [0.16.0] - 2026-10-30 (AI-16)
 
 ### Added

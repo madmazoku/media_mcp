@@ -40,6 +40,7 @@ from .factory import (
     create_video_generator,
     get_image_generator_class,
     get_video_generator_class,
+    get_model_strategies,
 )
 
 __all__ = [
@@ -48,6 +49,7 @@ __all__ = [
     "VideoRequest",
     "GenerationResult",
     "BaseGenerator",
+    "get_model_strategies",
     "snap_to_step",
     "snap_to_16",
     "snap_to_32",
