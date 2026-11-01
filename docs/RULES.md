@@ -44,10 +44,15 @@ These rules govern the development, testing, and operation of the `media_mcp` pi
   - `anchor_image` and `blocks[]` contain only narrative/framing parameters (`prompt`, `negative_prompt`, `duration`, `overlap`, `loras`, `denoise`, `fit`, `image_path`, `keyframe_path`, `mask_path`, `end_image`).
 - Default to 1-frame I2V chaining (`overlap: 0.0s`) for clean production video without Causal VAE deconvolution artifacts. For LTX-2.3, 1-frame conditioning strictly uses `LTXVPreprocess(img_compression=33)` to eliminate high-frequency pixel sensor noise and `LTXVImgToVideoInplace(strength=0.9)` to avoid rigid initial frame freezing.
 - Use **True Forced Prefix Conditioning** (`WanLatentPrefixLock` + Stage1/Stage2 `LTXVAdainLatent` + `WanLatentPrefixRestore` for Wan 2.2; `LTXLatentPrefixToVideo` + `LTXVAdainLatent` for LTX) with Latent AdaIN color stabilization in 5D latent space between sequential blocks when `overlap > 0.0s`. Tail latents are always cut from `latent_for_decode` post-normalization.
-- **Engine Horizon & Immutable Window Limits**:
-  - Maximum block+prefix diffusion window is an **immutable per-engine constant** (not configurable in scenarios): **`6.0s`** for `wan-fast`/`wan-full` and **`16.0s`** for `ltx`.
-  - **Wan 2.2 (`wan-fast`, `wan-full`)**: Native training length is 81 frames ($5.06$s at 16 fps). Blocks must be kept $\le 5.0$s (window limit: 6.0s). Exceeding 5.5s causes temporal RoPE extrapolation and structural degradation on tail frames.
-  - **LTX-2.3 (`ltx`)**: $8\times$ temporal VAE compression allows long blocks (6.0–12.0s, window limit: 16.0s) with minimal temporal drift. Default CFG 1.0, 25 steps, `euler_ancestral`, with automatic Distilled LoRA strength scaling (0.7 for CFG $\le$ 1.5; 0.2 for full CFG > 1.5).
+- **Engine Horizon & Immutable Frame Window Limits (`ENGINE_MAX_FRAMES`)**:
+  - Maximum block+prefix diffusion window is governed by immutable hardware/architecture frame limits: **`97` frames** for `wan-fast`/`wan-full`, and **`385` frames** for `ltx`.
+  - Duration limits in seconds scale dynamically with framerate: $\text{limit\_sec} = (N_{\text{max}} - 1) / \text{fps}$ (e.g. for Wan: 6.0s at 16 fps, 8.0s at 12 fps, 4.0s at 24 fps; for LTX: 16.0s at 24 fps).
+  - **Wan 2.2 (`wan-fast`, `wan-full`)**: Native training length is 81 frames ($5.06$s at 16 fps, $6.67$s at 12 fps). Blocks should ideally remain within the 81-frame horizon for peak optical flow. Exceeding 81 frames triggers an informative advisory log.
+  - **LTX-2.3 (`ltx`)**: $8\times$ temporal VAE compression allows long blocks (6.0–12.0s, window limit: 385 frames / 16.0s at 24 fps) with minimal temporal drift. Default CFG 3.0, 25 steps, `euler_ancestral`.
+- **Temporal & Spatial Multipliers (RIFE VFI & Lanczos ImageScale)**:
+  - `fps_multiplier` (integer $\ge 1$, e.g. 1, 2): temporal frame interpolation via RIFE VFI (`rife47.pth`). Must be integer to guarantee 100% ground-truth diffusion frames remain in cadence without judder or ghosting.
+  - `size_multiplier` (float $\ge 1.0$, e.g. 1.0, 1.5, 2.0): spatial upscale via ComfyUI `ImageScale` (`lanczos`), requiring 0 extra VRAM. Dimensions snap to 16px (Wan) or 32px (LTX).
+  - **Chaining Isolation**: Latent tail (`tail.latent`) and tail keyframe (`tail.png`) are ALWAYS extracted directly from un-scaled, un-interpolated diffusion outputs (`latent_for_decode` / `vae_decode`) BEFORE any VFI or spatial scaling. VFI and upscaling are post-processing steps applied strictly to `slice_core` for `-core.mp4` encoding.
 - **Scenario Pacing & Block Limits**: Limit single continuous scenes to 2–3 blocks (6–10s). Avoid long continuous chains (>4 blocks) due to cumulative VAE spatial entropy and color variance; construct long movies (15–60+ seconds) via multi-scene montage (`scenes[]`) where each scene has its own crisp `anchor_image`, resetting latent entropy to zero.
 - Lossless Stream Copy (`-c copy`) for final multi-block FFmpeg assembly.
 - Before making changes to latent processing, padding, masking, or stride math in video pipelines, **ALWAYS** consult [`docs/MEDIA_MCP_KNOWLEDGE_BASE.md`](MEDIA_MCP_KNOWLEDGE_BASE.md) and [`docs/VIDEO_BLOCK_CHAINING_RESEARCH.md`](VIDEO_BLOCK_CHAINING_RESEARCH.md) to avoid repeating solved bugs.
@@ -69,10 +74,11 @@ These rules govern the development, testing, and operation of the `media_mcp` pi
 
 ---
 
-## 6. Network Pooling & Loopback Isolation
+## 6. Network Pooling, Loopback Isolation & Event Loop Resilience
 - All HTTP communication with local backends (ComfyUI, A1111) MUST use persistent `requests.Session()` with connection pooling (`HTTPAdapter`) and Keep-Alive.
 - **Mandatory `s.trust_env = False`**: always disable proxy resolution for loopback `127.0.0.1` traffic to eliminate network latency and socket access errors.
 - Never use unpooled `urllib.request.urlopen` in polling loops.
+- **Event Loop Resilience & Grace Period**: ComfyUI runs an `aiohttp` event loop sharing the Python GIL with PyTorch execution. During heavy compute (Wan 14B diffusion, VAE decoding, RIFE VFI, Lanczos resizing), the event loop can temporarily block for 10–60+ seconds. Clients must never treat socket read/connect timeouts as prompt completion or disappearance. A minimum 300s grace period and relaxed polling interval (2.0s) must be enforced, with direct filesystem output verification prior to reporting failure.
 
 ---
 
@@ -92,3 +98,16 @@ These rules govern the development, testing, and operation of the `media_mcp` pi
 
 ## 9. No Self-Verification
 - Do NOT call `view_file` or any analysis/reading tools on generated images or videos for self-checking unless explicitly requested by the user. Immediately return generation results.
+
+
+---
+
+## 10. Mandatory Release Workflow (add-to-master)
+- **NEVER** commit directly to `master`. **NEVER** push directly to `origin/master`.
+- ANY request to add, merge, publish, or release changes into master (e.g. "добавляй в мастер", "мерджи", "в мастер", "залей в мастер", "add to master") **MUST ALWAYS** strictly follow the skill in `.agents/skills/add-to-master/SKILL.md`:
+  1. Create a dedicated feature branch `AI-<n>-<slug>` from an up-to-date `master`.
+  2. Commit with title `AI-<n>: <concise summary>` matching the task number.
+  3. Push the feature branch to `origin` and track upstream.
+  4. Open a Pull Request into `master` via `gh pr create` with detailed changelog and test results.
+  5. Merge the PR via GitHub CLI: `gh pr merge <PR_NUMBER> --merge` (NEVER pass `--delete-branch`, preserve the remote branch).
+  6. Synchronize local `master` with `git pull origin master`.

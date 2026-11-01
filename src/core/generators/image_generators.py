@@ -56,6 +56,7 @@ class SdxlImageGenerator(BaseImageGenerator):
     """
 
     service = "automatic1111"
+    spatial_stride: int = 64
 
     def generate(self, request: ImageRequest) -> GenerationResult:
         model = str(request.model or self.settings.get("model") or self.settings.get("checkpoint") or "").strip()

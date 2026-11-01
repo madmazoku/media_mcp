@@ -26,7 +26,10 @@ from . import image_engine as img_engine_mod
 from .lora_inspector import read_latent_temporal_frames
 from .generators import (
     create_video_generator,
+    get_video_generator_class,
     VideoRequest,
+    snap_to_16,
+    snap_to_32,
 )
 
 
@@ -298,6 +301,8 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
                 "weight_dtype": video_cfg.get("weight_dtype"),
                 "ramp_latents": video_cfg.get("ramp_latents"),
                 "min_cfg": video_cfg.get("min_cfg"),
+                "fps_multiplier": video_cfg.get("fps_multiplier", 1),
+                "size_multiplier": video_cfg.get("size_multiplier", 1.0),
             })
 
         normalized_scenes.append({
@@ -313,29 +318,36 @@ def normalize_scenario_structure(raw_data: Any, request_overrides: Optional[Dict
     return normalized_scenes
 
 
-ENGINE_MAX_DURATIONS: Dict[str, float] = {
-    "wan-fast": 6.0,
-    "wan-full": 6.0,
-    "ltx": 16.0,
-}
 
-
-def collect_scenario_timing_errors(scenes: List[Dict[str, Any]], default_engine: str = "wan-fast") -> List[str]:
+def collect_scenario_timing_errors(
+    scenes: List[Dict[str, Any]],
+    default_engine: str = "wan-fast",
+    default_fps: int = 16
+) -> List[str]:
     """
     Validates dynamic block merging timing constraints inside each scene (montage):
     1. overlap_duration < clip_duration
-    2. prefix_duration + clip_duration < engine_limit (immutable hardware/architecture constant per engine)
+    2. total_frames (prefix_frames + clip_frames) < engine_limit (immutable hardware/architecture frame constant per engine)
     Returns a list of human-readable error messages.
     """
     errors: List[str] = []
     for s_idx, sc in enumerate(scenes):
         sc_name = sc.get("scene_name", f"Scene #{s_idx + 1}")
         sc_engine = str(sc.get("engine") or "").lower()
+        sc_fps = sc.get("fps")
         blocks = sc.get("blocks", [])
         for b_idx, blk in enumerate(blocks):
             b_name = blk.get("name", f"Block #{b_idx + 1}")
             b_engine = str(blk.get("engine") or sc_engine or default_engine).lower()
-            limit = float(ENGINE_MAX_DURATIONS.get(b_engine, 6.0))
+            try:
+                gen_cls = get_video_generator_class(b_engine)
+                def_fps = gen_cls.default_fps
+                max_frames = gen_cls.max_frames
+            except Exception:
+                def_fps = 16
+                max_frames = 97
+            b_fps = int(blk.get("fps") or sc_fps or default_fps or def_fps)
+
             clip_duration = float(blk.get("duration", 5.0))
             prefix_duration = float(blocks[b_idx - 1].get("overlap") or 0.0) if b_idx > 0 else 0.0
             overlap_duration = float(blk.get("overlap") or 0.0) if b_idx < len(blocks) - 1 else 0.0
@@ -346,11 +358,18 @@ def collect_scenario_timing_errors(scenes: List[Dict[str, Any]], default_engine:
                     f"clip_duration ({clip_duration}s). Condition 'overlap_duration < clip_duration' is required."
                 )
 
-            if prefix_duration + clip_duration >= limit:
+            clip_frames = max(1, int(round(clip_duration * b_fps)))
+            prefix_frames = int(round(prefix_duration * b_fps)) if prefix_duration > 0 else 0
+            total_frames = prefix_frames + clip_frames
+            limit_sec = (max_frames - 1) / b_fps
+
+            if total_frames >= max_frames:
                 errors.append(
-                    f"scene #{s_idx + 1} ('{sc_name}'): block #{b_idx + 1} ('{b_name}'): failed video: Generation window exceeded: prefix_duration ({prefix_duration}s) + "
-                    f"clip_duration ({clip_duration}s) = {prefix_duration + clip_duration:.2f}s >= "
-                    f"engine limit ({limit}s for engine '{b_engine}'). Condition 'prefix_duration + clip_duration < engine limit' is required."
+                    f"scene #{s_idx + 1} ('{sc_name}'): block #{b_idx + 1} ('{b_name}'): failed video: Generation window exceeded: "
+                    f"prefix_duration ({prefix_duration}s / {prefix_frames} frames) + clip_duration ({clip_duration}s / {clip_frames} frames) = "
+                    f"{prefix_duration + clip_duration:.2f}s ({total_frames} frames) >= "
+                    f"engine limit ({limit_sec:.1f}s for engine '{b_engine}') [{max_frames} frames at {b_fps}fps]. "
+                    f"Condition 'prefix_duration + clip_duration < engine limit' is required."
                 )
     return errors
 
@@ -540,7 +559,7 @@ def prepare_scenario_pipeline(
     height = int(effective_vid.get("height", 480))
     fps = int(effective_vid.get("fps", 16))
 
-    timing_errors = collect_scenario_timing_errors(scenes, default_engine=v_engine)
+    timing_errors = collect_scenario_timing_errors(scenes, default_engine=v_engine, default_fps=fps)
     ar_errors = collect_scenario_aspect_ratio_errors(scenes, video_width=width, video_height=height)
     combined_errors = timing_errors + ar_errors
     if combined_errors:
@@ -721,12 +740,6 @@ def execute_scenario_pipeline(
                         generator = create_video_generator(b_engine_raw, settings=b_settings)
                         stride = int(getattr(generator, "temporal_stride", 4))
 
-                        if b_engine_raw.startswith("wan") and dur > 5.5:
-                            log(
-                                f"Warning: [{scene_name} : {b_name}] Duration ({dur}s) exceeds Wan 2.2 native training horizon "
-                                f"(5.06s / 81 frames). Consider keeping blocks <= 5.0s for optimal image quality across chaining."
-                            )
-
                         block_prefix = f"{run_prefix}-s{scene_idx:03d}-b{block_idx:03d}"
                         out_core_name = f"{block_prefix}-core.mp4"
 
@@ -794,6 +807,20 @@ def execute_scenario_pipeline(
 
                         log(f"\n[{scene_name} : {b_name}] Engine: {generator.name.upper()}, Duration: {dur}s, Overlap: {overlap}s")
                         log(f"Quantized frames (stride={stride}): total={num_frames}, prefix={pref_pixel_frames}, core={core_frames}, next_tail_latents={tail_frames}")
+
+                        raw_horizon = getattr(generator, "native_horizon_frames", None)
+                        if isinstance(raw_horizon, int):
+                            horizon_frames = raw_horizon
+                        else:
+                            try:
+                                horizon_frames = get_video_generator_class(b_engine_raw).native_horizon_frames
+                            except Exception:
+                                horizon_frames = 81 if b_engine_raw.startswith("wan") else 257
+                        if num_frames > horizon_frames:
+                            log(
+                                f"Warning: [{scene_name} : {b_name}] Total block frames ({num_frames}) exceeds {generator.name.upper()} native training horizon "
+                                f"({horizon_frames} frames / {(horizon_frames - 1) / fps:.2f}s at {fps}fps). Consider keeping blocks within {horizon_frames} frames for optimal image quality across chaining."
+                            )
                         log(f"Prompt: '{block_prompt[:60]}...'")
 
                         current_block_start_image = anchor_img_path if b_idx == 0 else (last_block_tail_image or anchor_img_path)
@@ -868,6 +895,8 @@ def execute_scenario_pipeline(
                             weight_dtype=blk_weight_dtype,
                             model=b_model,
                             loras=blk.get("loras") or [],
+                            fps_multiplier=int(blk.get("fps_multiplier") or effective_vid.get("fps_multiplier", 1)),
+                            size_multiplier=float(blk.get("size_multiplier") if blk.get("size_multiplier") is not None else effective_vid.get("size_multiplier", 1.0)),
                             out_video_name=out_core_name,
                             run_prefix=block_prefix,
                             progress_callback=progress_callback
@@ -931,13 +960,31 @@ def execute_scenario_pipeline(
         except Exception as f_ex:
             raise RuntimeError(f"failed assembly: {f_ex}") from f_ex
 
+        fps_mult = max(1, int(effective_vid.get("fps_multiplier") or 1))
+        size_mult = float(effective_vid.get("size_multiplier") if effective_vid.get("size_multiplier") is not None else 1.0)
+        final_fps = int(round(fps * fps_mult))
+        try:
+            v_gen_cls = get_video_generator_class(v_engine)
+            final_w, final_h = v_gen_cls.snap_dimensions(int(round(width * size_mult)), int(round(height * size_mult)))
+        except Exception:
+            final_w = snap_to_16(int(round(width * size_mult))) if v_engine.startswith("wan") else snap_to_32(int(round(width * size_mult)))
+            final_h = snap_to_16(int(round(height * size_mult))) if v_engine.startswith("wan") else snap_to_32(int(round(height * size_mult)))
+
         poster_filename = f"{run_prefix}-poster.png"
         out_img_dir = Path(config.OUTPUT_IMG_DIR) if config.OUTPUT_IMG_DIR and Path(config.OUTPUT_IMG_DIR).is_dir() else (temp_dir / "images")
         out_img_dir.mkdir(parents=True, exist_ok=True)
         poster_path = (out_img_dir / poster_filename).resolve().as_posix()
         if first_poster_path and Path(first_poster_path).is_file():
             try:
-                shutil.copy2(first_poster_path, poster_path)
+                if size_mult > 1.0:
+                    from PIL import Image
+                    with Image.open(first_poster_path) as p_img:
+                        if p_img.size != (final_w, final_h):
+                            p_img.resize((final_w, final_h), Image.Resampling.LANCZOS).save(poster_path)
+                        else:
+                            shutil.copy2(first_poster_path, poster_path)
+                else:
+                    shutil.copy2(first_poster_path, poster_path)
             except Exception as e:
                 log(f"Warning: Failed to copy anchor image to poster: {e}")
         else:
@@ -950,13 +997,20 @@ def execute_scenario_pipeline(
             "spec_path": spec_path,
             "poster_path": poster_path,
             "duration": total_duration,
-            "width": width,
-            "height": height,
-            "fps": fps,
+            "width": final_w,
+            "height": final_h,
+            "fps": final_fps,
             "scenes_count": len(scenes),
             "blocks_count": total_blocks,
             "anchor_metadata": first_anchor_res_meta
         }
+        if fps_mult > 1:
+            result_payload["fps_multiplier"] = fps_mult
+            result_payload["base_fps"] = fps
+        if size_mult > 1.0:
+            result_payload["size_multiplier"] = size_mult
+            result_payload["base_width"] = width
+            result_payload["base_height"] = height
         if pipeline_warnings:
             result_payload["warnings"] = pipeline_warnings
         return result_payload

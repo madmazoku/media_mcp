@@ -32,14 +32,26 @@ class BaseVideoGenerator(BaseGenerator):
 
     kind = "video"
     temporal_stride: int = 4
+    spatial_stride: int = 16
     default_fps: int = 16
+    max_frames: int = 97
+    native_horizon_frames: int = 81
+
+    @classmethod
+    def get_max_duration(cls, fps: Optional[int] = None) -> float:
+        """Calculates maximum block duration in seconds based on fps."""
+        effective_fps = int(fps or cls.default_fps)
+        return (cls.max_frames - 1) / effective_fps
 
     def metadata(self) -> Dict[str, Any]:
         return {
             "name": self.name,
             "kind": self.kind,
             "temporal_stride": self.temporal_stride,
+            "spatial_stride": self.spatial_stride,
             "default_fps": self.default_fps,
+            "max_frames": self.max_frames,
+            "native_horizon_frames": self.native_horizon_frames,
             "settings": dict(self.settings)
         }
 
@@ -79,11 +91,21 @@ class BaseVideoGenerator(BaseGenerator):
         if not ok:
             return GenerationResult(success=False, error=prompt_id)
 
-        ok, history = comfy_client.wait_for_prompt(prompt_id, timeout=900, progress_callback=progress_callback)
-        if not ok:
-            return GenerationResult(success=False, error=str(history))
-
-        outputs = history.get("outputs", {})
+        ok, history = comfy_client.wait_for_prompt(prompt_id, timeout=1800, progress_callback=progress_callback)
+        outputs = {}
+        if ok:
+            outputs = history.get("outputs", {})
+        else:
+            # Disk fallback: verify if ComfyUI finished rendering and saved the file directly to disk
+            found_fallback = self._locate_direct_output(
+                prefix_match=prefix_str,
+                ext=".mp4",
+                exclude_prefix=f"{prefix_str}-tail"
+            )
+            if found_fallback and Path(found_fallback).is_file():
+                log(f"ComfyUI HTTP monitoring returned non-ok ({history}), but valid MP4 output file was found on disk: {found_fallback}")
+            else:
+                return GenerationResult(success=False, error=str(history))
         temp_dir = config.get_temp_dir()
 
         # 1. Locate core video
@@ -170,7 +192,10 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
     """
 
     temporal_stride = 4
+    spatial_stride = 16
     default_fps = 16
+    max_frames = 97
+    native_horizon_frames = 81
 
     def _build_wan_graph(
         self,
@@ -183,8 +208,8 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
         prefix_str: str,
         out_video_name: str
     ) -> Dict[str, Any]:
-        width = snap_to_16(request.width or self.settings.get("width", 832))
-        height = snap_to_16(request.height or self.settings.get("height", 480))
+        width = self.snap_dim(request.width or self.settings.get("width", 832), default=832)
+        height = self.snap_dim(request.height or self.settings.get("height", 480), default=480)
         num_frames = request.num_frames
         fps = request.fps or self.settings.get("fps", 16)
         seed = random.randint(1, 1_000_000_000) if request.seed in (-1, None) else int(request.seed)
@@ -558,11 +583,50 @@ class BaseWanVideoGenerator(BaseVideoGenerator):
         else:
             video_images_input = ["vae_decode", 0]
 
+        # Post-core processing: VFI frame interpolation and/or spatial upscale
+        fps_mult = max(1, int(request.fps_multiplier or self.settings.get("fps_multiplier", 1)))
+        size_mult = float(request.size_multiplier if request.size_multiplier is not None else self.settings.get("size_multiplier", 1.0))
+        final_fps = int(round(fps * fps_mult))
+
+        if fps_mult > 1:
+            wf["vfi_core"] = {
+                "inputs": {
+                    "ckpt_name": "rife47.pth",
+                    "frames": video_images_input,
+                    "clear_cache_after_n_frames": 10,
+                    "multiplier": fps_mult,
+                    "fast_mode": True,
+                    "ensemble": True,
+                    "scale_factor": 1.0,
+                    "dtype": "float32",
+                    "torch_compile": False,
+                    "batch_size": 1
+                },
+                "class_type": "RIFE VFI"
+            }
+            video_images_input = ["vfi_core", 0]
+            log(f"Configured RIFE VFI frame interpolation: multiplier={fps_mult} ({fps}fps -> {final_fps}fps)")
+
+        if size_mult > 1.0:
+            target_w, target_h = self.snap_dimensions(int(round(width * size_mult)), int(round(height * size_mult)))
+            wf["scale_core"] = {
+                "inputs": {
+                    "image": video_images_input,
+                    "upscale_method": "lanczos",
+                    "width": target_w,
+                    "height": target_h,
+                    "crop": "disabled"
+                },
+                "class_type": "ImageScale"
+            }
+            video_images_input = ["scale_core", 0]
+            log(f"Configured ImageScale (lanczos): {width}x{height} -> {target_w}x{target_h} (scale={size_mult})")
+
         wf.update({
             "create_video": {
                 "inputs": {
                     "images": video_images_input,
-                    "fps": fps
+                    "fps": final_fps
                 },
                 "class_type": "CreateVideo"
             },
@@ -749,11 +813,14 @@ class LtxVideoGenerator(BaseVideoGenerator):
     """
 
     temporal_stride = 8
+    spatial_stride = 32
     default_fps = 24
+    max_frames = 385
+    native_horizon_frames = 257
 
     def generate(self, request: VideoRequest) -> GenerationResult:
-        width = snap_to_32(request.width or self.settings.get("width", 832))
-        height = snap_to_32(request.height or self.settings.get("height", 480))
+        width = self.snap_dim(request.width or self.settings.get("width", 832), default=832)
+        height = self.snap_dim(request.height or self.settings.get("height", 480), default=480)
         fps = request.fps or self.settings.get("fps", 24)
         seed = random.randint(1, 1_000_000_000) if request.seed in (-1, None) else int(request.seed)
         steps = int(request.steps or self.settings.get("steps", 25))
@@ -1094,11 +1161,50 @@ class LtxVideoGenerator(BaseVideoGenerator):
         else:
             video_images_input = ["vae_decode", 0]
 
+        # Post-core processing: VFI frame interpolation and/or spatial upscale
+        fps_mult = max(1, int(request.fps_multiplier or self.settings.get("fps_multiplier", 1)))
+        size_mult = float(request.size_multiplier if request.size_multiplier is not None else self.settings.get("size_multiplier", 1.0))
+        final_fps = int(round(fps * fps_mult))
+
+        if fps_mult > 1:
+            wf["vfi_core"] = {
+                "inputs": {
+                    "ckpt_name": "rife47.pth",
+                    "frames": video_images_input,
+                    "clear_cache_after_n_frames": 10,
+                    "multiplier": fps_mult,
+                    "fast_mode": True,
+                    "ensemble": True,
+                    "scale_factor": 1.0,
+                    "dtype": "float32",
+                    "torch_compile": False,
+                    "batch_size": 1
+                },
+                "class_type": "RIFE VFI"
+            }
+            video_images_input = ["vfi_core", 0]
+            log(f"Configured RIFE VFI frame interpolation (LTX): multiplier={fps_mult} ({fps}fps -> {final_fps}fps)")
+
+        if size_mult > 1.0:
+            target_w, target_h = self.snap_dimensions(int(round(width * size_mult)), int(round(height * size_mult)))
+            wf["scale_core"] = {
+                "inputs": {
+                    "image": video_images_input,
+                    "upscale_method": "lanczos",
+                    "width": target_w,
+                    "height": target_h,
+                    "crop": "disabled"
+                },
+                "class_type": "ImageScale"
+            }
+            video_images_input = ["scale_core", 0]
+            log(f"Configured ImageScale (lanczos, LTX): {width}x{height} -> {target_w}x{target_h} (scale={size_mult})")
+
         wf.update({
             "create_video": {
                 "inputs": {
                     "images": video_images_input,
-                    "fps": fps
+                    "fps": final_fps
                 },
                 "class_type": "CreateVideo"
             },

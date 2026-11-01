@@ -177,8 +177,22 @@
         },
         "fps": {
           "type": "integer",
-          "enum": [16, 24, 25, 30, 60],
+          "enum": [8, 12, 16, 24, 25, 30, 48, 60],
           "default": 16
+        },
+        "fps_multiplier": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8,
+          "default": 1,
+          "description": "Integer multiplier to increase frame rate via optical flow frame interpolation (e.g. 2 doubles 12fps to 24fps). Preserves original frames."
+        },
+        "size_multiplier": {
+          "type": "number",
+          "minimum": 1.0,
+          "maximum": 4.0,
+          "default": 1.0,
+          "description": "Scale multiplier to upscale video resolution post-diffusion (e.g. 1.5 scales 832x480 to 1248x720). Uses high-quality Lanczos resampling."
         },
         "steps": {
           "type": "integer",

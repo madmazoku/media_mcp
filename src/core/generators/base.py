@@ -112,6 +112,8 @@ class VideoRequest(GenerationRequest):
     save_tail: bool = True
     save_tail_image: bool = False
     fps: int = 16
+    fps_multiplier: int = 1
+    size_multiplier: float = 1.0
     steps: Optional[int] = None
     cfg: Optional[float] = None
     sampler: Optional[str] = None
@@ -153,9 +155,21 @@ class GenerationResult:
 class BaseGenerator(ABC):
     """Abstract base class for all image and video generators."""
 
+    spatial_stride: int = 16
+
     def __init__(self, name: str, settings: Optional[Dict[str, Any]] = None):
         self.name = name
         self.settings = dict(settings or {})
+
+    @classmethod
+    def snap_dim(cls, dim: int, default: int = 1024) -> int:
+        """Snaps dimension to nearest multiple of spatial_stride."""
+        return snap_to_step(dim, step=cls.spatial_stride, default=default)
+
+    @classmethod
+    def snap_dimensions(cls, width: int, height: int, default_w: int = 1024, default_h: int = 1024) -> tuple[int, int]:
+        """Snaps both width and height to spatial_stride."""
+        return (cls.snap_dim(width, default=default_w), cls.snap_dim(height, default=default_h))
 
     @abstractmethod
     def metadata(self) -> Dict[str, Any]:

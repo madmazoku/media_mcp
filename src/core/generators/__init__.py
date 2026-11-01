@@ -38,6 +38,8 @@ from .factory import (
     VIDEO_GENERATOR_REGISTRY,
     create_image_generator,
     create_video_generator,
+    get_image_generator_class,
+    get_video_generator_class,
 )
 
 __all__ = [
@@ -64,4 +66,6 @@ __all__ = [
     "VIDEO_GENERATOR_REGISTRY",
     "create_image_generator",
     "create_video_generator",
+    "get_image_generator_class",
+    "get_video_generator_class",
 ]
