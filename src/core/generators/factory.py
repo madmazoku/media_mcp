@@ -9,7 +9,8 @@ from __future__ import annotations
 from typing import Dict, Any, Optional, Type
 
 from .image_generators import BaseImageGenerator, SdxlImageGenerator, Flux1ImageGenerator, Flux2ImageGenerator
-from .video_generators import BaseVideoGenerator, WanFastVideoGenerator, WanFullVideoGenerator, LtxVideoGenerator
+from .base import BaseGenerator
+from .video_generators import BaseVideoGenerator, BaseWanVideoGenerator, WanFastVideoGenerator, WanFullVideoGenerator, LtxVideoGenerator
 
 IMAGE_GENERATOR_REGISTRY: Dict[str, Type[BaseImageGenerator]] = {
     "sdxl": SdxlImageGenerator,
@@ -69,3 +70,16 @@ def get_video_generator_class(engine_or_name: str = "wan-fast") -> Type[BaseVide
             f"Unsupported video engine '{engine_or_name}'. Allowed values: {list(VIDEO_GENERATOR_REGISTRY.keys())}"
         )
     return cls
+
+def get_model_strategies() -> list:
+    """
+    Returns ordered generator strategy classes for model and LoRA architecture classification.
+    Ordered from most specific to least specific: FLUX.2 -> FLUX.1 -> Wan -> LTX -> SDXL.
+    """
+    return [
+        Flux2ImageGenerator,
+        Flux1ImageGenerator,
+        BaseWanVideoGenerator,
+        LtxVideoGenerator,
+        SdxlImageGenerator,
+    ]

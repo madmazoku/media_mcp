@@ -514,3 +514,28 @@ ffmpeg -y -f concat -safe 0 -i filelist.txt -c copy output.mp4
    - Интервал опроса во время рендера увеличен с 0.5с до 2.0с, снижая нагрузку на `aiohttp` в 4 раза.
 4. **Filesystem Output Fallback:**
    Если мониторинг завершился ошибкой по истечении максимального времени, генератор видео перед объявлением сбоя выполняет прямое сканирование `COMFY_OUTPUT_DIR`. Если целевой файл `-core.mp4` уже финализирован нодой `SaveVideo`, генерация признается успешной.
+---
+
+## 17. Дефект 17: Несоответствие размерностей текстового энкодера в FLUX.2 Dev (Mistral 3 vs Qwen 3) и инверсия QKV-проверки FLUX.1 Dev
+
+### Симптом:
+Попытка генерации через `flux2` с моделью `flux2_dev_fp8mixed.safetensors` приводила к мгновенному падению ComfyUI с ошибкой PyTorch:
+`RuntimeError: mat1 and mat2 shapes cannot be multiplied (4096 and 15360)`.
+Кроме того, при проверке моделей на диске файл `flux1-dev.safetensors` ошибочно классифицировался как `flux2`.
+
+### Первопричина:
+1. **Жестко зашитый энкодер Qwen 8B в `Flux2ImageGenerator`:**
+   В коде генератора было зашито `clip_name = "qwen_3_8b_fp8mixed.safetensors"`. Выходная проекция Qwen 8B имеет размерность 4096 ($4096 \times 3 = 12288$), что соответствует архитектуре **FLUX.2 Klein 9B**.
+   Однако модель **FLUX.2 Dev** (`flux2_dev_fp8mixed.safetensors`) имеет размерность слоя `txt_in.weight` равную **15360** ($5120 \times 3$) и требует текстовый энкодер **Mistral 3 Small** (`mistral_3_small_flux2_bf16.safetensors`). Несовпадение размерностей тензоров 4096 и 15360 вызывало краш матричного умножения в PyTorch.
+2. **Процедурная магия с перевернутым QKV `in_dim`:**
+   В `lora_inspector.py` находилась процедурная проверка:
+   `if in_dim == 3072: return "flux2"`.
+   Однако в архитектуре **FLUX.1 Dev** размерность слоя `double_blocks.0.img_attn.qkv.weight` как раз равна **3072** ($3 \times 3072 = 9216$). В результате все модели FLUX.1 ложно перехватывались как `flux2`.
+
+### Архитектурное решение:
+1. **Инкапсуляция профилей в `Flux2ImageGenerator`:**
+   В класс `Flux2ImageGenerator` внедрен словарь `PROFILES` (`dev`, `klein_9b`, `klein_4b`) и метод `resolve_components()`. По заголовку `.safetensors` (размерности `txt_in.weight`: 15360 для Dev, 12288 для Klein 9B, 7680 для Klein 4B) генератор автоматически выбирает точный энкодер (`mistral_3_small_flux2_bf16.safetensors`, `qwen_3_8b_fp8mixed.safetensors` или `qwen_3_4b.safetensors`) и дефолтные параметры (28 шагов для Dev, 4 шага для Klein).
+2. **Изоляция FLUX.1 Dev:**
+   `Flux1ImageGenerator.matches_model()` проверяет наличие 19 double-блоков (`double_blocks.18`), размерность проекции текста 4096 (T5-XXL) и размер патча 64 (в отличие от 128 у FLUX.2).
+3. **Устранение процедурных констант:**
+   Вся логика инспекции перенесена в полиморфные методы стратегий (`matches_model`, `matches_lora`), а `lora_inspector.py` делегирует проверки зарегистрированным стратегиям.

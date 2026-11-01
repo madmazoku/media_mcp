@@ -153,53 +153,18 @@ def extract_triggers_from_metadata(meta: Dict[str, Any], filepath: str = "") -> 
 
 def detect_model_architecture_from_header(header: Dict[str, Any], filepath: str = "") -> str:
     """
-    Determines model architecture ('sdxl', 'pony', 'flux1', 'flux2', 'wan', 'ltx', 'sd15')
-    by inspecting tensor names/shapes in the .safetensors header first, falling back to metadata/filename.
+    Determines model architecture ('flux2', 'flux1', 'wan', 'ltx', 'sdxl', 'pony', 'sd15')
+    by querying polymorphic Generator strategies via BaseGenerator.matches_model().
     """
-    meta = header.get("__metadata__", {}) if isinstance(header, dict) else {}
-    if not isinstance(meta, dict):
-        meta = {}
+    if isinstance(header, dict) and header:
+        from .generators.factory import get_model_strategies
+        for strat in get_model_strategies():
+            if strat.matches_model(header, filename=filepath):
+                if strat.family == "sdxl" and "pony" in Path(filepath).name.lower():
+                    return "pony"
+                return strat.family
 
-    tensor_keys = [k for k in header.keys() if k != "__metadata__"] if isinstance(header, dict) else []
-    fn_lower = Path(filepath).name.lower() if filepath else ""
-    arch_meta = str(meta.get("modelspec.architecture") or meta.get("ss_base_model_version") or "").lower()
-
-    if tensor_keys:
-        sample_keys = " ".join(tensor_keys[:200]).lower()
-        # Wan 2.1 / 2.2 DiT
-        if "cross_attn.k_img" in sample_keys or ("patch_embedding.weight" in sample_keys and "blocks.0.self_attn" in sample_keys):
-            return "wan"
-        # LTX-Video DiT
-        if "adaln_single" in sample_keys or "patchify_proj" in sample_keys or "scale_shift_table" in sample_keys or ("transformer_blocks.0.attn1" in sample_keys and "caption_projection" in sample_keys):
-            return "ltx"
-        # FLUX.1 vs FLUX.2 Klein DiT
-        if "double_blocks." in sample_keys or "single_blocks." in sample_keys:
-            if "flux2" in fn_lower or "klein" in fn_lower or "flux2" in arch_meta or "klein" in arch_meta:
-                return "flux2"
-            for k in tensor_keys:
-                if "double_blocks.0.img_attn.qkv.weight" in k:
-                    t_info = header.get(k)
-                    if isinstance(t_info, dict) and isinstance(t_info.get("shape"), list) and len(t_info["shape"]) >= 2:
-                        in_dim = int(t_info["shape"][1])
-                        if in_dim == 3072:
-                            return "flux2"
-                        if in_dim == 4096:
-                            return "flux1"
-            img_in = header.get("img_in.weight") or header.get("model.diffusion_model.img_in.weight")
-            if isinstance(img_in, dict) and isinstance(img_in.get("shape"), list) and len(img_in["shape"]) >= 1:
-                if int(img_in["shape"][0]) == 3072:
-                    return "flux2"
-                if int(img_in["shape"][0]) == 4096:
-                    return "flux1"
-            has_block_18 = any("double_blocks.18." in k for k in tensor_keys)
-            if not has_block_18 and any("double_blocks.0." in k for k in tensor_keys):
-                return "flux2"
-            return "flux1"
-        # SDXL / Pony UNet
-        if any("conditioner.embedders.1" in k or "label_emb.0.0.weight" in k for k in tensor_keys):
-            return "pony" if "pony" in fn_lower else "sdxl"
-
-    return detect_checkpoint_architecture(filepath or arch_meta)
+    return detect_checkpoint_architecture(filepath)
 
 
 def detect_checkpoint_engine(filepath_or_name: Any) -> str:
@@ -226,57 +191,26 @@ def detect_lora_architecture(
     header: Optional[Dict[str, Any]] = None
 ) -> str:
     """
-    Detects LoRA base model architecture: 'sd15', 'sdxl', 'flux1', 'flux2', 'wan', 'ltx', or 'unknown'.
-    Inspects metadata, safetensors tensor key patterns and shapes, and filename.
+    Detects LoRA base model architecture: 'sd15', 'sdxl', 'flux1', 'flux2', 'wan', 'ltx', or 'unknown'
+    by querying polymorphic Generator strategies via BaseGenerator.matches_lora().
     """
     if not isinstance(meta, dict):
         meta = {}
-    base_ver = str(meta.get("ss_base_model_version") or meta.get("modelspec.architecture") or "").lower()
-    sd_model_name = str(meta.get("ss_sd_model_name") or "").lower()
+
+    from .generators.factory import get_model_strategies
+    for strat in get_model_strategies():
+        if strat.matches_lora(header=header, meta=meta, filename=filepath):
+            return strat.family
+
+    # SD 1.5 fallback
+    base_ver = str(meta.get("ss_base_model_version") or "").lower()
     fn = Path(filepath).name.lower() if filepath else ""
-
-    tensor_keys: List[str] = []
-    if isinstance(header, dict):
-        tensor_keys = [k for k in header.keys() if k != "__metadata__"]
-
-    if tensor_keys and isinstance(header, dict):
-        sample = " ".join(tensor_keys[:120]).lower()
-        if "cross_attn_k_img" in sample or "cross_attn.k_img" in sample or ("blocks_0_self_attn" in sample and "blocks_0_cross_attn" in sample):
-            return "wan"
-        if "adaln_single" in sample or "caption_projection" in sample or "transformer_blocks_0_attn1" in sample:
-            return "ltx"
-        if "double_blocks" in sample or "single_blocks" in sample:
-            for k in tensor_keys:
-                if "lora_down.weight" in k and ("double_blocks" in k or "single_blocks" in k):
-                    t_info = header.get(k)
-                    if isinstance(t_info, dict) and isinstance(t_info.get("shape"), list) and len(t_info["shape"]) >= 2:
-                        in_dim = int(t_info["shape"][1])
-                        if in_dim == 3072:
-                            return "flux2"
-                        if in_dim == 4096:
-                            return "flux1"
-            if "flux2" in base_ver or "klein" in base_ver or "flux2" in fn or "klein" in fn:
-                return "flux2"
-            return "flux1"
-        if "lora_te1_" in sample or "lora_te2_" in sample or "conditioner_embedders" in sample:
-            return "sdxl"
+    if any(x in f"{base_ver} {fn}" for x in ("v1-5", "sd15", "sd_1_5", "1.5")):
+        return "sd15"
+    if header and isinstance(header, dict):
+        sample = " ".join([k for k in header.keys() if k != "__metadata__"][:120]).lower()
         if "lora_te_" in sample and "lora_te2_" not in sample:
             return "sd15"
-
-    combined = f"{base_ver} {sd_model_name} {fn}"
-
-    if any(x in combined for x in ("wan", "wan2.1", "wan2.2", "lightx2v")):
-        return "wan"
-    if any(x in combined for x in ("ltx", "ltxv", "sulphur", "sulfur")):
-        return "ltx"
-    if any(x in combined for x in ("flux2", "klein")):
-        return "flux2"
-    if any(x in combined for x in ("flux", "flux1")):
-        return "flux1"
-    if any(x in combined for x in ("xl", "sdxl", "pony", "illustrious", "animagine")):
-        return "sdxl"
-    if any(x in combined for x in ("v1-5", "sd15", "sd_1_5", "1.5")):
-        return "sd15"
 
     return "unknown"
 
@@ -287,18 +221,14 @@ def detect_checkpoint_architecture(model_name: str) -> str:
     'pony', 'sdxl', 'flux1', 'flux2', 'wan', 'ltx', 'sd15'.
     """
     m = str(model_name or "").lower()
-    if "pony" in m:
-        return "pony"
-    if "flux2" in m or "klein" in m:
-        return "flux2"
-    if "flux" in m:
-        return "flux1"
-    if "wan" in m:
-        return "wan"
-    if any(x in m for x in ("ltx", "sulphur", "sulfur")):
-        return "ltx"
-    if any(x in m for x in ("xl", "illustrious", "animagine", "cyberrealistic")):
-        return "sdxl"
-    if any(x in m for x in ("v1-5", "1.5")):
+    from .generators.factory import get_model_strategies
+    for strat in get_model_strategies():
+        if strat.matches_model({}, filename=m):
+            if strat.family == "sdxl" and "pony" in m:
+                return "pony"
+            return strat.family
+    if "hunyuan" in m:
+        return "hunyuan"
+    if any(x in m for x in ("v1-5", "sd15", "sd_1_5", "1.5")):
         return "sd15"
     return "sdxl"

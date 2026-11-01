@@ -20,6 +20,8 @@ from typing import Any, Dict, Optional
 from .. import config
 from .. import comfy_client
 from .. import a1111_client
+from .. import discovery
+from .. import lora_inspector
 from .base import BaseGenerator, ImageRequest, GenerationResult, snap_to_16
 
 
@@ -56,7 +58,67 @@ class SdxlImageGenerator(BaseImageGenerator):
     """
 
     service = "automatic1111"
+    engine_id = "sdxl"
+    family = "sdxl"
     spatial_stride: int = 64
+
+    @classmethod
+    def resolve_components(
+        cls,
+        model_name: str,
+        header: Optional[Dict[str, Any]] = None,
+        settings: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        mod_lower = str(model_name).lower()
+        is_pony = "pony" in mod_lower or "score_" in mod_lower
+        comps = {
+            "cfg": 5.5 if is_pony else 7.0,
+            "steps": 30,
+            "sampler": "Euler a" if is_pony else "Euler",
+        }
+        if settings:
+            for k in ("cfg", "steps", "sampler"):
+                if k in settings and settings[k] is not None:
+                    comps[k] = settings[k]
+        return comps
+
+    @classmethod
+    def matches_model(cls, header: Dict[str, Any], filename: str = "") -> bool:
+        fn_lower = Path(filename).name.lower() if filename else ""
+        meta = header.get("__metadata__", {}) if isinstance(header, dict) else {}
+        arch_meta = str(meta.get("modelspec.architecture") or meta.get("ss_base_model_version") or "").lower()
+
+        if any(x in fn_lower for x in ("sdxl", "pony", "illustrious", "animagine")):
+            return True
+        if any(x in arch_meta for x in ("sdxl", "pony")):
+            return True
+
+        tensor_keys = [k for k in header.keys() if k != "__metadata__"] if isinstance(header, dict) else []
+        if tensor_keys:
+            if any("conditioner.embedders.1" in k or "label_emb.0.0.weight" in k for k in tensor_keys):
+                return True
+        return False
+
+    @classmethod
+    def matches_lora(
+        cls,
+        header: Optional[Dict[str, Any]] = None,
+        meta: Optional[Dict[str, Any]] = None,
+        filename: str = ""
+    ) -> bool:
+        meta = meta or {}
+        fn_lower = Path(filename).name.lower() if filename else ""
+        base_ver = str(meta.get("ss_base_model_version") or meta.get("modelspec.architecture") or "").lower()
+
+        if any(x in base_ver for x in ("sdxl", "pony", "illustrious", "animagine")) or any(x in fn_lower for x in ("xl", "sdxl", "pony", "illustrious", "animagine")):
+            return True
+
+        if header and isinstance(header, dict):
+            tensor_keys = [k for k in header.keys() if k != "__metadata__"]
+            sample = " ".join(tensor_keys[:120]).lower()
+            if "lora_te1_" in sample or "lora_te2_" in sample or "conditioner_embedders" in sample:
+                return True
+        return False
 
     def generate(self, request: ImageRequest) -> GenerationResult:
         model = str(request.model or self.settings.get("model") or self.settings.get("checkpoint") or "").strip()
@@ -197,6 +259,7 @@ class SdxlImageGenerator(BaseImageGenerator):
             out_dir = Path(config.OUTPUT_IMG_DIR) if config.OUTPUT_IMG_DIR else Path.cwd()
             final_path = (p_save if p_save.is_absolute() else (out_dir / p_save)).resolve().as_posix()
 
+            Path(final_path).parent.mkdir(parents=True, exist_ok=True)
             with open(final_path, "wb") as f:
                 f.write(raw_bytes)
 
@@ -236,25 +299,123 @@ class Flux1ImageGenerator(BaseImageGenerator):
     """
 
     service = "comfyui"
+    engine_id = "flux1"
+    family = "flux1"
+
+    @classmethod
+    def resolve_components(
+        cls,
+        model_name: str,
+        header: Optional[Dict[str, Any]] = None,
+        settings: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        comps = {
+            "text_encoder": "t5xxl_fp16.safetensors",
+            "text_encoder_2": "clip_l.safetensors",
+            "vae": "ae.safetensors",
+            "clip_type": "flux",
+            "steps": 28,
+            "guidance": 3.5,
+        }
+        if settings:
+            for k in ("text_encoder", "text_encoder_2", "vae", "clip_type", "steps", "guidance"):
+                if k in settings and settings[k] is not None:
+                    comps[k] = settings[k]
+        return comps
+
+    @classmethod
+    def matches_model(cls, header: Dict[str, Any], filename: str = "") -> bool:
+        fn_lower = Path(filename).name.lower() if filename else ""
+        if "flux2" in fn_lower or "klein" in fn_lower or "_f2" in fn_lower or "hunyuan" in fn_lower:
+            return False
+
+        meta = header.get("__metadata__", {}) if isinstance(header, dict) else {}
+        arch_meta = str(meta.get("modelspec.architecture") or meta.get("ss_base_model_version") or "").lower()
+        if "flux2" in arch_meta or "klein" in arch_meta or "hunyuan" in arch_meta:
+            return False
+
+        tensor_keys = [k for k in header.keys() if k != "__metadata__"] if isinstance(header, dict) else []
+        if not tensor_keys:
+            return any(x in fn_lower for x in ("flux1", "flux", "_f1"))
+
+        has_flux_blocks = any("double_blocks." in k or "single_blocks." in k for k in tensor_keys)
+        if not has_flux_blocks:
+            return False
+
+        if any("hunyuan" in k for k in tensor_keys):
+            return False
+
+        has_block_18 = any("double_blocks.18." in k for k in tensor_keys)
+        if has_block_18:
+            return True
+
+        for k in ("txt_in.weight", "model.diffusion_model.txt_in.weight"):
+            t_info = header.get(k)
+            if isinstance(t_info, dict) and isinstance(t_info.get("shape"), list) and len(t_info["shape"]) >= 2:
+                if int(t_info["shape"][1]) == 4096:
+                    return True
+
+        for k in ("img_in.weight", "model.diffusion_model.img_in.weight"):
+            t_info = header.get(k)
+            if isinstance(t_info, dict) and isinstance(t_info.get("shape"), list) and len(t_info["shape"]) >= 2:
+                if int(t_info["shape"][1]) == 64:
+                    return True
+
+        if "_f1" in fn_lower or "flux1" in fn_lower:
+            return True
+
+        return not Flux2ImageGenerator.matches_model(header, filename)
+
+    @classmethod
+    def matches_lora(
+        cls,
+        header: Optional[Dict[str, Any]] = None,
+        meta: Optional[Dict[str, Any]] = None,
+        filename: str = ""
+    ) -> bool:
+        meta = meta or {}
+        fn_lower = Path(filename).name.lower() if filename else ""
+        if "flux2" in fn_lower or "klein" in fn_lower or "_f2" in fn_lower:
+            return False
+
+        base_ver = str(meta.get("ss_base_model_version") or meta.get("modelspec.architecture") or "").lower()
+        if "flux2" in base_ver or "klein" in base_ver:
+            return False
+
+        if "flux1" in base_ver or "flux" in base_ver or "flux1" in fn_lower or "flux" in fn_lower or "_f1" in fn_lower:
+            return True
+
+        if header and isinstance(header, dict):
+            tensor_keys = [k for k in header.keys() if k != "__metadata__"]
+            if any("double_blocks" in k or "single_blocks" in k for k in tensor_keys):
+                return True
+        return False
 
     def generate(self, request: ImageRequest) -> GenerationResult:
         unet_name = str(request.model or self.settings.get("model") or self.settings.get("checkpoint") or "").strip()
         if not unet_name:
             return GenerationResult(success=False, error="Parameter 'model' is required for FLUX.1 image generation.")
 
+        full_path = discovery._locate_comfy_file(unet_name, ("unet", "diffusion_models", "checkpoints"))
+        header = lora_inspector.read_safetensors_header(full_path) if full_path else None
+
+        comps = self.resolve_components(model_name=unet_name, header=header, settings=self.settings)
+        clip_name1 = comps.get("text_encoder", "t5xxl_fp16.safetensors")
+        clip_name2 = comps.get("text_encoder_2", "clip_l.safetensors")
+        vae_name = comps.get("vae", "ae.safetensors")
+        clip_type = comps.get("clip_type", "flux")
+        default_steps = comps.get("steps", 28)
+        default_guidance = comps.get("guidance", 3.5)
+
         width = snap_to_16(request.width or self.settings.get("width", 1024))
         height = snap_to_16(request.height or self.settings.get("height", 1024))
         seed = random.randint(1, 10**14) if request.seed in (-1, None) else int(request.seed)
-        steps = int(request.steps or self.settings.get("steps", 28))
-        guidance = float(request.guidance if request.guidance is not None else self.settings.get("guidance", 3.5))
+        steps = int(request.steps or self.settings.get("steps") or default_steps)
+        guidance = float(request.guidance if request.guidance is not None else (self.settings.get("guidance") or default_guidance))
 
         timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         req_hash = uuid.uuid4().hex[:6]
         run_prefix = request.run_prefix or f"{timestamp}-{req_hash}"
-
-        clip_name1 = self.settings.get("text_encoder", "t5xxl_fp16.safetensors")
-        clip_name2 = self.settings.get("text_encoder_2", "clip_l.safetensors")
-        vae_name = self.settings.get("vae", "ae.safetensors")
         full_prompt = request.prompt.strip()
 
         wf: Dict[str, Any] = {
@@ -361,6 +522,7 @@ class Flux1ImageGenerator(BaseImageGenerator):
         out_dir = Path(config.OUTPUT_IMG_DIR) if config.OUTPUT_IMG_DIR else Path.cwd()
         final_path = (p_save if p_save.is_absolute() else (out_dir / p_save)).resolve().as_posix()
 
+        Path(final_path).parent.mkdir(parents=True, exist_ok=True)
         with open(final_path, "wb") as f:
             f.write(raw_bytes)
 
@@ -389,30 +551,193 @@ class Flux1ImageGenerator(BaseImageGenerator):
 
 class Flux2ImageGenerator(BaseImageGenerator):
     """
-    FLUX.2 Klein generator via ComfyUI.
-    Uses Qwen CLIPLoader, Flux2Scheduler, and SamplerCustomAdvanced.
-    Incompatible with FLUX.1 LoRAs (safeguard enforced).
+    FLUX.2 (Dev & Klein) generator via ComfyUI.
+    Uses CLIPLoader with dynamically matched text encoder:
+      - FLUX.2 Dev: mistral_3_small_flux2_bf16.safetensors (txt_in dim 15360)
+      - FLUX.2 Klein 9B: qwen_3_8b_fp8mixed.safetensors (txt_in dim 12288)
+      - FLUX.2 Klein 4B: qwen_3_4b.safetensors (txt_in dim 7680)
+    Uses Flux2Scheduler and SamplerCustomAdvanced.
     """
 
     service = "comfyui"
+    engine_id = "flux2"
+    family = "flux2"
+
+    PROFILES: Dict[str, Dict[str, Any]] = {
+        "dev": {
+            "name": "dev",
+            "txt_in_dim": 15360,
+            "img_in_dim": 128,
+            "text_encoder": "mistral_3_small_flux2_bf16.safetensors",
+            "vae": "flux2-vae.safetensors",
+            "clip_type": "flux2",
+            "steps": 28,
+            "guidance": 3.5,
+        },
+        "klein_9b": {
+            "name": "klein_9b",
+            "txt_in_dim": 12288,
+            "img_in_dim": 128,
+            "text_encoder": "qwen_3_8b_fp8mixed.safetensors",
+            "vae": "flux2-vae.safetensors",
+            "clip_type": "flux2",
+            "steps": 4,
+            "guidance": 3.5,
+        },
+        "klein_4b": {
+            "name": "klein_4b",
+            "txt_in_dim": 7680,
+            "img_in_dim": 128,
+            "text_encoder": "qwen_3_4b.safetensors",
+            "vae": "flux2-vae.safetensors",
+            "clip_type": "flux2",
+            "steps": 4,
+            "guidance": 3.5,
+        },
+    }
+
+    @classmethod
+    def resolve_profile_key(cls, model_name: str = "", header: Optional[Dict[str, Any]] = None) -> str:
+        fn_lower = Path(model_name).name.lower() if model_name else ""
+        if header and isinstance(header, dict):
+            for k in ("txt_in.weight", "model.diffusion_model.txt_in.weight"):
+                t_info = header.get(k)
+                if isinstance(t_info, dict) and isinstance(t_info.get("shape"), list) and len(t_info["shape"]) >= 2:
+                    dim = int(t_info["shape"][1])
+                    if dim == 15360:
+                        return "dev"
+                    elif dim == 12288:
+                        return "klein_9b"
+                    elif dim == 7680:
+                        return "klein_4b"
+
+            for k in ("double_blocks.0.img_attn.qkv.weight", "model.diffusion_model.double_blocks.0.img_attn.qkv.weight"):
+                t_info = header.get(k)
+                if isinstance(t_info, dict) and isinstance(t_info.get("shape"), list) and len(t_info["shape"]) >= 2:
+                    dim = int(t_info["shape"][1])
+                    if dim == 6144:
+                        return "dev"
+                    elif dim == 4096:
+                        return "klein_9b"
+                    elif dim == 3072 and ("4b" in fn_lower or not any("double_blocks.18" in x for x in header)):
+                        return "klein_4b"
+
+        if "dev" in fn_lower:
+            return "dev"
+        if "4b" in fn_lower:
+            return "klein_4b"
+        if "9b" in fn_lower:
+            return "klein_9b"
+        return "klein_9b"
+
+    @classmethod
+    def resolve_components(
+        cls,
+        model_name: str,
+        header: Optional[Dict[str, Any]] = None,
+        settings: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        key = cls.resolve_profile_key(model_name=model_name, header=header)
+        comps = dict(cls.PROFILES.get(key, cls.PROFILES["klein_9b"]))
+        if settings:
+            for k in ("text_encoder", "vae", "clip_type", "steps", "guidance"):
+                if k in settings and settings[k] is not None:
+                    comps[k] = settings[k]
+        return comps
+
+    @classmethod
+    def matches_model(cls, header: Dict[str, Any], filename: str = "") -> bool:
+        fn_lower = Path(filename).name.lower() if filename else ""
+        meta = header.get("__metadata__", {}) if isinstance(header, dict) else {}
+        arch_meta = str(meta.get("modelspec.architecture") or meta.get("ss_base_model_version") or "").lower()
+
+        if "flux2" in fn_lower or "klein" in fn_lower or "flux2" in arch_meta or "klein" in arch_meta:
+            return True
+
+        tensor_keys = [k for k in header.keys() if k != "__metadata__"] if isinstance(header, dict) else []
+        if not tensor_keys:
+            return any(x in fn_lower for x in ("flux2", "klein", "_f2"))
+
+        has_flux_blocks = any("double_blocks." in k or "single_blocks." in k for k in tensor_keys)
+        if not has_flux_blocks:
+            return False
+
+        has_block_18 = any("double_blocks.18." in k for k in tensor_keys)
+        if has_block_18:
+            return False
+
+        for k in ("txt_in.weight", "model.diffusion_model.txt_in.weight"):
+            t_info = header.get(k)
+            if isinstance(t_info, dict) and isinstance(t_info.get("shape"), list) and len(t_info["shape"]) >= 2:
+                txt_dim = int(t_info["shape"][1])
+                if txt_dim in (15360, 12288, 7680):
+                    return True
+                if txt_dim == 4096:
+                    return False
+
+        for k in ("img_in.weight", "model.diffusion_model.img_in.weight"):
+            t_info = header.get(k)
+            if isinstance(t_info, dict) and isinstance(t_info.get("shape"), list) and len(t_info["shape"]) >= 2:
+                patch_dim = int(t_info["shape"][1])
+                if patch_dim == 128:
+                    return True
+                if patch_dim == 64:
+                    return False
+
+        if "_f2" in fn_lower:
+            return True
+
+        return False
+
+    @classmethod
+    def matches_lora(
+        cls,
+        header: Optional[Dict[str, Any]] = None,
+        meta: Optional[Dict[str, Any]] = None,
+        filename: str = ""
+    ) -> bool:
+        meta = meta or {}
+        fn_lower = Path(filename).name.lower() if filename else ""
+        base_ver = str(meta.get("ss_base_model_version") or meta.get("modelspec.architecture") or "").lower()
+
+        if "flux2" in base_ver or "klein" in base_ver or "flux2" in fn_lower or "klein" in fn_lower or "_f2" in fn_lower:
+            return True
+
+        if header and isinstance(header, dict):
+            tensor_keys = [k for k in header.keys() if k != "__metadata__"]
+            if any("double_blocks" in k or "single_blocks" in k for k in tensor_keys):
+                for k in tensor_keys:
+                    if "lora_down.weight" in k and ("double_blocks" in k or "single_blocks" in k):
+                        t_info = header.get(k)
+                        if isinstance(t_info, dict) and isinstance(t_info.get("shape"), list) and len(t_info["shape"]) >= 2:
+                            if int(t_info["shape"][1]) == 3072 and ("klein" in fn_lower or "_f2" in fn_lower):
+                                return True
+        return False
 
     def generate(self, request: ImageRequest) -> GenerationResult:
         unet_name = str(request.model or self.settings.get("model") or self.settings.get("checkpoint") or "").strip()
         if not unet_name:
             return GenerationResult(success=False, error="Parameter 'model' is required for FLUX.2 image generation.")
 
+        full_path = discovery._locate_comfy_file(unet_name, ("unet", "diffusion_models", "checkpoints"))
+        header = lora_inspector.read_safetensors_header(full_path) if full_path else None
+
+        comps = self.resolve_components(model_name=unet_name, header=header, settings=self.settings)
+        clip_name = comps.get("text_encoder", "qwen_3_8b_fp8mixed.safetensors")
+        vae_name = comps.get("vae", "flux2-vae.safetensors")
+        clip_type = comps.get("clip_type", "flux2")
+        default_steps = comps.get("steps", 4)
+        default_guidance = comps.get("guidance", 3.5)
+
         width = snap_to_16(request.width or self.settings.get("width", 1024))
         height = snap_to_16(request.height or self.settings.get("height", 1024))
         seed = random.randint(1, 10**14) if request.seed in (-1, None) else int(request.seed)
-        steps = int(request.steps or self.settings.get("steps", 4))
-        guidance = float(request.guidance if request.guidance is not None else self.settings.get("guidance", 3.5))
+        steps = int(request.steps or self.settings.get("steps") or default_steps)
+        guidance = float(request.guidance if request.guidance is not None else (self.settings.get("guidance") or default_guidance))
 
         timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         req_hash = uuid.uuid4().hex[:6]
         run_prefix = request.run_prefix or f"{timestamp}-{req_hash}"
-
-        clip_name = self.settings.get("text_encoder", "qwen_3_8b_fp8mixed.safetensors")
-        vae_name = self.settings.get("vae", "flux2-vae.safetensors")
         full_prompt = request.prompt.strip()
 
         wf: Dict[str, Any] = {
@@ -530,6 +855,7 @@ class Flux2ImageGenerator(BaseImageGenerator):
         out_dir = Path(config.OUTPUT_IMG_DIR) if config.OUTPUT_IMG_DIR else Path.cwd()
         final_path = (p_save if p_save.is_absolute() else (out_dir / p_save)).resolve().as_posix()
 
+        Path(final_path).parent.mkdir(parents=True, exist_ok=True)
         with open(final_path, "wb") as f:
             f.write(raw_bytes)
 
