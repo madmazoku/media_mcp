@@ -8,12 +8,26 @@ Instantiates the appropriate image or video generator based on canonical engine 
 from __future__ import annotations
 from typing import Dict, Any, Optional, Type
 
-from .image_generators import BaseImageGenerator, SdxlImageGenerator, Flux1ImageGenerator, Flux2ImageGenerator
+from .image_generators import (
+    BaseImageGenerator,
+    SdxlImageGenerator,
+    SdxlComfyImageGenerator,
+    Flux1ImageGenerator,
+    Flux2ImageGenerator
+)
 from .base import BaseGenerator
-from .video_generators import BaseVideoGenerator, BaseWanVideoGenerator, WanFastVideoGenerator, WanFullVideoGenerator, LtxVideoGenerator
+from .video_generators import (
+    BaseVideoGenerator,
+    BaseWanVideoGenerator,
+    WanFastVideoGenerator,
+    WanFullVideoGenerator,
+    LtxVideoGenerator,
+    HunyuanVideoGenerator
+)
 
 IMAGE_GENERATOR_REGISTRY: Dict[str, Type[BaseImageGenerator]] = {
     "sdxl": SdxlImageGenerator,
+    "sdxl-comfy": SdxlComfyImageGenerator,
     "flux1": Flux1ImageGenerator,
     "flux2": Flux2ImageGenerator,
 }
@@ -22,12 +36,13 @@ VIDEO_GENERATOR_REGISTRY: Dict[str, Type[BaseVideoGenerator]] = {
     "wan-fast": WanFastVideoGenerator,
     "wan-full": WanFullVideoGenerator,
     "ltx": LtxVideoGenerator,
+    "hunyuan": HunyuanVideoGenerator,
 }
 
 
 def create_image_generator(engine_or_name: str = "sdxl", settings: Optional[Dict[str, Any]] = None) -> BaseImageGenerator:
     """
-    Factory method to create an image generator matching canonical engine name ('sdxl', 'flux1', 'flux2').
+    Factory method to create an image generator matching canonical engine name ('sdxl', 'sdxl-comfy', 'flux1', 'flux2').
     """
     key = str(engine_or_name or "sdxl").strip().lower()
     cls = IMAGE_GENERATOR_REGISTRY.get(key)
@@ -40,7 +55,7 @@ def create_image_generator(engine_or_name: str = "sdxl", settings: Optional[Dict
 
 def create_video_generator(engine_or_name: str = "wan-fast", settings: Optional[Dict[str, Any]] = None) -> BaseVideoGenerator:
     """
-    Factory method to create a video generator matching canonical engine name ('wan-fast', 'wan-full', 'ltx').
+    Factory method to create a video generator matching canonical engine name ('wan-fast', 'wan-full', 'ltx', 'hunyuan').
     """
     key = str(engine_or_name or "wan-fast").strip().lower()
     cls = VIDEO_GENERATOR_REGISTRY.get(key)
@@ -49,6 +64,7 @@ def create_video_generator(engine_or_name: str = "wan-fast", settings: Optional[
             f"Unsupported video engine '{engine_or_name}'. Allowed values: {list(VIDEO_GENERATOR_REGISTRY.keys())}"
         )
     return cls(name=key, settings=settings)
+
 
 def get_image_generator_class(engine_or_name: str = "sdxl") -> Type[BaseImageGenerator]:
     """Returns the BaseImageGenerator class for a given engine name without instantiation."""
@@ -71,15 +87,18 @@ def get_video_generator_class(engine_or_name: str = "wan-fast") -> Type[BaseVide
         )
     return cls
 
+
 def get_model_strategies() -> list:
     """
     Returns ordered generator strategy classes for model and LoRA architecture classification.
-    Ordered from most specific to least specific: FLUX.2 -> FLUX.1 -> Wan -> LTX -> SDXL.
+    Ordered from most specific to least specific: FLUX.2 -> Hunyuan -> FLUX.1 -> Wan -> LTX -> SDXL (Comfy) -> SDXL (A1111).
     """
     return [
         Flux2ImageGenerator,
+        HunyuanVideoGenerator,
         Flux1ImageGenerator,
         BaseWanVideoGenerator,
         LtxVideoGenerator,
+        SdxlComfyImageGenerator,
         SdxlImageGenerator,
     ]

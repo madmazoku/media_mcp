@@ -22,7 +22,7 @@ from .. import comfy_client
 from .. import a1111_client
 from .. import discovery
 from .. import lora_inspector
-from .base import BaseGenerator, ImageRequest, GenerationResult, snap_to_16
+from .base import BaseGenerator, ImageRequest, GenerationResult, snap_to_16, snap_to_step
 
 
 def log(msg: str):
@@ -42,6 +42,16 @@ class BaseImageGenerator(BaseGenerator):
     """Abstract base class for image generators."""
 
     kind = "image"
+    default_cfg: float = 7.0
+    default_guidance: Optional[float] = None
+    default_steps: int = 30
+    default_sampler: str = "euler"
+    default_scheduler: Optional[str] = None
+    allow_unclassified_loras: bool = False
+
+    @classmethod
+    def get_samplers(cls, model: str = "") -> List[str]:
+        return [cls.default_sampler]
 
     def metadata(self) -> Dict[str, Any]:
         return {
@@ -61,6 +71,36 @@ class SdxlImageGenerator(BaseImageGenerator):
     engine_id = "sdxl"
     family = "sdxl"
     spatial_stride: int = 64
+    default_cfg: float = 7.0
+    default_guidance: Optional[float] = None
+    default_steps: int = 30
+    default_sampler: str = "Euler"
+    default_scheduler: Optional[str] = None
+    allow_unclassified_loras: bool = True
+
+    @classmethod
+    def get_samplers(cls, model: str = "") -> List[str]:
+        try:
+            raw_samplers = a1111_client.get_samplers()
+            sampler_names = [s.get("name") for s in raw_samplers if s.get("name")]
+        except Exception as ex:
+            log(f"Notice: Failed to fetch A1111 samplers dynamically: {ex}")
+            sampler_names = [
+                "Euler a", "Euler", "DPM++ 2M Karras", "DPM++ SDE Karras",
+                "DPM++ 2S a Karras", "Restart", "UniPC", "DDIM"
+            ]
+
+        mod = str(model).lower()
+        is_pony = "pony" in mod or "score_" in mod
+        preferred = "Euler a" if is_pony else "Euler"
+
+        sorted_samplers = []
+        if preferred in sampler_names:
+            sorted_samplers.append(preferred)
+        for s in sampler_names:
+            if s not in sorted_samplers:
+                sorted_samplers.append(s)
+        return sorted_samplers
 
     @classmethod
     def resolve_components(
@@ -256,7 +296,7 @@ class SdxlImageGenerator(BaseImageGenerator):
             run_prefix = request.run_prefix or f"{timestamp}-{req_hash}"
             save_filename = request.custom_filename or f"{run_prefix}-final.png"
             p_save = Path(save_filename)
-            out_dir = Path(config.OUTPUT_IMG_DIR) if config.OUTPUT_IMG_DIR else Path.cwd()
+            out_dir = Path(config.OUTPUT_IMG_DIR) if config.OUTPUT_IMG_DIR else Path(config.get_temp_dir())
             final_path = (p_save if p_save.is_absolute() else (out_dir / p_save)).resolve().as_posix()
 
             Path(final_path).parent.mkdir(parents=True, exist_ok=True)
@@ -301,6 +341,19 @@ class Flux1ImageGenerator(BaseImageGenerator):
     service = "comfyui"
     engine_id = "flux1"
     family = "flux1"
+    spatial_stride: int = 16
+    default_cfg: float = 1.0
+    default_guidance: Optional[float] = 3.5
+    default_steps: int = 28
+    default_sampler: str = "euler"
+    default_scheduler: Optional[str] = "normal"
+    allow_unclassified_loras: bool = False
+    allow_unclassified_loras: bool = True
+    allow_unclassified_loras: bool = True
+
+    @classmethod
+    def get_samplers(cls, model: str = "") -> List[str]:
+        return ["euler"]
 
     @classmethod
     def resolve_components(
@@ -375,11 +428,11 @@ class Flux1ImageGenerator(BaseImageGenerator):
     ) -> bool:
         meta = meta or {}
         fn_lower = Path(filename).name.lower() if filename else ""
-        if "flux2" in fn_lower or "klein" in fn_lower or "_f2" in fn_lower:
+        if "flux2" in fn_lower or "klein" in fn_lower or "_f2" in fn_lower or "hunyuan" in fn_lower:
             return False
 
         base_ver = str(meta.get("ss_base_model_version") or meta.get("modelspec.architecture") or "").lower()
-        if "flux2" in base_ver or "klein" in base_ver:
+        if "flux2" in base_ver or "klein" in base_ver or "hunyuan" in base_ver:
             return False
 
         if "flux1" in base_ver or "flux" in base_ver or "flux1" in fn_lower or "flux" in fn_lower or "_f1" in fn_lower:
@@ -519,7 +572,7 @@ class Flux1ImageGenerator(BaseImageGenerator):
 
         save_filename = request.custom_filename or f"{run_prefix}-final.png"
         p_save = Path(save_filename)
-        out_dir = Path(config.OUTPUT_IMG_DIR) if config.OUTPUT_IMG_DIR else Path.cwd()
+        out_dir = Path(config.OUTPUT_IMG_DIR) if config.OUTPUT_IMG_DIR else Path(config.get_temp_dir())
         final_path = (p_save if p_save.is_absolute() else (out_dir / p_save)).resolve().as_posix()
 
         Path(final_path).parent.mkdir(parents=True, exist_ok=True)
@@ -562,6 +615,16 @@ class Flux2ImageGenerator(BaseImageGenerator):
     service = "comfyui"
     engine_id = "flux2"
     family = "flux2"
+    spatial_stride: int = 16
+    default_cfg: float = 1.0
+    default_guidance: Optional[float] = 3.5
+    default_steps: int = 4
+    default_sampler: str = "euler"
+    default_scheduler: Optional[str] = "normal"
+
+    @classmethod
+    def get_samplers(cls, model: str = "") -> List[str]:
+        return ["euler"]
 
     PROFILES: Dict[str, Dict[str, Any]] = {
         "dev": {
@@ -852,7 +915,7 @@ class Flux2ImageGenerator(BaseImageGenerator):
 
         save_filename = request.custom_filename or f"{run_prefix}-final.png"
         p_save = Path(save_filename)
-        out_dir = Path(config.OUTPUT_IMG_DIR) if config.OUTPUT_IMG_DIR else Path.cwd()
+        out_dir = Path(config.OUTPUT_IMG_DIR) if config.OUTPUT_IMG_DIR else Path(config.get_temp_dir())
         final_path = (p_save if p_save.is_absolute() else (out_dir / p_save)).resolve().as_posix()
 
         Path(final_path).parent.mkdir(parents=True, exist_ok=True)
@@ -869,6 +932,284 @@ class Flux2ImageGenerator(BaseImageGenerator):
             "steps": steps,
             "guidance": guidance,
             "sampler": request.sampler or "euler"
+        }
+        if request.is_img2img:
+            meta["source_image_path"] = request.image_path
+            meta["denoise"] = float(request.denoise)
+        if request.is_inpaint:
+            meta["mask_path"] = request.mask_path
+        if request.fit:
+            meta["fit"] = request.fit
+
+        return GenerationResult(success=True, image_path=final_path, file_path=final_path, metadata=meta)
+class SdxlComfyImageGenerator(BaseImageGenerator):
+    """
+    SDXL / Pony / Illustrious generator communicating with ComfyUI API.
+    Supports CheckpointLoaderSimple, Dual CLIP text encoders, dynamic LoRA chaining
+    from ComfyUI's models/loras, negative prompts, CFG scaling, img2img, and inpainting.
+    """
+
+    service = "comfyui"
+    engine_id = "sdxl-comfy"
+    family = "sdxl"
+    spatial_stride: int = 64
+    default_cfg: float = 7.0
+    default_guidance: Optional[float] = None
+    default_steps: int = 30
+    default_sampler: str = "euler"
+    default_scheduler: Optional[str] = "normal"
+
+    @classmethod
+    def get_samplers(cls, model: str = "") -> List[str]:
+        mod = str(model).lower()
+        is_pony = "pony" in mod or "score_" in mod
+        preferred = "euler_ancestral" if is_pony else "euler"
+        all_s = ["euler", "euler_ancestral", "dpmpp_2m", "dpmpp_sde", "ddim", "uni_pc"]
+        return [preferred] + [s for s in all_s if s != preferred]
+
+    @classmethod
+    def resolve_components(
+        cls,
+        model_name: str,
+        header: Optional[Dict[str, Any]] = None,
+        settings: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        mod_lower = str(model_name).lower()
+        is_pony = "pony" in mod_lower or "score_" in mod_lower
+        comps = {
+            "cfg": 5.5 if is_pony else 7.0,
+            "steps": 30,
+            "sampler": "euler_ancestral" if is_pony else "euler",
+            "scheduler": "karras" if is_pony else "normal",
+        }
+        if settings:
+            for k in ("cfg", "steps", "sampler", "scheduler"):
+                if k in settings and settings[k] is not None:
+                    comps[k] = settings[k]
+        return comps
+
+    @classmethod
+    def matches_model(cls, header: Dict[str, Any], filename: str = "") -> bool:
+        fn_lower = Path(filename).name.lower() if filename else ""
+        if any(x in fn_lower for x in ("flux1", "flux2", "klein", "wan", "hunyuan", "ltx")):
+            return False
+
+        meta = header.get("__metadata__", {}) if isinstance(header, dict) else {}
+        arch_meta = str(meta.get("modelspec.architecture") or meta.get("ss_base_model_version") or "").lower()
+        if any(x in arch_meta for x in ("flux1", "flux2", "wan", "hunyuan", "ltx")):
+            return False
+
+        if any(x in fn_lower for x in ("sdxl", "pony", "illustrious", "animagine", "netayume")):
+            return True
+        if any(x in arch_meta for x in ("sdxl", "pony", "illustrious")):
+            return True
+
+        tensor_keys = [k for k in header.keys() if k != "__metadata__"] if isinstance(header, dict) else []
+        if tensor_keys:
+            if any("conditioner.embedders.1" in k or "label_emb.0.0.weight" in k for k in tensor_keys):
+                return True
+        return False
+
+    @classmethod
+    def matches_lora(
+        cls,
+        header: Optional[Dict[str, Any]] = None,
+        meta: Optional[Dict[str, Any]] = None,
+        filename: str = ""
+    ) -> bool:
+        meta = meta or {}
+        fn_lower = Path(filename).name.lower() if filename else ""
+        if any(x in fn_lower for x in ("flux1", "flux2", "klein", "wan", "hunyuan", "ltx")):
+            return False
+
+        base_ver = str(meta.get("ss_base_model_version") or meta.get("modelspec.architecture") or "").lower()
+        if any(x in base_ver for x in ("flux1", "flux2", "wan", "hunyuan", "ltx")):
+            return False
+
+        if any(x in base_ver for x in ("sdxl", "pony", "illustrious", "animagine")) or any(x in fn_lower for x in ("xl", "sdxl", "pony", "illustrious", "animagine")):
+            return True
+
+        if header and isinstance(header, dict):
+            tensor_keys = [k for k in header.keys() if k != "__metadata__"]
+            sample = " ".join(tensor_keys[:120]).lower()
+            if "lora_te1_" in sample or "lora_te2_" in sample or "conditioner_embedders" in sample:
+                return True
+        return False
+
+    def generate(self, request: ImageRequest) -> GenerationResult:
+        ckpt_name = str(request.model or self.settings.get("model") or self.settings.get("checkpoint") or "").strip()
+        if not ckpt_name:
+            return GenerationResult(success=False, error="Parameter 'model' is required for SDXL ComfyUI image generation.")
+
+        full_path = discovery._locate_comfy_file(ckpt_name, ("checkpoints", "diffusion_models"))
+        header = lora_inspector.read_safetensors_header(full_path) if full_path else None
+        comps = self.resolve_components(model_name=ckpt_name, header=header, settings=self.settings)
+
+        width = snap_to_step(request.width or self.settings.get("width", 1024), step=self.spatial_stride, default=1024)
+        height = snap_to_step(request.height or self.settings.get("height", 1024), step=self.spatial_stride, default=1024)
+        seed = random.randint(1, 10**14) if request.seed in (-1, None) else int(request.seed)
+        steps = int(request.steps or self.settings.get("steps") or comps.get("steps", 30))
+        cfg = float(request.cfg if request.cfg is not None else (self.settings.get("cfg") or comps.get("cfg", 7.0)))
+        sampler_name = str(request.sampler or self.settings.get("sampler") or comps.get("sampler", "euler")).strip().lower()
+        scheduler = str(self.settings.get("scheduler") or comps.get("scheduler", "normal")).strip().lower()
+
+        # Map common sampler variants to canonical ComfyUI names
+        sampler_map = {
+            "euler a": "euler_ancestral",
+            "euler_a": "euler_ancestral",
+            "dpm++ 2m": "dpmpp_2m",
+            "dpm++ 2m karras": "dpmpp_2m",
+            "dpm++ 2s a": "dpmpp_2s_ancestral",
+            "dpm++ sde": "dpmpp_sde",
+            "dpm++ sde karras": "dpmpp_sde",
+            "ddim": "ddim",
+            "uni_pc": "uni_pc",
+        }
+        if sampler_name in sampler_map:
+            sampler_name = sampler_map[sampler_name]
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        req_hash = uuid.uuid4().hex[:6]
+        run_prefix = request.run_prefix or f"{timestamp}-{req_hash}"
+        full_prompt = request.prompt.strip()
+        neg_prompt = (request.negative_prompt or self.settings.get("negative_prompt") or "").strip()
+
+        # Build ComfyUI workflow graph
+        wf: Dict[str, Any] = {
+            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt_name}},
+            "2": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["1", 1], "text": full_prompt}},
+            "3": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["1", 1], "text": neg_prompt}},
+            "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["1", 2]}},
+            "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": f"{run_prefix}-sdxl-comfy", "images": ["8", 0]}}
+        }
+
+        cur_model = ["1", 0]
+        cur_clip = ["1", 1]
+
+        # Dynamic LoRA chaining (strictly in ComfyUI models/loras)
+        if request.loras:
+            lora_node_id = 20
+            for lora_entry in request.loras:
+                l_name = lora_entry.get("name", "").strip()
+                l_strength = float(lora_entry.get("strength", 0.8))
+                if l_name and l_name.lower() not in ("none", "disabled", "false", ""):
+                    lora_fn = l_name if l_name.endswith(".safetensors") else f"{l_name}.safetensors"
+                    node_key = str(lora_node_id)
+                    wf[node_key] = {
+                        "class_type": "LoraLoader",
+                        "inputs": {
+                            "lora_name": lora_fn,
+                            "model": cur_model,
+                            "clip": cur_clip,
+                            "strength_model": l_strength,
+                            "strength_clip": l_strength
+                        }
+                    }
+                    cur_model = [node_key, 0]
+                    cur_clip = [node_key, 1]
+                    lora_node_id += 1
+
+            # Connect text encoders to the final LoRA-patched CLIP
+            wf["2"]["inputs"]["clip"] = cur_clip
+            wf["3"]["inputs"]["clip"] = cur_clip
+
+        denoise = 1.0
+        latent_input = ["6", 0]
+
+        if request.is_img2img:
+            if not Path(request.image_path).is_file():
+                return GenerationResult(success=False, error=f"Source image not found: {request.image_path}")
+            try:
+                uploaded_name = comfy_client.upload_file_to_comfy(
+                    request.image_path,
+                    run_prefix=run_prefix,
+                    suffix="input"
+                )
+            except Exception as ex:
+                return GenerationResult(success=False, error=f"Failed to upload image {request.image_path} to ComfyUI: {ex}")
+            wf["10"] = {"class_type": "LoadImage", "inputs": {"image": uploaded_name}}
+            wf["11"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["10", 0], "vae": ["1", 2]}}
+            latent_input = ["11", 0]
+            denoise = float(request.denoise if request.denoise is not None else 0.65)
+
+            if request.is_inpaint:
+                if not Path(request.mask_path).is_file():
+                    return GenerationResult(success=False, error=f"Mask image not found: {request.mask_path}")
+                try:
+                    uploaded_mask = comfy_client.upload_file_to_comfy(
+                        request.mask_path,
+                        run_prefix=run_prefix,
+                        suffix="mask"
+                    )
+                except Exception as ex:
+                    return GenerationResult(success=False, error=f"Failed to upload mask {request.mask_path} to ComfyUI: {ex}")
+                wf["12"] = {"class_type": "LoadImageMask", "inputs": {"image": uploaded_mask, "channel": "red"}}
+                wf["14"] = {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["11", 0], "mask": ["12", 0]}}
+                latent_input = ["14", 0]
+        else:
+            wf["6"] = {"class_type": "EmptyLatentImage", "inputs": {"batch_size": 1, "height": height, "width": width}}
+            latent_input = ["6", 0]
+
+        wf["7"] = {
+            "class_type": "KSampler",
+            "inputs": {
+                "model": cur_model,
+                "positive": ["2", 0],
+                "negative": ["3", 0],
+                "latent_image": latent_input,
+                "seed": seed,
+                "steps": steps,
+                "cfg": cfg,
+                "sampler_name": sampler_name,
+                "scheduler": scheduler,
+                "denoise": denoise
+            }
+        }
+
+        log(f"Submitting SDXL ComfyUI workflow (prefix={run_prefix}, model={ckpt_name}, {width}x{height}, steps={steps}, cfg={cfg})...")
+        ok, prompt_id = comfy_client.queue_prompt(wf)
+        if not ok:
+            return GenerationResult(success=False, error=f"Failed to queue prompt: {prompt_id}")
+
+        cb = request.progress_callback or _IMAGE_PROGRESS_CALLBACK
+        ok, history = comfy_client.wait_for_prompt(prompt_id, timeout=600, progress_callback=cb)
+        if not ok:
+            return GenerationResult(success=False, error=f"Execution error or timeout: {history}")
+
+        outputs = history.get("outputs", {})
+        save_img_out = outputs.get("9", {})
+        images = save_img_out.get("images", [])
+        if not images:
+            return GenerationResult(success=False, error="ComfyUI completed but no output image returned")
+
+        first_img = images[0]
+        raw_bytes = comfy_client.download_output_file(
+            filename=first_img["filename"],
+            subfolder=first_img.get("subfolder", ""),
+            file_type=first_img.get("type", "output")
+        )
+
+        save_filename = request.custom_filename or f"{run_prefix}-final.png"
+        p_save = Path(save_filename)
+        out_dir = Path(config.OUTPUT_IMG_DIR) if config.OUTPUT_IMG_DIR else Path(config.get_temp_dir())
+        final_path = (p_save if p_save.is_absolute() else (out_dir / p_save)).resolve().as_posix()
+
+        Path(final_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(final_path, "wb") as f:
+            f.write(raw_bytes)
+
+        meta = {
+            "engine": "sdxl-comfy",
+            "service": "comfyui",
+            "mode": "inpaint" if request.is_inpaint else ("img2img" if request.is_img2img else "txt2img"),
+            "model": ckpt_name,
+            "width": width,
+            "height": height,
+            "seed": seed,
+            "steps": steps,
+            "cfg": cfg,
+            "sampler": sampler_name,
+            "scheduler": scheduler
         }
         if request.is_img2img:
             meta["source_image_path"] = request.image_path

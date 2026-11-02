@@ -19,7 +19,7 @@ from .. import config
 from .. import comfy_client
 from .. import discovery
 from .. import lora_inspector
-from .base import BaseGenerator, VideoRequest, GenerationResult, snap_to_16, snap_to_32
+from .base import BaseGenerator, VideoRequest, GenerationResult, snap_to_16, snap_to_32, snap_to_step
 
 
 def log(msg: str):
@@ -36,6 +36,13 @@ class BaseVideoGenerator(BaseGenerator):
     default_fps: int = 16
     max_frames: int = 97
     native_horizon_frames: int = 81
+    default_sampler: str = "euler"
+    default_cfg: float = 1.0
+    default_steps: int = 30
+
+    @classmethod
+    def get_samplers(cls, model: str = "") -> List[str]:
+        return [cls.default_sampler]
 
     @classmethod
     def get_max_duration(cls, fps: Optional[int] = None) -> float:
@@ -1383,6 +1390,350 @@ class LtxVideoGenerator(BaseVideoGenerator):
                 "class_type": "SaveImage"
             }
             log(f"Configured ComfyUI ImageFromBatch (last frame {num_frames - 1}) + SaveImage for LTX: prefix={prefix_str}-tail")
+
+        return self._execute_comfy_workflow(
+            wf=wf,
+            prefix_str=prefix_str,
+            out_video_name=out_video_name,
+            save_tail_latent=(request.save_tail and request.tail_frames > 0),
+            save_tail_image=request.save_tail_image,
+            progress_callback=request.progress_callback
+        )
+class HunyuanVideoGenerator(BaseVideoGenerator):
+    """
+    HunyuanVideo 1.5 Video Generator via ComfyUI.
+    Uses HunyuanVideo15ImageToVideo conditioning, SigLIP vision encoding,
+    DualCLIPLoader (Qwen-2.5-VL-7B + ByT5 small glyphs), 3D Causal VAE,
+    ModelSamplingSD3 shift=7.0, and KSampler.
+    Supports native 5D latent video block chaining and tail frame slicing.
+    """
+
+    service = "comfyui"
+    engine_id = "hunyuan"
+    family = "hunyuan"
+    temporal_stride = 4
+    spatial_stride = 16
+    default_fps = 24
+    max_frames = 129
+    native_horizon_frames = 81
+
+    @classmethod
+    def resolve_components(
+        cls,
+        model_name: str,
+        header: Optional[Dict[str, Any]] = None,
+        settings: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        comps = {
+            "text_encoder": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+            "text_encoder_2": "byt5_small_glyphxl_fp16.safetensors",
+            "vae": "hunyuanvideo15_vae_fp16.safetensors",
+            "clip_vision": "sigclip_vision_patch14_384.safetensors",
+            "shift": 7.0,
+            "steps": 30,
+            "cfg": 6.0,
+            "sampler": "euler",
+            "scheduler": "normal",
+        }
+        if settings:
+            for k in ("text_encoder", "text_encoder_2", "vae", "clip_vision", "shift", "steps", "cfg", "sampler", "scheduler"):
+                if k in settings and settings[k] is not None:
+                    comps[k] = settings[k]
+        return comps
+
+    @classmethod
+    def matches_model(cls, header: Dict[str, Any], filename: str = "") -> bool:
+        fn_lower = Path(filename).name.lower() if filename else ""
+        meta = header.get("__metadata__", {}) if isinstance(header, dict) else {}
+        arch_meta = str(meta.get("modelspec.architecture") or meta.get("ss_base_model_version") or "").lower()
+
+        if "hunyuan" in fn_lower or "hunyuan" in arch_meta:
+            return True
+
+        tensor_keys = [k for k in header.keys() if k != "__metadata__"] if isinstance(header, dict) else []
+        if tensor_keys:
+            if any("hunyuan" in k for k in tensor_keys):
+                return True
+            for k in ("img_in.proj.weight", "model.diffusion_model.img_in.proj.weight"):
+                t_info = header.get(k)
+                if isinstance(t_info, dict) and isinstance(t_info.get("shape"), list):
+                    if len(t_info["shape"]) == 5 and t_info["shape"][1] in (65, 33, 32, 16):
+                        return True
+        return False
+
+    @classmethod
+    def matches_lora(
+        cls,
+        header: Optional[Dict[str, Any]] = None,
+        meta: Optional[Dict[str, Any]] = None,
+        filename: str = ""
+    ) -> bool:
+        meta = meta or {}
+        fn_lower = Path(filename).name.lower() if filename else ""
+        base_ver = str(meta.get("ss_base_model_version") or meta.get("modelspec.architecture") or "").lower()
+
+        if "hunyuan" in base_ver or "hunyuan" in fn_lower:
+            return True
+
+        if header and isinstance(header, dict):
+            tensor_keys = [k for k in header.keys() if k != "__metadata__"]
+            sample = " ".join(tensor_keys[:120]).lower()
+            if "hunyuan" in sample:
+                return True
+        return False
+
+    def generate(self, request: VideoRequest) -> GenerationResult:
+        unet_name = str(request.model or self.settings.get("model") or "").strip()
+        if not unet_name:
+            unet_name = "hunyuanvideo1.5_720p_i2v_fp16.safetensors"
+
+        full_path = discovery._locate_comfy_file(unet_name, ("diffusion_models", "unet"))
+        header = lora_inspector.read_safetensors_header(full_path) if full_path else None
+        comps = self.resolve_components(model_name=unet_name, header=header, settings=self.settings)
+
+        text_enc1 = comps.get("text_encoder", "qwen_2.5_vl_7b_fp8_scaled.safetensors")
+        text_enc2 = comps.get("text_encoder_2", "byt5_small_glyphxl_fp16.safetensors")
+        vae_name = comps.get("vae", "hunyuanvideo15_vae_fp16.safetensors")
+        clip_vision_name = comps.get("clip_vision", "sigclip_vision_patch14_384.safetensors")
+        shift = float(self.settings.get("shift") or comps.get("shift", 7.0))
+        default_steps = comps.get("steps", 30)
+        default_cfg = comps.get("cfg", 6.0)
+        default_sampler = comps.get("sampler", "euler")
+        default_scheduler = comps.get("scheduler", "normal")
+
+        # Temporal stride snapping: length = 4 * k + 1
+        raw_frames = int(request.num_frames or self.settings.get("num_frames") or 81)
+        k_blocks = max(4, round((raw_frames - 1) / self.temporal_stride))
+        num_frames = min(self.max_frames, k_blocks * self.temporal_stride + 1)
+
+        width = snap_to_step(request.width or self.settings.get("width", 848), step=self.spatial_stride, default=848)
+        height = snap_to_step(request.height or self.settings.get("height", 480), step=self.spatial_stride, default=480)
+        seed = random.randint(1, 10**14) if request.seed in (-1, None) else int(request.seed)
+        steps = int(request.steps or self.settings.get("steps") or default_steps)
+        cfg = float(request.cfg if request.cfg is not None else (self.settings.get("cfg") or default_cfg))
+        sampler_name = str(request.sampler or self.settings.get("sampler") or default_sampler).strip().lower()
+        scheduler = str(self.settings.get("scheduler") or default_scheduler).strip().lower()
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        req_hash = uuid.uuid4().hex[:6]
+        prefix_str = request.run_prefix or f"{timestamp}-{req_hash}"
+        out_video_name = request.out_video_name or f"{prefix_str}-hunyuan.mp4"
+
+        # Verify anchor image for I2V
+        image_path = request.image_path
+        if not image_path or not Path(image_path).is_file():
+            return GenerationResult(success=False, error=f"Anchor image is required for HunyuanVideo I2V generation (got: {image_path})")
+
+        try:
+            uploaded_image_name = comfy_client.upload_file_to_comfy(
+                image_path,
+                run_prefix=prefix_str,
+                suffix="anchor"
+            )
+        except Exception as ex:
+            return GenerationResult(success=False, error=f"Failed to upload anchor image {image_path} to ComfyUI: {ex}")
+
+        # Multipliers
+        fps_mult = max(1, int(request.fps_multiplier or 1))
+        size_mult = float(request.size_multiplier or 1.0)
+        base_fps = int(request.fps or self.default_fps)
+        final_fps = base_fps * fps_mult
+
+        wf: Dict[str, Any] = {
+            "unet_loader": {
+                "class_type": "UNETLoader",
+                "inputs": {
+                    "unet_name": unet_name,
+                    "weight_dtype": request.weight_dtype or "default"
+                }
+            },
+            "clip_loader": {
+                "class_type": "DualCLIPLoader",
+                "inputs": {
+                    "clip_name1": text_enc1,
+                    "clip_name2": text_enc2,
+                    "type": "hunyuan_video_15"
+                }
+            },
+            "vae_loader": {
+                "class_type": "VAELoader",
+                "inputs": {
+                    "vae_name": vae_name
+                }
+            },
+            "clip_vision_loader": {
+                "class_type": "CLIPVisionLoader",
+                "inputs": {
+                    "clip_name": clip_vision_name
+                }
+            },
+            "load_image": {
+                "class_type": "LoadImage",
+                "inputs": {
+                    "image": uploaded_image_name
+                }
+            },
+            "clip_vision_encode": {
+                "class_type": "CLIPVisionEncode",
+                "inputs": {
+                    "clip_vision": ["clip_vision_loader", 0],
+                    "image": ["load_image", 0],
+                    "crop": "center"
+                }
+            },
+            "positive": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {
+                    "clip": ["clip_loader", 0],
+                    "text": request.prompt.strip()
+                }
+            },
+            "negative": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {
+                    "clip": ["clip_loader", 0],
+                    "text": (request.negative_prompt or "").strip()
+                }
+            },
+            "hunyuan_i2v": {
+                "class_type": "HunyuanVideo15ImageToVideo",
+                "inputs": {
+                    "positive": ["positive", 0],
+                    "negative": ["negative", 0],
+                    "vae": ["vae_loader", 0],
+                    "width": width,
+                    "height": height,
+                    "length": num_frames,
+                    "batch_size": 1,
+                    "start_image": ["load_image", 0],
+                    "clip_vision_output": ["clip_vision_encode", 0]
+                }
+            }
+        }
+
+        # Dynamic LoRA chaining on UNET
+        cur_model = ["unet_loader", 0]
+        if request.loras:
+            lora_idx = 1
+            for lora_entry in request.loras:
+                l_name = lora_entry.get("name", "").strip()
+                l_strength = float(lora_entry.get("strength", 1.0))
+                if l_name and l_name.lower() not in ("none", "disabled", "false", ""):
+                    lora_fn = l_name if l_name.endswith(".safetensors") else f"{l_name}.safetensors"
+                    node_key = f"lora_{lora_idx}"
+                    wf[node_key] = {
+                        "class_type": "LoraLoaderModelOnly",
+                        "inputs": {
+                            "model": cur_model,
+                            "lora_name": lora_fn,
+                            "strength_model": l_strength
+                        }
+                    }
+                    cur_model = [node_key, 0]
+                    lora_idx += 1
+
+        # Model sampling shift
+        wf["model_sampling"] = {
+            "class_type": "ModelSamplingSD3",
+            "inputs": {
+                "model": cur_model,
+                "shift": shift
+            }
+        }
+
+        wf["sampler"] = {
+            "class_type": "KSampler",
+            "inputs": {
+                "model": ["model_sampling", 0],
+                "positive": ["hunyuan_i2v", 0],
+                "negative": ["hunyuan_i2v", 1],
+                "latent_image": ["hunyuan_i2v", 2],
+                "seed": seed,
+                "steps": steps,
+                "cfg": cfg,
+                "sampler_name": sampler_name,
+                "scheduler": scheduler,
+                "denoise": 1.0
+            }
+        }
+
+        wf["vae_decode"] = {
+            "class_type": "VAEDecode",
+            "inputs": {
+                "samples": ["sampler", 0],
+                "vae": ["vae_loader", 0]
+            }
+        }
+
+        video_images_input = ["vae_decode", 0]
+        if size_mult != 1.0:
+            target_w = snap_to_step(int(width * size_mult), step=self.spatial_stride, default=width)
+            target_h = snap_to_step(int(height * size_mult), step=self.spatial_stride, default=height)
+            wf["scale_core"] = {
+                "inputs": {
+                    "images": ["vae_decode", 0],
+                    "upscale_method": "lanczos",
+                    "width": target_w,
+                    "height": target_h,
+                    "crop": "disabled"
+                },
+                "class_type": "ImageScale"
+            }
+            video_images_input = ["scale_core", 0]
+
+        wf["create_video"] = {
+            "class_type": "CreateVideo",
+            "inputs": {
+                "images": video_images_input,
+                "fps": final_fps
+            }
+        }
+        wf["save_video"] = {
+            "class_type": "SaveVideo",
+            "inputs": {
+                "video": ["create_video", 0],
+                "filename_prefix": prefix_str,
+                "format": "mp4",
+                "codec": "h264"
+            }
+        }
+
+        # Tail latent slicing (LatentCut)
+        if request.save_tail and request.tail_frames > 0:
+            wf["cut_tail_latent"] = {
+                "class_type": "LatentCut",
+                "inputs": {
+                    "samples": ["sampler", 0],
+                    "dim": "t",
+                    "index": -int(request.tail_frames),
+                    "amount": int(request.tail_frames)
+                }
+            }
+            wf["save_tail_latent"] = {
+                "class_type": "SaveLatent",
+                "inputs": {
+                    "samples": ["cut_tail_latent", 0],
+                    "filename_prefix": f"{prefix_str}-tail"
+                }
+            }
+
+        # Tail image slicing
+        if request.save_tail_image:
+            wf["slice_tail_image"] = {
+                "class_type": "ImageFromBatch",
+                "inputs": {
+                    "image": ["vae_decode", 0],
+                    "batch_index": int(num_frames - 1),
+                    "length": 1
+                }
+            }
+            wf["save_tail_image"] = {
+                "class_type": "SaveImage",
+                "inputs": {
+                    "images": ["slice_tail_image", 0],
+                    "filename_prefix": f"{prefix_str}-tail"
+                }
+            }
 
         return self._execute_comfy_workflow(
             wf=wf,
