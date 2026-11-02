@@ -20,6 +20,7 @@ from .base import (
 from .image_generators import (
     BaseImageGenerator,
     SdxlImageGenerator,
+    SdxlComfyImageGenerator,
     Flux1ImageGenerator,
     Flux2ImageGenerator,
     set_image_progress_callback,
@@ -31,6 +32,7 @@ from .video_generators import (
     WanFastVideoGenerator,
     WanFullVideoGenerator,
     LtxVideoGenerator,
+    HunyuanVideoGenerator,
 )
 
 from .factory import (
@@ -56,6 +58,7 @@ __all__ = [
     "snap_to_64",
     "BaseImageGenerator",
     "SdxlImageGenerator",
+    "SdxlComfyImageGenerator",
     "Flux1ImageGenerator",
     "Flux2ImageGenerator",
     "set_image_progress_callback",
@@ -64,6 +67,7 @@ __all__ = [
     "WanFastVideoGenerator",
     "WanFullVideoGenerator",
     "LtxVideoGenerator",
+    "HunyuanVideoGenerator",
     "IMAGE_GENERATOR_REGISTRY",
     "VIDEO_GENERATOR_REGISTRY",
     "create_image_generator",

@@ -40,7 +40,7 @@
       "properties": {
         "engine": {
           "type": "string",
-          "enum": ["sdxl", "flux1", "flux2"],
+          "enum": ["sdxl", "sdxl-comfy", "flux1", "flux2"],
           "description": "Anchor image generation engine"
         },
         "model": {
@@ -147,7 +147,7 @@
       "properties": {
         "engine": {
           "type": "string",
-          "enum": ["wan-fast", "wan-full", "ltx"],
+          "enum": ["wan-fast", "wan-full", "ltx", "hunyuan"],
           "description": "Video generation engine"
         },
         "model": {

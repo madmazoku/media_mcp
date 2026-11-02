@@ -34,7 +34,7 @@
     },
     "engine": {
       "type": "string",
-      "enum": ["sdxl", "flux1", "flux2"],
+      "enum": ["sdxl", "sdxl-comfy", "flux1", "flux2"],
       "default": "sdxl",
       "description": "Image generation engine"
     },

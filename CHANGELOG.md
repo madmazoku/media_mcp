@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Each release version `0.<N>.0` directly corresponds to task **AI-<N>**.
 
+## [0.18.0] - 2026-11-02 (AI-18)
+
+### Added
+- **HunyuanVideo 1.5 Video Generator (`hunyuan`)**:
+  - Implemented `HunyuanVideoGenerator(BaseVideoGenerator)` communicating with ComfyUI.
+  - Configures `DualCLIPLoader` (`type="hunyuan_video_15"` combining `Qwen-2.5-VL-7B` and `ByT5-small` glyph text encoders), `UNETLoader`, `VAELoader`, `CLIPVisionLoader` (SigLIP), and `HunyuanVideo15ImageToVideo` 32-channel latent conditioning.
+  - Implemented ModelSamplingSD3 (`shift=7.0`), dynamic LoRA chaining via `LoraLoaderModelOnly`, `KSampler`, and `VAEDecode`.
+  - Added temporal frame quantization to nearest $4k+1$ step (`temporal_stride=4`, `spatial_stride=16`, `default_fps=24`, `native_horizon_frames=81`, `max_frames=129`).
+  - Native 5D latent video block chaining and tail frame slicing via `LatentCut` and `ImageFromBatch`.
+- **SDXL ComfyUI Image Generator (`sdxl-comfy`)**:
+  - Implemented `SdxlComfyImageGenerator(BaseImageGenerator)` communicating with ComfyUI checkpoint loader (`spatial_stride=64`, `default_cfg=7.0`).
+  - Supports `txt2img` via `EmptyLatentImage`, `img2img` via `LoadImage` + `VAEEncode`, and `inpaint` via `LoadImageMask` + `SetLatentNoiseMask`.
+  - Dedicated LoRA discovery and chaining in ComfyUI (`models/loras/`) strictly isolated from Automatic1111.
+  - Added `test_09_hunyuan_and_sdxl_comfy.py` unit test suite covering schema validation, factory instantiation, LoRA chaining, frame snapping, and workflow generation.
+
+### Changed
+- **Pure Strategy-Driven Architecture & Parameter Encapsulation**:
+  - Moved default hyperparameters (`default_cfg`, `default_guidance`, `default_steps`, `default_sampler`, `default_scheduler`), spatial/temporal strides, and native horizon frames into strategy class attributes across all image and video generators.
+  - Replaced procedural engine checks and ad-hoc `if/elif` branches in `image_engine.py` with direct delegation to `IMAGE_GENERATOR_REGISTRY` and strategy attributes.
+  - Removed all hidden engine synonyms and aliases (e.g. mapping `flux` to `flux1`); unknown engines fail immediately with explicit allowed values.
+  - Polymorphic `get_samplers(cls, model: str = "")` on all strategy classes; `discovery.get_samplers_for_model()` delegates directly to strategy without engine `if/elif` branches.
+  - Strategy-level LoRA policy encapsulation (`allow_unclassified_loras: bool`); `discovery.get_loras_for_model()` delegates compatibility checks directly to `gen_cls.matches_lora()`.
+  - Replaced engine name string prefix checks (`b_engine_raw.startswith("wan")`) in `video_pipeline.py` with `get_video_generator_class().native_horizon_frames` and `snap_dimensions()`.
+
 ## [0.17.0] - 2026-11-01 (AI-17)
 
 ### Added

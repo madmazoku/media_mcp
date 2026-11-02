@@ -812,10 +812,7 @@ def execute_scenario_pipeline(
                         if isinstance(raw_horizon, int):
                             horizon_frames = raw_horizon
                         else:
-                            try:
-                                horizon_frames = get_video_generator_class(b_engine_raw).native_horizon_frames
-                            except Exception:
-                                horizon_frames = 81 if b_engine_raw.startswith("wan") else 257
+                            horizon_frames = get_video_generator_class(b_engine_raw).native_horizon_frames
                         if num_frames > horizon_frames:
                             log(
                                 f"Warning: [{scene_name} : {b_name}] Total block frames ({num_frames}) exceeds {generator.name.upper()} native training horizon "
@@ -963,12 +960,8 @@ def execute_scenario_pipeline(
         fps_mult = max(1, int(effective_vid.get("fps_multiplier") or 1))
         size_mult = float(effective_vid.get("size_multiplier") if effective_vid.get("size_multiplier") is not None else 1.0)
         final_fps = int(round(fps * fps_mult))
-        try:
-            v_gen_cls = get_video_generator_class(v_engine)
-            final_w, final_h = v_gen_cls.snap_dimensions(int(round(width * size_mult)), int(round(height * size_mult)))
-        except Exception:
-            final_w = snap_to_16(int(round(width * size_mult))) if v_engine.startswith("wan") else snap_to_32(int(round(width * size_mult)))
-            final_h = snap_to_16(int(round(height * size_mult))) if v_engine.startswith("wan") else snap_to_32(int(round(height * size_mult)))
+        v_gen_cls = get_video_generator_class(v_engine)
+        final_w, final_h = v_gen_cls.snap_dimensions(int(round(width * size_mult)), int(round(height * size_mult)))
 
         poster_filename = f"{run_prefix}-poster.png"
         out_img_dir = Path(config.OUTPUT_IMG_DIR) if config.OUTPUT_IMG_DIR and Path(config.OUTPUT_IMG_DIR).is_dir() else (temp_dir / "images")

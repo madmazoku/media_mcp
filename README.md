@@ -2,7 +2,7 @@
 
 Универсальный фреймворк и единый сервер **Model Context Protocol (MCP)** для генерации изображений и последовательного многоблочного видео.
 
-Разработан для работы с **ComfyUI** (FLUX.1 Dev, FLUX.2 Klein, Wan 2.2 I2V, LTX-Video) и **Automatic1111 WebUI** (SD 1.5, SDXL, Pony, Illustrious).
+Разработан для работы с **ComfyUI** (FLUX.1 Dev, FLUX.2 Klein, SDXL Comfy, Wan 2.2 I2V, LTX-Video, HunyuanVideo 1.5) и **Automatic1111 WebUI** (SD 1.5, SDXL, Pony, Illustrious).
 
 Поддерживает интеграцию с **Google Antigravity**, **Open-WebUI**, **Cursor**, **ChatGPT Agent**, **Claude Desktop** и **Grok**.
 
@@ -18,17 +18,17 @@
    - Единые инвариантные контракты входа и выхода для CLI, Stdio MCP и HTTP SSE.
    - Выделенный инструмент `media_reload_modules` для горячей перезагрузки модулей ядра в топологическом порядке зависимостей без перезапуска процесса сервера.
 3. **Единый пайплайн оптимального разрешения (~1.0 MP) для всех движков изображений:**
-   - Все генераторы (`sdxl`, `flux1`, `flux2` с профилями Dev/Klein 9B/Klein 4B) во всех режимах (`txt2img`, `img2img`, `inpaint`, `outpaint`) всегда выполняют диффузию в оптимальном нативном разрешении ~1.0 MP с сохранением пропорций (`native_width` x `native_height`, шаг квантования `64px` для SDXL UNet и `16px` для FLUX DiT), после чего результат масштабируется (Lanczos) к запрошенному размеру `width` x `height`.
+   - Все генераторы (`sdxl`, `sdxl-comfy`, `flux1`, `flux2` с профилями Dev/Klein 9B/Klein 4B) во всех режимах (`txt2img`, `img2img`, `inpaint`, `outpaint`) всегда выполняют диффузию в оптимальном нативном разрешении ~1.0 MP с сохранением пропорций (`native_width` x `native_height`, шаг квантования `64px` для SDXL UNet и `16px` для FLUX DiT), после чего результат масштабируется (Lanczos) к запрошенному размеру `width` x `height`.
    - При запросе апскейла свыше 1.1 MP или экстремального соотношения сторон (`> 2.4:1`) возвращается информативное поле `warnings`.
 4. **True Forced Prefix Conditioning (5D Latent-Chaining):**
-   - Непрерывное сохранение динамики сцены внутри монтажа для `wan-fast`, `wan-full` и `ltx`: при `overlap > 0` хвост предыдущего блока (`-tail.latent`) отрезается через `LatentCut` и передаётся в следующий блок через 5D-ноды `WanLatentPrefixLock` / `WanLatentPrefixRestore` (для Wan) и in-canvas ноду `LTXLatentPrefixToVideo` (для LTX) без промежуточного декодирования в пиксели. При `overlap == 0.0` (дефолт) используется бесшовная 1-кадровая сцепка по последнему кадру (`-tail.png`).
+   - Непрерывное сохранение динамики сцены внутри монтажа для `wan-fast`, `wan-full`, `ltx` и `hunyuan`: при `overlap > 0` хвост предыдущего блока (`-tail.latent`) отрезается через `LatentCut` и передаётся в следующий блок через 5D-ноды `WanLatentPrefixLock` / `WanLatentPrefixRestore` (для Wan) и in-canvas ноду `LTXLatentPrefixToVideo` (для LTX) без промежуточного декодирования в пиксели. При `overlap == 0.0` (дефолт) используется бесшовная 1-кадровая сцепка по последнему кадру (`-tail.png`).
 5. **Чистовая основа блоков и Stream Copy (-c copy):**
    - Чистовая основа каждого блока (`-core.mp4`) сохраняется напрямую в H.264. Финальная сборка всех блоков в FFmpeg происходит через мгновенный **Stream Copy (`-c copy`) без перекодирования**.
 6. **Временная и пространственная постобработка (`fps_multiplier`, `size_multiplier`):**
-   - Поддержка темпоральной интерполяции кадров через RIFE VFI (`rife47.pth`, целочисленный множитель $\ge 1$) и быстрого пространственного масштабирования через ComfyUI `ImageScale` (`lanczos`, множитель $\ge 1.0$) с квантованием размеров по 16px (Wan) / 32px (LTX).
+   - Поддержка темпоральной интерполяции кадров через RIFE VFI (`rife47.pth`, целочисленный множитель $\ge 1$) и быстрого пространственного масштабирования через ComfyUI `ImageScale` (`lanczos`, множитель $\ge 1.0$) с квантованием размеров по 16px (Wan/Hunyuan) / 32px (LTX).
    - Архитектурная изоляция: хвосты связывания (`-tail.latent`, `-tail.png`) отбираются строго до апскейла и VFI, исключая рекурсивное накопление артефактов.
 7. **Zero-VRAM Discovery, бандлы Wan 2.2 и парсинг триггеров LoRA:**
-   - Автоматическая классификация архитектур моделей и LoRA (`sdxl`, `flux1`, `flux2`, `wan-fast`, `wan-full`, `ltx`) по бинарным заголовкам `.safetensors` (`<0.5ms`, без зависимости от `torch`).
+   - Автоматическая классификация архитектур моделей и LoRA (`sdxl`, `sdxl-comfy`, `flux1`, `flux2`, `wan-fast`, `wan-full`, `ltx`, `hunyuan`) по бинарным заголовкам `.safetensors` (`<0.5ms`, без зависимости от `torch`).
    - Автоматическая группировка парных моделей `high_noise` и `low_noise` для `wan-fast` и `wan-full` в единый канонический идентификатор бандла (например, `wan2.2_i2v_14B_fp8_scaled.safetensors`).
    - Извлечение триггерных слов LoRA из заголовков `.safetensors` и sidecar-файлов (`.json`, `.civitai.info`) для всех движков.
 
@@ -140,7 +140,7 @@ media_mcp/
 ### 1. Генерация медиа
 - **`image_generate`** (`schemas/requests/image_generate.json`):
   - Принимает параметры генерации изображения:
-    - `engine` *(`"sdxl"` | `"flux1"` | `"flux2"`, **обязателен**)*.
+    - `engine` *(`"sdxl"` | `"sdxl-comfy"` | `"flux1"` | `"flux2"`, **обязателен**)*.
     - `model` *(string, **обязателен**)*: имя файла модели/чекпоинта из `media_get_models`.
     - `prompt` *(string, **обязателен**)*: текстовый промпт (передаётся в модель без скрытых авто-префиксов).
     - `width`, `height` *(int, по умолчанию 1024x1024)*. Диффузия всегда выполняется в оптимальном разрешении ~1.0 MP (`native_width` x `native_height`) с тем же соотношением сторон, затем изображение приводится к целевому `(width, height)`.
@@ -168,19 +168,21 @@ media_mcp/
 
 ### 2. Инспекция и обнаружение моделей (Discovery)
 - **`media_get_models`** (`schemas/requests/media_get_models.json`):
-  - Опциональные фильтры: `type` (`"image"` | `"video"`), `engine` (`"sdxl"`, `"flux1"`, `"flux2"`, `"wan-fast"`, `"wan-full"`, `"ltx"`).
+  - Опциональные фильтры: `type` (`"image"` | `"video"`), `engine` (`"sdxl"`, `"sdxl-comfy"`, `"flux1"`, `"flux2"`, `"wan-fast"`, `"wan-full"`, `"ltx"`, `"hunyuan"`).
   - Возвращает инвариантное дерево моделей (для `wan-fast` и `wan-full` парные файлы `high_noise` + `low_noise` группируются в канонический идентификатор бандла):
     ```json
     {
       "image": {
         "sdxl": ["ponyDiffusionV6XL_v6StartWithThis.safetensors"],
+        "sdxl-comfy": ["sd_xl_base_1.0.safetensors"],
         "flux1": ["persephoneFlux1Dev_v10FP8.safetensors"],
         "flux2": ["aishaNSFWFlux2Klein9B_v11Fp8.safetensors"]
       },
       "video": {
         "wan-fast": ["wan2.2_i2v_14B_fp8_scaled.safetensors"],
         "wan-full": ["wan2.2_i2v_14B_fp8_scaled.safetensors"],
-        "ltx": ["ltx-video-2b-v0.9.5.safetensors"]
+        "ltx": ["ltx-video-2b-v0.9.5.safetensors"],
+        "hunyuan": ["hunyuanvideo1.5_720p_i2v_fp16.safetensors"]
       }
     }
     ```
@@ -249,7 +251,7 @@ media_mcp/
 Блок $i$ получает хвост предыдущего блока $\text{prefix\_duration} = \text{overlap}_{i-1}$ (для первого блока сцены $\text{prefix\_duration} = 0$), диффундирует суммарное окно $\text{prefix\_duration} + \text{clip\_duration}$, отсекает префикс через `ImageFromBatch` и отдаёт в финальную склейку ровно $\text{clip\_duration}$ чистого видео:
 1. **Хвост меньше самого клипа:**
    $$\text{overlap\_duration} < \text{clip\_duration}$$
-2. **Суммарное окно генерации строго меньше лимита движка по кадрам (`ENGINE_MAX_FRAMES`: 97 кадров для `wan-fast`/`wan-full` и 385 кадров для `ltx`):**
+2. **Суммарное окно генерации строго меньше лимита движка по кадрам (`ENGINE_MAX_FRAMES`: 97 кадров для `wan-fast`/`wan-full`, 385 кадров для `ltx`, 129 кадров для `hunyuan`):**
    $$\text{prefix\_frames} + \text{clip\_frames} < \text{ENGINE\_MAX\_FRAMES}[\text{engine}]$$
    Динамический лимит длительности в секундах: $\text{limit\_sec} = (N_{\text{max}} - 1) / \text{fps}$ (например, для Wan: 6.0с при 16 fps, 8.0с при 12 fps; для LTX: 16.0с при 24 fps).
 3. **Итоговая длительность сцены:** равна чистой сумме $\sum \text{clip\_duration}$ всех блоков сцены.

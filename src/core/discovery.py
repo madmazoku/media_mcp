@@ -25,14 +25,15 @@ from .lora_inspector import (
 )
 
 
+
 def log(msg: str):
     sys.stderr.write(f"[discovery] {msg}\n")
     sys.stderr.flush()
 
 
 # Canonical engine declarations
-IMAGE_ENGINES = ("sdxl", "flux1", "flux2")
-VIDEO_ENGINES = ("wan-fast", "wan-full", "ltx")
+IMAGE_ENGINES = ("sdxl", "sdxl-comfy", "flux1", "flux2")
+VIDEO_ENGINES = ("wan-fast", "wan-full", "ltx", "hunyuan")
 
 _WAN_HIGH_LOW_RGX = re.compile(r"([_-]?)(high|low)(_noise)?(?=[_.-])", re.IGNORECASE)
 
@@ -209,6 +210,16 @@ def get_models_tree(type_filter: Optional[str] = None, engine_filter: Optional[s
                 log(f"Notice: Failed to fetch A1111 models: {ex}")
                 img_branch["sdxl"] = []
 
+        # SDXL (ComfyUI)
+        if not e_filter or e_filter == "sdxl-comfy":
+            try:
+                ckpts = _get_ckpts()
+                sdxl_c_list = [c for c in ckpts if _classify_comfy_model(c) in ("sdxl", "pony")]
+                img_branch["sdxl-comfy"] = sdxl_c_list
+            except Exception as ex:
+                log(f"Notice: Failed to fetch ComfyUI SDXL models: {ex}")
+                img_branch["sdxl-comfy"] = []
+
         # FLUX.1 Dev (ComfyUI)
         if not e_filter or e_filter == "flux1":
             try:
@@ -258,6 +269,16 @@ def get_models_tree(type_filter: Optional[str] = None, engine_filter: Optional[s
                 log(f"Notice: Failed to fetch ComfyUI Wan Full models: {ex}")
                 vid_branch["wan-full"] = []
 
+        # HunyuanVideo 1.5 (ComfyUI)
+        if not e_filter or e_filter == "hunyuan":
+            try:
+                unets = _get_unets()
+                hunyuan_list = [u for u in unets if _classify_comfy_model(u) == "hunyuan"]
+                vid_branch["hunyuan"] = hunyuan_list
+            except Exception as ex:
+                log(f"Notice: Failed to fetch ComfyUI Hunyuan models: {ex}")
+                vid_branch["hunyuan"] = []
+
         # LTX-2.3 22B / Sulphur (ComfyUI)
         if not e_filter or e_filter == "ltx":
             try:
@@ -281,39 +302,18 @@ def get_samplers_for_model(engine: str, model: str) -> List[str]:
     Returns a sorted list of valid samplers for the given engine and model.
     The most recommended sampler for the model architecture is placed FIRST at index 0.
     """
+    from .generators.factory import IMAGE_GENERATOR_REGISTRY, VIDEO_GENERATOR_REGISTRY
     eng = str(engine).strip().lower()
-    mod = str(model).strip().lower()
+    mod = str(model).strip()
 
-    if eng in ("flux1", "flux2"):
-        return ["euler"]
-    if eng in ("wan-fast", "wan-full"):
-        return ["euler", "uni_pc"]
-    if eng == "ltx":
-        return ["euler"]
+    if eng in IMAGE_GENERATOR_REGISTRY:
+        gen_cls = IMAGE_GENERATOR_REGISTRY[eng]
+    elif eng in VIDEO_GENERATOR_REGISTRY:
+        gen_cls = VIDEO_GENERATOR_REGISTRY[eng]
+    else:
+        raise ValueError(f"Unsupported engine '{engine}' for sampler discovery.")
 
-    # For SDXL / Pony in A1111: query server
-    try:
-        raw_samplers = a1111_client.get_samplers()
-        sampler_names = [s.get("name") for s in raw_samplers if s.get("name")]
-    except Exception as ex:
-        log(f"Notice: Failed to fetch A1111 samplers dynamically: {ex}")
-        sampler_names = [
-            "Euler a", "Euler", "DPM++ 2M Karras", "DPM++ SDE Karras",
-            "DPM++ 2S a Karras", "Restart", "UniPC", "DDIM"
-        ]
-
-    # Prioritization: Pony models recommend "Euler a", standard SDXL recommends "Euler" or "DPM++ 2M Karras"
-    is_pony = "pony" in mod or "score_" in mod
-    preferred = "Euler a" if is_pony else "Euler"
-
-    sorted_samplers = []
-    if preferred in sampler_names:
-        sorted_samplers.append(preferred)
-    for s in sampler_names:
-        if s not in sorted_samplers:
-            sorted_samplers.append(s)
-
-    return sorted_samplers
+    return gen_cls.get_samplers(mod)
 
 
 def get_loras_for_model(engine: str, model: str, pattern: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -328,19 +328,25 @@ def get_loras_for_model(engine: str, model: str, pattern: Optional[str] = None) 
     Extracts trigger words and architecture compatibility from .safetensors headers.
     If 'pattern' is provided, filters case-insensitively using Python regex against name and triggers.
     """
+    from .generators.factory import IMAGE_GENERATOR_REGISTRY, VIDEO_GENERATOR_REGISTRY
     eng = str(engine).strip().lower()
     mod = str(model).strip()
 
-    # 1. ComfyUI Engines (flux1, flux2, wan-fast, wan-full, ltx)
-    if eng in ("flux1", "flux2", "wan-fast", "wan-full", "ltx"):
-        expected_arch = "wan" if eng in ("wan-fast", "wan-full") else eng
+    if eng in IMAGE_GENERATOR_REGISTRY:
+        gen_cls = IMAGE_GENERATOR_REGISTRY[eng]
+    elif eng in VIDEO_GENERATOR_REGISTRY:
+        gen_cls = VIDEO_GENERATOR_REGISTRY[eng]
+    else:
+        raise ValueError(f"Unsupported engine '{engine}' for LoRA discovery.")
+
+    results = []
+    if gen_cls.service == "comfyui":
         try:
             raw_loras = comfy_client.get_loras()
         except Exception as ex:
             log(f"Notice: Failed to fetch ComfyUI LoRAs: {ex}")
             raw_loras = []
 
-        results = []
         for l_name in raw_loras:
             clean_name = Path(l_name).stem
             full_path = _locate_comfy_file(l_name, ("loras",))
@@ -349,12 +355,12 @@ def get_loras_for_model(engine: str, model: str, pattern: Optional[str] = None) 
             if not isinstance(meta, dict):
                 meta = {}
 
-            lora_arch = detect_lora_architecture(meta, filepath=full_path or l_name, header=header)
-            if eng == "flux2":
-                # Only allow explicitly identified flux2 LoRAs on flux2 (never unknown or flux1)
-                if lora_arch != "flux2":
-                    continue
-            elif lora_arch not in (expected_arch, "unknown"):
+            is_match = gen_cls.matches_lora(header=header, meta=meta, filename=full_path or l_name)
+            if not is_match:
+                arch = detect_lora_architecture(meta, filepath=full_path or l_name, header=header)
+                if arch == "unknown" and getattr(gen_cls, "allow_unclassified_loras", False):
+                    is_match = True
+            if not is_match:
                 continue
 
             triggers = extract_triggers_from_metadata(meta, filepath=full_path)
@@ -363,16 +369,13 @@ def get_loras_for_model(engine: str, model: str, pattern: Optional[str] = None) 
                 "triggers": triggers
             })
 
-    # 2. A1111 SDXL / Pony LoRAs
-    elif eng == "sdxl":
-        target_arch = detect_checkpoint_architecture(mod)
+    elif gen_cls.service == "automatic1111":
         try:
             raw_a1111_loras = a1111_client.get_loras()
         except Exception as ex:
             log(f"Notice: Failed to fetch A1111 LoRAs: {ex}")
             raw_a1111_loras = []
 
-        results = []
         for lora_obj in raw_a1111_loras:
             l_name = lora_obj.get("name") or ""
             l_path = lora_obj.get("path") or ""
@@ -387,13 +390,13 @@ def get_loras_for_model(engine: str, model: str, pattern: Optional[str] = None) 
             else:
                 meta = lora_obj.get("metadata") or {}
 
-            lora_arch = detect_lora_architecture(meta, filepath=l_path or l_name, header=header)
-            if target_arch in ("pony", "sdxl"):
-                if lora_arch in ("sd15", "flux1", "flux2", "wan", "ltx"):
-                    continue
-            elif target_arch == "sd15":
-                if lora_arch in ("sdxl", "flux1", "flux2", "wan", "ltx"):
-                    continue
+            is_match = gen_cls.matches_lora(header=header, meta=meta, filename=l_path or l_name)
+            if not is_match:
+                arch = detect_lora_architecture(meta, filepath=l_path or l_name, header=header)
+                if arch == "unknown" and getattr(gen_cls, "allow_unclassified_loras", False):
+                    is_match = True
+            if not is_match:
+                continue
 
             triggers = extract_triggers_from_metadata(meta, filepath=l_path)
             results.append({
@@ -401,7 +404,7 @@ def get_loras_for_model(engine: str, model: str, pattern: Optional[str] = None) 
                 "triggers": triggers
             })
     else:
-        raise ValueError(f"Unsupported engine '{engine}' for LoRA discovery.")
+        raise ValueError(f"Unsupported service '{gen_cls.service}' for engine '{engine}'")
 
     if pattern:
         try:

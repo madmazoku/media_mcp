@@ -20,6 +20,8 @@ from typing import Dict, Any, Optional, Tuple, List
 from . import config
 from .generators import (
     create_image_generator,
+    get_image_generator_class,
+    IMAGE_GENERATOR_REGISTRY,
     ImageRequest,
     snap_to_16,
     set_image_progress_callback,
@@ -157,14 +159,15 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
     raw_engine = str(params.get("engine") or "").strip().lower()
     if not raw_engine:
         return False, None, None, {"error": "Parameter 'engine' is required for image generation"}
-    if "flux2" in raw_engine:
-        engine_name = "flux2"
-    elif "flux" in raw_engine:
-        engine_name = "flux1"
-    elif raw_engine == "sdxl":
-        engine_name = "sdxl"
-    else:
-        return False, None, None, {"error": f"Unsupported image engine '{raw_engine}'. Allowed: 'sdxl', 'flux1', 'flux2'."}
+
+    if raw_engine not in IMAGE_GENERATOR_REGISTRY:
+        allowed = list(IMAGE_GENERATOR_REGISTRY.keys())
+        return False, None, None, {
+            "error": f"Unsupported image engine '{raw_engine}'. Allowed values: {allowed}"
+        }
+
+    engine_name = raw_engine
+    gen_cls = IMAGE_GENERATOR_REGISTRY[raw_engine]
 
     model = str(params.get("model") or params.get("checkpoint") or "").strip()
     if not model:
@@ -175,9 +178,11 @@ def generate_image(params: Dict[str, Any]) -> Tuple[bool, Optional[str], Optiona
     negative_prompt = params.get("negative_prompt", "")
     sampler = params.get("sampler") or params.get("sampler_name")
 
-    default_cfg = 7.0 if engine_name == "sdxl" else 1.0
+    resolved_defaults = gen_cls.resolve_components(model, settings=params) if hasattr(gen_cls, "resolve_components") else {}
+    default_cfg = resolved_defaults.get("cfg", gen_cls.default_cfg)
     cfg_val = float(params.get("cfg", default_cfg))
-    guidance_val = float(params.get("guidance", 3.5 if "flux" in engine_name else cfg_val))
+    default_guidance = resolved_defaults.get("guidance", gen_cls.default_guidance if gen_cls.default_guidance is not None else cfg_val)
+    guidance_val = float(params.get("guidance", default_guidance))
 
     loras: Optional[List[Dict[str, Any]]] = None
     if "loras" in params and isinstance(params["loras"], list):
